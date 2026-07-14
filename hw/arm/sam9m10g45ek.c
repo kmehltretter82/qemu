@@ -1467,6 +1467,7 @@ static const TypeInfo hsmci_types[] = {
 #define LCDC_DMACON     0x1C
 #define LCDC_LCDCON1    0x0800
 #define LCDC_LCDCON2    0x0804
+#define LCDC_LCDFRMCFG  0x0810
 #define LCDC_PWRCON     0x083C
 #define LCDC_IER        0x0848
 #define LCDC_IDR        0x084C
@@ -1493,42 +1494,97 @@ struct AT91LcdcState {
     uint32_t dmafrmcfg;
     uint32_t dmacon;
     uint32_t lcdcon1, lcdcon2;
+    uint32_t lcdfrmcfg;
     uint32_t pwrcon;
     uint32_t imr;
     bool invalidate;
 };
+
+/* Derive geometry (LCDFRMCFG) and pixel depth (LCDCON2 PIXELSIZE) from the
+ * programmed registers.  Falls back to the board panel if unprogrammed. */
+static void lcdc_get_mode(AT91LcdcState *s, int *width, int *height, int *bpp)
+{
+    static const int pixelsize[8] = { 1, 2, 4, 8, 16, 24, 32, 32 };
+    int w = ((s->lcdfrmcfg >> 21) & 0x7ff) + 1;   /* HOZVAL  + 1 */
+    int h = (s->lcdfrmcfg & 0x7ff) + 1;           /* LINEVAL + 1 */
+
+    if (w <= 1 || h <= 1) {
+        w = LCDC_WIDTH;
+        h = LCDC_HEIGHT;
+    }
+    *width = w;
+    *height = h;
+    *bpp = pixelsize[(s->lcdcon2 >> 5) & 0x7];
+}
 
 static bool lcdc_enabled(AT91LcdcState *s)
 {
     return (s->pwrcon & LCDC_PWRCON_PWR) && s->dmabaddr1 != 0;
 }
 
+/* Convert one scanline of guest pixels (any supported LCDC depth) into the
+ * console's xRGB surface.  The straight 32bpp path assumes guest xRGB == host
+ * surface format (true on the LE hosts this board runs on). */
+static void lcdc_convert_line(uint32_t *dst, const uint8_t *src, int w, int bpp)
+{
+    int x;
+
+    switch (bpp) {
+    case 32:
+        memcpy(dst, src, (size_t)w * 4);
+        break;
+    case 24:
+        for (x = 0; x < w; x++) {
+            uint8_t b = src[3 * x], g = src[3 * x + 1], r = src[3 * x + 2];
+            dst[x] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+        }
+        break;
+    case 16:                                     /* RGB565 */
+        for (x = 0; x < w; x++) {
+            uint16_t v = ((const uint16_t *)src)[x];
+            uint8_t r = (v >> 11) & 0x1f, g = (v >> 5) & 0x3f, b = v & 0x1f;
+            dst[x] = ((uint32_t)((r << 3) | (r >> 2)) << 16) |
+                     ((uint32_t)((g << 2) | (g >> 4)) << 8) |
+                     ((b << 3) | (b >> 2));
+        }
+        break;
+    default:                                     /* 1/2/4/8bpp: not modelled */
+        memset(dst, 0, (size_t)w * 4);
+        break;
+    }
+}
+
 static bool lcdc_gfx_update(void *opaque)
 {
     AT91LcdcState *s = AT91_LCDC(opaque);
     DisplaySurface *surface = qemu_console_surface(s->con);
+    uint8_t src[2048 * 4];
     uint32_t *dst;
-    uint32_t src[LCDC_WIDTH];
-    int y;
+    int w, h, bpp, y, stride;
 
     if (!lcdc_enabled(s)) {
         return true;
     }
-    if (surface_width(surface) != LCDC_WIDTH ||
-        surface_height(surface) != LCDC_HEIGHT) {
-        qemu_console_resize(s->con, LCDC_WIDTH, LCDC_HEIGHT);
+    lcdc_get_mode(s, &w, &h, &bpp);
+    if (w > 2048) {
+        w = 2048;
+    }
+    stride = w * bpp / 8;
+
+    if (surface_width(surface) != w || surface_height(surface) != h) {
+        qemu_console_resize(s->con, w, h);
         surface = qemu_console_surface(s->con);
         s->invalidate = true;
     }
 
     dst = surface_data(surface);
-    for (y = 0; y < LCDC_HEIGHT; y++) {
-        hwaddr line = s->dmabaddr1 + (hwaddr)y * LCDC_WIDTH * 4;
+    for (y = 0; y < h; y++) {
+        hwaddr line = s->dmabaddr1 + (hwaddr)y * stride;
         address_space_read(&address_space_memory, line, MEMTXATTRS_UNSPECIFIED,
-                           src, sizeof(src));
-        memcpy(dst + y * LCDC_WIDTH, src, sizeof(src));
+                           src, stride);
+        lcdc_convert_line(dst + (size_t)y * w, src, w, bpp);
     }
-    qemu_console_update(s->con, 0, 0, LCDC_WIDTH, LCDC_HEIGHT);
+    qemu_console_update(s->con, 0, 0, w, h);
     s->invalidate = false;
     return true;
 }
@@ -1554,6 +1610,7 @@ static uint64_t lcdc_read(void *opaque, hwaddr offset, unsigned size)
     case LCDC_DMACON:    return s->dmacon;
     case LCDC_LCDCON1:   return s->lcdcon1;
     case LCDC_LCDCON2:   return s->lcdcon2;
+    case LCDC_LCDFRMCFG: return s->lcdfrmcfg;
     case LCDC_PWRCON:    return s->pwrcon;
     case LCDC_IMR:       return s->imr;
     case LCDC_ISR:       return 0;
@@ -1573,7 +1630,8 @@ static void lcdc_write(void *opaque, hwaddr offset, uint64_t value,
     case LCDC_DMAFRMCFG: s->dmafrmcfg = val; break;
     case LCDC_DMACON:    s->dmacon = val; break;
     case LCDC_LCDCON1:   s->lcdcon1 = val; break;
-    case LCDC_LCDCON2:   s->lcdcon2 = val; break;
+    case LCDC_LCDCON2:   s->lcdcon2 = val; s->invalidate = true; break;
+    case LCDC_LCDFRMCFG: s->lcdfrmcfg = val; s->invalidate = true; break;
     case LCDC_PWRCON:    s->pwrcon = val; break;
     case LCDC_IER:       s->imr |= val; break;
     case LCDC_IDR:       s->imr &= ~val; break;
@@ -1596,7 +1654,7 @@ static void lcdc_reset(DeviceState *dev)
     AT91LcdcState *s = AT91_LCDC(dev);
 
     s->dmabaddr1 = s->dmafrmcfg = s->dmacon = 0;
-    s->lcdcon1 = s->lcdcon2 = s->pwrcon = s->imr = 0;
+    s->lcdcon1 = s->lcdcon2 = s->lcdfrmcfg = s->pwrcon = s->imr = 0;
     s->invalidate = true;
 }
 
@@ -1628,6 +1686,7 @@ static const VMStateDescription vmstate_at91_lcdc = {
         VMSTATE_UINT32(dmacon, AT91LcdcState),
         VMSTATE_UINT32(lcdcon1, AT91LcdcState),
         VMSTATE_UINT32(lcdcon2, AT91LcdcState),
+        VMSTATE_UINT32(lcdfrmcfg, AT91LcdcState),
         VMSTATE_UINT32(pwrcon, AT91LcdcState),
         VMSTATE_UINT32(imr, AT91LcdcState),
         VMSTATE_END_OF_LIST()
