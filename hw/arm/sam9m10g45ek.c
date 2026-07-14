@@ -1165,6 +1165,7 @@ static const TypeInfo pmc_type = {
 #define HSMCI_SR_TXRDY    (1u << 2)
 #define HSMCI_SR_BLKE     (1u << 3)
 #define HSMCI_SR_NOTBUSY  (1u << 5)
+#define HSMCI_SR_RTOE     (1u << 20)  /* response time-out (no card responded) */
 #define HSMCI_SR_RESET    0x0000C0E5
 
 #define TYPE_AT91_HSMCI     "at91-hsmci"
@@ -1205,7 +1206,17 @@ static void hsmci_do_command(AT91HsmciState *s, uint32_t cmdr)
     uint8_t resp[16];
     size_t rlen;
 
+    /* A fresh command clears the previous response-timeout status. */
+    s->sr &= ~HSMCI_SR_RTOE;
+
     rlen = sdbus_do_command(&s->sdbus, &req, resp, sizeof(resp));
+
+    /* A command that expects a response but gets none (e.g. an empty card
+     * slot) is a response time-out - the driver treats RTOE as card-absent,
+     * instead of spinning in __mmc_poll_for_busy. */
+    if (HSMCI_CMDR_RSPTYP(cmdr) != HSMCI_RSPTYP_NONE && rlen == 0) {
+        s->sr |= HSMCI_SR_RTOE;
+    }
 
     s->rsp_ptr = 0;
     if (HSMCI_CMDR_RSPTYP(cmdr) == HSMCI_RSPTYP_136 && rlen == 16) {
