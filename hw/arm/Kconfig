@@ -249,7 +249,6 @@ config SAM9G45
     depends on TCG && ARM
     select USB_OHCI_SYSBUS
     select USB_EHCI_SYSBUS
-    select CADENCE
 
 config VERSATILE
     bool
