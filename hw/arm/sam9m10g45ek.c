@@ -46,6 +46,8 @@
 
 /* ---- SoC memory map (datasheet Fig 5-1, section 6.1) -------------------- */
 #define SAM9G45_SDRAM_BASE   0x70000000   /* DDRSDRC0 chip select (main RAM) */
+#define SAM9G45_SRAM_BASE    0x00300000   /* internal SRAM                    */
+#define SAM9G45_SRAM_SIZE    0x00010000   /* 64 KB                            */
 #define SAM9G45_PERIPH_BASE  0xFFF78000   /* start of APB peripheral window  */
 #define SAM9G45_PERIPH_SIZE  0x00088000   /* ...through 0xFFFFFFFF            */
 #define SAM9G45_DBGU_BASE    0xFFFFEE00   /* Debug Unit (console UART)        */
@@ -3163,6 +3165,7 @@ static void sam9_create_hsmci(hwaddr base, DeviceState *aic, int irqno,
 static void sam9m10g45ek_init(MachineState *machine)
 {
     MemoryRegion *sysmem = get_system_memory();
+    MemoryRegion *sram;
     Object *cpuobj;
     ARMCPU *cpu;
     DeviceState *dbgu, *aic, *pit, *pmc, *orgate;
@@ -3178,8 +3181,18 @@ static void sam9m10g45ek_init(MachineState *machine)
     /* DDR2 SDRAM at the DDRSDRC0 chip select. */
     memory_region_add_subregion(sysmem, SAM9G45_SDRAM_BASE, machine->ram);
 
-    /* Log (rather than abort on) any access to a not-yet-modelled
-     * peripheral, so a boot shows how far it gets. */
+    /* 64 KB internal SRAM (0x00300000) - the kernel maps it as an mmio-sram
+     * pool and reads back what it writes, so it needs real backing memory. */
+    sram = g_new(MemoryRegion, 1);
+    memory_region_init_ram(sram, NULL, "at91.sram", SAM9G45_SRAM_SIZE,
+                           &error_fatal);
+    memory_region_add_subregion(sysmem, SAM9G45_SRAM_BASE, sram);
+
+    /* Log (rather than abort on) any access to a not-yet-modelled peripheral,
+     * so a boot shows how far it gets.  This covers the whole internal APB /
+     * system-controller window (0xFFF78000-0xFFFFFFFF); together with the
+     * modelled devices and the SRAM/DDR above, every address the guest touches
+     * is backed, so ignore_memory_transaction_failures is not needed. */
     create_unimplemented_device("at91-periph", SAM9G45_PERIPH_BASE,
                                 SAM9G45_PERIPH_SIZE);
 
@@ -3338,8 +3351,9 @@ static void sam9m10g45ek_machine_init(MachineClass *mc)
     mc->default_cpu_type = ARM_CPU_TYPE_NAME("arm926");
     mc->default_ram_id = "sam9g45.ram";
     mc->default_ram_size = SAM9G45_DEFAULT_RAM;
-    /* Bring-up: don't hard-abort on stray MMIO to unmodelled peripherals. */
-    mc->ignore_memory_transaction_failures = true;
+    /* Every peripheral window is either modelled or covered by an
+     * unimplemented-device catch-all (see sam9m10g45ek_init), so real bus
+     * faults are not masked. */
 }
 
 DEFINE_MACHINE_ARM("sam9m10g45ek", sam9m10g45ek_machine_init)
