@@ -39,6 +39,7 @@
 #include "hw/usb/hcd-ehci.h"
 #include "hw/net/cadence_gem.h"
 #include "net/net.h"
+#include "ui/console.h"
 #include "hw/misc/unimp.h"
 #include "qom/object.h"
 #include "target/arm/cpu-qom.h"
@@ -60,6 +61,7 @@
 #define SAM9G45_OHCI_BASE    0x00700000   /* USB Host OHCI (full/low speed)    */
 #define SAM9G45_EHCI_BASE    0x00800000   /* USB Host EHCI (high speed)        */
 #define SAM9G45_EMAC_BASE    0xFFFBC000   /* Ethernet MAC (Cadence macb)       */
+#define SAM9G45_LCDC_BASE    0x00500000   /* LCD Controller                    */
 
 #define SAM9G45_DEFAULT_RAM  (128 * MiB)  /* SAM9M10-G45-EK: 128 MB DDR2      */
 
@@ -69,6 +71,7 @@
 #define SAM9G45_IRQ_UHPHS    22   /* USB host (OHCI + EHCI share this) */
 #define SAM9G45_IRQ_DMAC     21
 #define SAM9G45_IRQ_EMAC     25
+#define SAM9G45_IRQ_LCDC     23
 
 /*
  * Master clock.  With no boot loader, our PMC reports MCK sourced from the
@@ -1327,6 +1330,186 @@ static const TypeInfo hsmci_types[] = {
 };
 
 /* ======================================================================== */
+/*  LCDC - LCD Controller (datasheet section 45; atmel_lcdfb programming)     */
+/*                                                                           */
+/*  Minimal framebuffer scan-out: the base DMA address (DMABADDR1) points at */
+/*  a 32bpp frame in guest RAM which is copied to a QEMU display console.     */
+/*  The SAM9M10-G45-EK panel is 480x272.                                     */
+/* ======================================================================== */
+
+#define LCDC_DMABADDR1  0x00
+#define LCDC_DMAFRMCFG  0x18
+#define LCDC_DMACON     0x1C
+#define LCDC_LCDCON1    0x0800
+#define LCDC_LCDCON2    0x0804
+#define LCDC_PWRCON     0x083C
+#define LCDC_IER        0x0848
+#define LCDC_IDR        0x084C
+#define LCDC_IMR        0x0850
+#define LCDC_ISR        0x0854
+#define LCDC_ICR        0x0858
+
+#define LCDC_PWRCON_PWR (1u << 0)   /* LCD module power on */
+
+#define LCDC_WIDTH   480
+#define LCDC_HEIGHT  272
+
+#define TYPE_AT91_LCDC "at91-lcdc"
+OBJECT_DECLARE_SIMPLE_TYPE(AT91LcdcState, AT91_LCDC)
+
+struct AT91LcdcState {
+    SysBusDevice parent_obj;
+
+    MemoryRegion iomem;
+    QemuConsole *con;
+    qemu_irq irq;
+
+    uint32_t dmabaddr1;
+    uint32_t dmafrmcfg;
+    uint32_t dmacon;
+    uint32_t lcdcon1, lcdcon2;
+    uint32_t pwrcon;
+    uint32_t imr;
+    bool invalidate;
+};
+
+static bool lcdc_enabled(AT91LcdcState *s)
+{
+    return (s->pwrcon & LCDC_PWRCON_PWR) && s->dmabaddr1 != 0;
+}
+
+static bool lcdc_gfx_update(void *opaque)
+{
+    AT91LcdcState *s = AT91_LCDC(opaque);
+    DisplaySurface *surface = qemu_console_surface(s->con);
+    uint32_t *dst;
+    uint32_t src[LCDC_WIDTH];
+    int y;
+
+    if (!lcdc_enabled(s)) {
+        return true;
+    }
+    if (surface_width(surface) != LCDC_WIDTH ||
+        surface_height(surface) != LCDC_HEIGHT) {
+        qemu_console_resize(s->con, LCDC_WIDTH, LCDC_HEIGHT);
+        surface = qemu_console_surface(s->con);
+        s->invalidate = true;
+    }
+
+    dst = surface_data(surface);
+    for (y = 0; y < LCDC_HEIGHT; y++) {
+        hwaddr line = s->dmabaddr1 + (hwaddr)y * LCDC_WIDTH * 4;
+        address_space_read(&address_space_memory, line, MEMTXATTRS_UNSPECIFIED,
+                           src, sizeof(src));
+        memcpy(dst + y * LCDC_WIDTH, src, sizeof(src));
+    }
+    qemu_console_update(s->con, 0, 0, LCDC_WIDTH, LCDC_HEIGHT);
+    s->invalidate = false;
+    return true;
+}
+
+static void lcdc_invalidate(void *opaque)
+{
+    AT91LcdcState *s = AT91_LCDC(opaque);
+    s->invalidate = true;
+}
+
+static const GraphicHwOps lcdc_gfx_ops = {
+    .invalidate = lcdc_invalidate,
+    .gfx_update = lcdc_gfx_update,
+};
+
+static uint64_t lcdc_read(void *opaque, hwaddr offset, unsigned size)
+{
+    AT91LcdcState *s = AT91_LCDC(opaque);
+
+    switch (offset) {
+    case LCDC_DMABADDR1: return s->dmabaddr1;
+    case LCDC_DMAFRMCFG: return s->dmafrmcfg;
+    case LCDC_DMACON:    return s->dmacon;
+    case LCDC_LCDCON1:   return s->lcdcon1;
+    case LCDC_LCDCON2:   return s->lcdcon2;
+    case LCDC_PWRCON:    return s->pwrcon;
+    case LCDC_IMR:       return s->imr;
+    case LCDC_ISR:       return 0;
+    default:
+        return 0;
+    }
+}
+
+static void lcdc_write(void *opaque, hwaddr offset, uint64_t value,
+                       unsigned size)
+{
+    AT91LcdcState *s = AT91_LCDC(opaque);
+    uint32_t val = value;
+
+    switch (offset) {
+    case LCDC_DMABADDR1: s->dmabaddr1 = val; s->invalidate = true; break;
+    case LCDC_DMAFRMCFG: s->dmafrmcfg = val; break;
+    case LCDC_DMACON:    s->dmacon = val; break;
+    case LCDC_LCDCON1:   s->lcdcon1 = val; break;
+    case LCDC_LCDCON2:   s->lcdcon2 = val; break;
+    case LCDC_PWRCON:    s->pwrcon = val; break;
+    case LCDC_IER:       s->imr |= val; break;
+    case LCDC_IDR:       s->imr &= ~val; break;
+    case LCDC_ICR:       break;
+    default:
+        break;
+    }
+}
+
+static const MemoryRegionOps lcdc_ops = {
+    .read = lcdc_read,
+    .write = lcdc_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+static void lcdc_reset(DeviceState *dev)
+{
+    AT91LcdcState *s = AT91_LCDC(dev);
+
+    s->dmabaddr1 = s->dmafrmcfg = s->dmacon = 0;
+    s->lcdcon1 = s->lcdcon2 = s->pwrcon = s->imr = 0;
+    s->invalidate = true;
+}
+
+static void lcdc_realize(DeviceState *dev, Error **errp)
+{
+    AT91LcdcState *s = AT91_LCDC(dev);
+
+    s->con = qemu_graphic_console_create(dev, 0, &lcdc_gfx_ops, s);
+    qemu_console_resize(s->con, LCDC_WIDTH, LCDC_HEIGHT);
+}
+
+static void lcdc_dev_init(Object *obj)
+{
+    AT91LcdcState *s = AT91_LCDC(obj);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+
+    memory_region_init_io(&s->iomem, obj, &lcdc_ops, s, "at91-lcdc", 0x1000);
+    sysbus_init_mmio(sbd, &s->iomem);
+    sysbus_init_irq(sbd, &s->irq);
+}
+
+static void lcdc_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->realize = lcdc_realize;
+    device_class_set_legacy_reset(dc, lcdc_reset);
+}
+
+static const TypeInfo lcdc_type = {
+    .name = TYPE_AT91_LCDC,
+    .parent = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(AT91LcdcState),
+    .instance_init = lcdc_dev_init,
+    .class_init = lcdc_class_init,
+};
+
+/* ======================================================================== */
 /*  DMAC - DMA Controller (datasheet section 40)                             */
 /*                                                                           */
 /*  Functional model of the 8-channel scatter-gather DMA.  Transfers run     */
@@ -1868,6 +2051,7 @@ static void at91_register_types(void)
     type_register_static(&shdwc_type);
     type_register_static(&wdt_type);
     type_register_static(&dmac_type);
+    type_register_static(&lcdc_type);
     type_register_static_array(hsmci_types, ARRAY_SIZE(hsmci_types));
 }
 
@@ -1943,6 +2127,15 @@ static void sam9m10g45ek_init(MachineState *machine)
     pmc = qdev_new(TYPE_AT91_PMC);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(pmc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(pmc), 0, SAM9G45_PMC_BASE);
+
+    /* LCD controller. */
+    {
+        DeviceState *lcdc = qdev_new(TYPE_AT91_LCDC);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(lcdc), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(lcdc), 0, SAM9G45_LCDC_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(lcdc), 0,
+                           qdev_get_gpio_in(aic, SAM9G45_IRQ_LCDC));
+    }
 
     /* DMA controller. */
     {
