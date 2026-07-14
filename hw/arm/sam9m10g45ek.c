@@ -1313,6 +1313,9 @@ static void hsmci_dev_init(Object *obj)
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
     memory_region_init_io(&s->iomem, obj, &hsmci_ops, s, "at91-hsmci", 0x600);
+    /* The DMAC legitimately reads/writes the RDR/TDR FIFO here; it does not
+     * recurse, so exempt the region from the DMA re-entrancy guard. */
+    s->iomem.disable_reentrancy_guard = true;
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
     qbus_init(&s->sdbus, sizeof(s->sdbus), TYPE_AT91_HSMCI_BUS, DEVICE(obj),
@@ -1809,6 +1812,8 @@ struct AT91DmacState {
 
     MemoryRegion iomem;
     qemu_irq irq;
+    QEMUBH *bh;                /* runs transfers asynchronously */
+    uint32_t pending;          /* channels awaiting transfer */
 
     uint32_t gcfg, en, ebcimr, ebcisr, chsr;
     struct {
@@ -1835,6 +1840,7 @@ static void dmac_run_buffer(uint32_t saddr, uint32_t daddr,
     unsigned dw = dmac_width_bytes(DMAC_CTRLA_DST_WIDTH(ctrla));
     int smode = DMAC_CTRLB_SRC_MODE(ctrlb);
     int dmode = DMAC_CTRLB_DST_MODE(ctrlb);
+
     uint32_t sa = saddr, da = daddr;
     uint32_t i;
 
@@ -1858,6 +1864,7 @@ static void dmac_run_channel(AT91DmacState *s, int n)
 {
     uint32_t dscr = s->ch[n].dscr;
 
+
     if (dscr == 0) {
         /* single-buffer transfer straight from the channel registers */
         dmac_run_buffer(s->ch[n].saddr, s->ch[n].daddr,
@@ -1878,6 +1885,20 @@ static void dmac_run_channel(AT91DmacState *s, int n)
     }
     s->chsr &= ~(1u << n);   /* channel finished */
     dmac_update_irq(s);
+}
+
+/* Transfers run from a bottom half so completion (and its interrupt) happen
+ * after the enabling MMIO write returns - real DMA completes asynchronously,
+ * and a reentrant completion corrupts driver state machines (e.g. atmel-mci). */
+static void dmac_bh(void *opaque)
+{
+    AT91DmacState *s = opaque;
+
+    while (s->pending) {
+        int n = ctz32(s->pending);
+        s->pending &= ~(1u << n);
+        dmac_run_channel(s, n);
+    }
 }
 
 static uint64_t dmac_read(void *opaque, hwaddr offset, unsigned size)
@@ -1954,9 +1975,10 @@ static void dmac_write(void *opaque, hwaddr offset, uint64_t value,
         for (n = 0; n < DMAC_N_CHANNELS; n++) {
             if (val & (1u << n)) {
                 s->chsr |= 1u << n;
-                dmac_run_channel(s, n);   /* synchronous transfer */
+                s->pending |= 1u << n;
             }
         }
+        qemu_bh_schedule(s->bh);   /* transfer asynchronously */
         break;
     }
     case DMAC_CHDR:
@@ -1986,6 +2008,7 @@ static void dmac_reset(DeviceState *dev)
     s->ebcimr = 0;
     s->ebcisr = 0;
     s->chsr = 0;
+    s->pending = 0;
     memset(s->ch, 0, sizeof(s->ch));
 }
 
@@ -1999,9 +2022,19 @@ static void dmac_dev_init(Object *obj)
     sysbus_init_irq(sbd, &s->irq);
 }
 
+static void dmac_realize(DeviceState *dev, Error **errp)
+{
+    AT91DmacState *s = AT91_DMAC(dev);
+
+    s->bh = qemu_bh_new(dmac_bh, s);
+}
+
 static void dmac_class_init(ObjectClass *klass, const void *data)
 {
-    device_class_set_legacy_reset(DEVICE_CLASS(klass), dmac_reset);
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->realize = dmac_realize;
+    device_class_set_legacy_reset(dc, dmac_reset);
 }
 
 static const TypeInfo dmac_type = {
