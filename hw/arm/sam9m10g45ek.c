@@ -87,11 +87,12 @@
 #define SAM9G45_MMC1_CD_PIN  11
 
 /*
- * Master clock.  With no boot loader, our PMC reports MCK sourced from the
- * 12 MHz main crystal (see AT91PmcState), so model the PIT at the same rate to
- * keep guest timekeeping self-consistent.
+ * Master clock.  The PMC reset registers below model a boot-loader-configured
+ * clock tree (PLLA locked at 792 MHz from the 12 MHz crystal, MCK = 792/2/3),
+ * matching a real running board; the PIT is clocked from the same MCK so guest
+ * timekeeping stays self-consistent.
  */
-#define SAM9G45_MCK_HZ       12000000
+#define SAM9G45_MCK_HZ       132000000    /* 792 MHz PLLA / 2 / 3 */
 
 /* AIC source 1 is the shared "system interrupt" (DBGU, PIT, RTT, ...). */
 #define SAM9G45_IRQ_SYS      1
@@ -894,8 +895,15 @@ static const TypeInfo pit_type = {
 #define PMC_MAINF_12MHZ  ((12000000u * 16u) / 32768u)   /* ~5859 */
 #define PMC_MCFR_VALUE   ((1u << 16) /* MAINRDY */ | PMC_MAINF_12MHZ)
 
-/* Reset MCKR: CSS=1 (main clock), PRES=0, MDIV=0 -> MCK = 12 MHz main. */
-#define PMC_MCKR_RESET   0x00000001
+/*
+ * Reset values modelling a boot-loader-configured clock tree (at91sam9g45 uses
+ * the RM9200 PLL layout: PLLA = MAINCK/DIVA*(MUL+1); MCK = source/2^PRES/MDIV
+ * with MDIV divisors {1,2,4,3}).
+ *   PLLAR: DIVA=1, MULA=65  -> PLLA = 12 MHz / 1 * 66 = 792 MHz
+ *   MCKR:  CSS=PLLA(2), PRES=/2, MDIV=/3 (idx 3) -> MCK = 792/2/3 = 132 MHz
+ */
+#define PMC_PLLAR_RESET  ((65u << 16) | 1u)              /* 0x00410001 */
+#define PMC_MCKR_RESET   (2u | (1u << 2) | (3u << 8))    /* 0x00000306 */
 
 #define TYPE_AT91_PMC "at91-pmc"
 OBJECT_DECLARE_SIMPLE_TYPE(AT91PmcState, AT91_PMC)
@@ -985,7 +993,7 @@ static void pmc_reset(DeviceState *dev)
     s->pcsr = 0;
     s->uckr = 0x10200800;
     s->mor = 0;
-    s->pllar = 0x00003F00;
+    s->pllar = PMC_PLLAR_RESET;
     s->mckr = PMC_MCKR_RESET;
     s->usb = 0;
     s->pck[0] = 0;
