@@ -37,6 +37,8 @@
 #include "hw/sd/sd.h"
 #include "hw/usb/hcd-ohci.h"
 #include "hw/usb/hcd-ehci.h"
+#include "hw/net/cadence_gem.h"
+#include "net/net.h"
 #include "hw/misc/unimp.h"
 #include "qom/object.h"
 #include "target/arm/cpu-qom.h"
@@ -57,6 +59,7 @@
 #define SAM9G45_HSMCI1_BASE  0xFFFD0000   /* High Speed MMC Interface 1        */
 #define SAM9G45_OHCI_BASE    0x00700000   /* USB Host OHCI (full/low speed)    */
 #define SAM9G45_EHCI_BASE    0x00800000   /* USB Host EHCI (high speed)        */
+#define SAM9G45_EMAC_BASE    0xFFFBC000   /* Ethernet MAC (Cadence macb)       */
 
 #define SAM9G45_DEFAULT_RAM  (128 * MiB)  /* SAM9M10-G45-EK: 128 MB DDR2      */
 
@@ -65,6 +68,7 @@
 #define SAM9G45_IRQ_HSMCI1   29
 #define SAM9G45_IRQ_UHPHS    22   /* USB host (OHCI + EHCI share this) */
 #define SAM9G45_IRQ_DMAC     21
+#define SAM9G45_IRQ_EMAC     25
 
 /*
  * Master clock.  With no boot loader, our PMC reports MCK sourced from the
@@ -1957,6 +1961,16 @@ static void sam9m10g45ek_init(MachineState *machine)
     /* High Speed MMC interfaces (SD via -sd / -drive if=sd). */
     sam9_create_hsmci(SAM9G45_HSMCI0_BASE, aic, SAM9G45_IRQ_HSMCI0, 0);
     sam9_create_hsmci(SAM9G45_HSMCI1_BASE, aic, SAM9G45_IRQ_HSMCI1, 1);
+
+    /* Ethernet (Cadence GEM stands in for the at91 macb). */
+    {
+        DeviceState *emac = qdev_new(TYPE_CADENCE_GEM);
+        qemu_configure_nic_device(emac, true, NULL);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(emac), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(emac), 0, SAM9G45_EMAC_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(emac), 0,
+                           qdev_get_gpio_in(aic, SAM9G45_IRQ_EMAC));
+    }
 
     /* USB host: OHCI (FS/LS) + EHCI (HS) share AIC source 22 (UHPHS). */
     {
