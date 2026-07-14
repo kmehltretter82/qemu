@@ -243,6 +243,11 @@ config SX1
     depends on TCG && ARM
     select OMAP
 
+config SAM9G45
+    bool
+    default y
+    depends on TCG && ARM
+
 config VERSATILE
     bool
     default y
