@@ -247,6 +247,8 @@ config SAM9G45
     bool
     default y
     depends on TCG && ARM
+    select USB_OHCI_SYSBUS
+    select USB_EHCI_SYSBUS
 
 config VERSATILE
     bool

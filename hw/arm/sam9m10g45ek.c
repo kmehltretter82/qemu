@@ -35,6 +35,8 @@
 #include "system/blockdev.h"
 #include "chardev/char-fe.h"
 #include "hw/sd/sd.h"
+#include "hw/usb/hcd-ohci.h"
+#include "hw/usb/hcd-ehci.h"
 #include "hw/misc/unimp.h"
 #include "qom/object.h"
 #include "target/arm/cpu-qom.h"
@@ -52,12 +54,15 @@
 #define SAM9G45_WDT_BASE     0xFFFFFD40   /* Watchdog Timer                    */
 #define SAM9G45_HSMCI0_BASE  0xFFF80000   /* High Speed MMC Interface 0        */
 #define SAM9G45_HSMCI1_BASE  0xFFFD0000   /* High Speed MMC Interface 1        */
+#define SAM9G45_OHCI_BASE    0x00700000   /* USB Host OHCI (full/low speed)    */
+#define SAM9G45_EHCI_BASE    0x00800000   /* USB Host EHCI (high speed)        */
 
 #define SAM9G45_DEFAULT_RAM  (128 * MiB)  /* SAM9M10-G45-EK: 128 MB DDR2      */
 
 /* Peripheral interrupt IDs (AIC source numbers, datasheet Table 7-1). */
 #define SAM9G45_IRQ_HSMCI0   11
 #define SAM9G45_IRQ_HSMCI1   29
+#define SAM9G45_IRQ_UHPHS    22   /* USB host (OHCI + EHCI share this) */
 
 /*
  * Master clock.  With no boot loader, our PMC reports MCK sourced from the
@@ -1685,6 +1690,30 @@ static void sam9m10g45ek_init(MachineState *machine)
     /* High Speed MMC interfaces (SD via -sd / -drive if=sd). */
     sam9_create_hsmci(SAM9G45_HSMCI0_BASE, aic, SAM9G45_IRQ_HSMCI0, 0);
     sam9_create_hsmci(SAM9G45_HSMCI1_BASE, aic, SAM9G45_IRQ_HSMCI1, 1);
+
+    /* USB host: OHCI (FS/LS) + EHCI (HS) share AIC source 22 (UHPHS). */
+    {
+        DeviceState *ohci, *ehci, *usb_or;
+
+        usb_or = qdev_new(TYPE_OR_IRQ);
+        qdev_prop_set_uint16(usb_or, "num-lines", 2);
+        qdev_realize_and_unref(usb_or, NULL, &error_fatal);
+        qdev_connect_gpio_out(usb_or, 0,
+                              qdev_get_gpio_in(aic, SAM9G45_IRQ_UHPHS));
+
+        ohci = qdev_new(TYPE_SYSBUS_OHCI);
+        qdev_prop_set_uint32(ohci, "num-ports", 2);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(ohci), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(ohci), 0, SAM9G45_OHCI_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(ohci), 0,
+                           qdev_get_gpio_in(usb_or, 0));
+
+        ehci = qdev_new(TYPE_PLATFORM_EHCI);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(ehci), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(ehci), 0, SAM9G45_EHCI_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(ehci), 0,
+                           qdev_get_gpio_in(usb_or, 1));
+    }
 
     /* DBGU console -> OR gate input 0. */
     dbgu = qdev_new(TYPE_AT91_DBGU);
