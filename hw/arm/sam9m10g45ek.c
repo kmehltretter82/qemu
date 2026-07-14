@@ -27,6 +27,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
 #include "hw/core/or-irq.h"
+#include "migration/vmstate.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/machines-qom.h"
 #include "system/system.h"
@@ -318,6 +319,22 @@ static const Property dbgu_properties[] = {
     DEFINE_PROP_CHR("chardev", AT91DbguState, chr),
 };
 
+static const VMStateDescription vmstate_at91_dbgu = {
+    .name = "at91-dbgu",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(imr, AT91DbguState),
+        VMSTATE_UINT32(mr, AT91DbguState),
+        VMSTATE_UINT32(brgr, AT91DbguState),
+        VMSTATE_UINT8(rx_fifo, AT91DbguState),
+        VMSTATE_BOOL(rx_pending, AT91DbguState),
+        VMSTATE_BOOL(rx_enabled, AT91DbguState),
+        VMSTATE_BOOL(tx_enabled, AT91DbguState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void dbgu_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -325,6 +342,7 @@ static void dbgu_class_init(ObjectClass *klass, const void *data)
     dc->realize = dbgu_realize;
     device_class_set_legacy_reset(dc, dbgu_reset);
     device_class_set_props(dc, dbgu_properties);
+    dc->vmsd = &vmstate_at91_dbgu;
 }
 
 static const TypeInfo dbgu_type = {
@@ -636,11 +654,34 @@ static void aic_init(Object *obj)
     qdev_init_gpio_in(DEVICE(obj), aic_set_irq, AIC_NUM_IRQ);
 }
 
+static const VMStateDescription vmstate_at91_aic = {
+    .name = "at91-aic",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(smr, AT91AicState, AIC_NUM_IRQ),
+        VMSTATE_UINT32_ARRAY(svr, AT91AicState, AIC_NUM_IRQ),
+        VMSTATE_UINT32(imr, AT91AicState),
+        VMSTATE_UINT32(raw, AT91AicState),
+        VMSTATE_UINT32(edge, AT91AicState),
+        VMSTATE_UINT32(ffsr, AT91AicState),
+        VMSTATE_UINT32(isr, AT91AicState),
+        VMSTATE_UINT32(spu, AT91AicState),
+        VMSTATE_UINT32(dcr, AT91AicState),
+        VMSTATE_INT32_ARRAY(prio_stack, AT91AicState, AIC_STACK_SZ),
+        VMSTATE_INT32(sp, AT91AicState),
+        VMSTATE_BOOL(irq_asserted, AT91AicState),
+        VMSTATE_BOOL(fiq_asserted, AT91AicState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void aic_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     device_class_set_legacy_reset(dc, aic_reset);
+    dc->vmsd = &vmstate_at91_aic;
 }
 
 static const TypeInfo aic_type = {
@@ -838,6 +879,20 @@ static const Property pit_properties[] = {
                        SAM9G45_MCK_HZ),
 };
 
+static const VMStateDescription vmstate_at91_pit = {
+    .name = "at91-pit",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(mr, AT91PitState),
+        VMSTATE_UINT32(picnt, AT91PitState),
+        VMSTATE_BOOL(pits, AT91PitState),
+        VMSTATE_INT64(last_fire, AT91PitState),
+        VMSTATE_TIMER_PTR(timer, AT91PitState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void pit_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -845,6 +900,7 @@ static void pit_class_init(ObjectClass *klass, const void *data)
     dc->realize = pit_realize;
     device_class_set_legacy_reset(dc, pit_reset);
     device_class_set_props(dc, pit_properties);
+    dc->vmsd = &vmstate_at91_pit;
 }
 
 static const TypeInfo pit_type = {
@@ -1011,11 +1067,31 @@ static void pmc_dev_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
 }
 
+static const VMStateDescription vmstate_at91_pmc = {
+    .name = "at91-pmc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(scsr, AT91PmcState),
+        VMSTATE_UINT32(pcsr, AT91PmcState),
+        VMSTATE_UINT32(uckr, AT91PmcState),
+        VMSTATE_UINT32(mor, AT91PmcState),
+        VMSTATE_UINT32(pllar, AT91PmcState),
+        VMSTATE_UINT32(mckr, AT91PmcState),
+        VMSTATE_UINT32(usb, AT91PmcState),
+        VMSTATE_UINT32_ARRAY(pck, AT91PmcState, 2),
+        VMSTATE_UINT32(imr, AT91PmcState),
+        VMSTATE_UINT32(pllicpr, AT91PmcState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void pmc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     device_class_set_legacy_reset(dc, pmc_reset);
+    dc->vmsd = &vmstate_at91_pmc;
 }
 
 static const TypeInfo pmc_type = {
@@ -1330,12 +1406,38 @@ static void hsmci_dev_init(Object *obj)
               "sd-bus");
 }
 
+static const VMStateDescription vmstate_at91_hsmci = {
+    .name = "at91-hsmci",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(mr, AT91HsmciState),
+        VMSTATE_UINT32(dtor, AT91HsmciState),
+        VMSTATE_UINT32(sdcr, AT91HsmciState),
+        VMSTATE_UINT32(argr, AT91HsmciState),
+        VMSTATE_UINT32(blkr, AT91HsmciState),
+        VMSTATE_UINT32(cstor, AT91HsmciState),
+        VMSTATE_UINT32(dma, AT91HsmciState),
+        VMSTATE_UINT32(cfg, AT91HsmciState),
+        VMSTATE_UINT32(wpmr, AT91HsmciState),
+        VMSTATE_UINT32(sr, AT91HsmciState),
+        VMSTATE_UINT32(imr, AT91HsmciState),
+        VMSTATE_UINT32_ARRAY(rsp, AT91HsmciState, 4),
+        VMSTATE_INT32(rsp_ptr, AT91HsmciState),
+        VMSTATE_UINT32(blklen, AT91HsmciState),
+        VMSTATE_INT32(data_len, AT91HsmciState),
+        VMSTATE_BOOL(reading, AT91HsmciState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void hsmci_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     device_class_set_legacy_reset(dc, hsmci_reset);
     dc->user_creatable = false;   /* needs board IRQ + card wiring */
+    dc->vmsd = &vmstate_at91_hsmci;
 }
 
 static const TypeInfo hsmci_types[] = {
@@ -1517,12 +1619,29 @@ static void lcdc_dev_init(Object *obj)
     sysbus_init_irq(sbd, &s->irq);
 }
 
+static const VMStateDescription vmstate_at91_lcdc = {
+    .name = "at91-lcdc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(dmabaddr1, AT91LcdcState),
+        VMSTATE_UINT32(dmafrmcfg, AT91LcdcState),
+        VMSTATE_UINT32(dmacon, AT91LcdcState),
+        VMSTATE_UINT32(lcdcon1, AT91LcdcState),
+        VMSTATE_UINT32(lcdcon2, AT91LcdcState),
+        VMSTATE_UINT32(pwrcon, AT91LcdcState),
+        VMSTATE_UINT32(imr, AT91LcdcState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void lcdc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = lcdc_realize;
     device_class_set_legacy_reset(dc, lcdc_reset);
+    dc->vmsd = &vmstate_at91_lcdc;
 }
 
 static const TypeInfo lcdc_type = {
@@ -1755,9 +1874,36 @@ static void pio_dev_init(Object *obj)
     qdev_init_gpio_out(DEVICE(obj), s->out, 32);
 }
 
+static const VMStateDescription vmstate_at91_pio = {
+    .name = "at91-pio",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(psr, AT91PioState),
+        VMSTATE_UINT32(osr, AT91PioState),
+        VMSTATE_UINT32(odsr, AT91PioState),
+        VMSTATE_UINT32(ifsr, AT91PioState),
+        VMSTATE_UINT32(mdsr, AT91PioState),
+        VMSTATE_UINT32(pull_up, AT91PioState),
+        VMSTATE_UINT32(absr, AT91PioState),
+        VMSTATE_UINT32(owsr, AT91PioState),
+        VMSTATE_UINT32(imr, AT91PioState),
+        VMSTATE_UINT32(isr, AT91PioState),
+        VMSTATE_UINT32(pin_in, AT91PioState),
+        VMSTATE_UINT32(pin_driven, AT91PioState),
+        VMSTATE_UINT32(last_pdsr, AT91PioState),
+        VMSTATE_UINT32(reset_driven, AT91PioState),
+        VMSTATE_UINT32(reset_level, AT91PioState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void pio_class_init(ObjectClass *klass, const void *data)
 {
-    device_class_set_legacy_reset(DEVICE_CLASS(klass), pio_reset);
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    device_class_set_legacy_reset(dc, pio_reset);
+    dc->vmsd = &vmstate_at91_pio;
 }
 
 static const TypeInfo pio_type = {
@@ -1815,6 +1961,10 @@ static const TypeInfo pio_type = {
 #define TYPE_AT91_DMAC "at91-dmac"
 OBJECT_DECLARE_SIMPLE_TYPE(AT91DmacState, AT91_DMAC)
 
+typedef struct AT91DmacChan {
+    uint32_t saddr, daddr, dscr, ctrla, ctrlb, cfg;
+} AT91DmacChan;
+
 struct AT91DmacState {
     SysBusDevice parent_obj;
 
@@ -1824,9 +1974,7 @@ struct AT91DmacState {
     uint32_t pending;          /* channels awaiting transfer */
 
     uint32_t gcfg, en, ebcimr, ebcisr, chsr;
-    struct {
-        uint32_t saddr, daddr, dscr, ctrla, ctrlb, cfg;
-    } ch[DMAC_N_CHANNELS];
+    AT91DmacChan ch[DMAC_N_CHANNELS];
 };
 
 static void dmac_update_irq(AT91DmacState *s)
@@ -2037,12 +2185,58 @@ static void dmac_realize(DeviceState *dev, Error **errp)
     s->bh = qemu_bh_new(dmac_bh, s);
 }
 
+static int dmac_post_load(void *opaque, int version_id)
+{
+    AT91DmacState *s = opaque;
+
+    /* The bottom half is not migrated; if a transfer was still pending,
+     * run it after load. */
+    if (s->pending) {
+        qemu_bh_schedule(s->bh);
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_at91_dmac_chan = {
+    .name = "at91-dmac-chan",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(saddr, AT91DmacChan),
+        VMSTATE_UINT32(daddr, AT91DmacChan),
+        VMSTATE_UINT32(dscr, AT91DmacChan),
+        VMSTATE_UINT32(ctrla, AT91DmacChan),
+        VMSTATE_UINT32(ctrlb, AT91DmacChan),
+        VMSTATE_UINT32(cfg, AT91DmacChan),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_at91_dmac = {
+    .name = "at91-dmac",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = dmac_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(gcfg, AT91DmacState),
+        VMSTATE_UINT32(en, AT91DmacState),
+        VMSTATE_UINT32(ebcimr, AT91DmacState),
+        VMSTATE_UINT32(ebcisr, AT91DmacState),
+        VMSTATE_UINT32(chsr, AT91DmacState),
+        VMSTATE_UINT32(pending, AT91DmacState),
+        VMSTATE_STRUCT_ARRAY(ch, AT91DmacState, DMAC_N_CHANNELS, 1,
+                             vmstate_at91_dmac_chan, AT91DmacChan),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void dmac_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = dmac_realize;
     device_class_set_legacy_reset(dc, dmac_reset);
+    dc->vmsd = &vmstate_at91_dmac;
 }
 
 static const TypeInfo dmac_type = {
@@ -2146,9 +2340,22 @@ static void rstc_dev_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
 }
 
+static const VMStateDescription vmstate_at91_rstc = {
+    .name = "at91-rstc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(mr, AT91RstcState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void rstc_class_init(ObjectClass *klass, const void *data)
 {
-    device_class_set_legacy_reset(DEVICE_CLASS(klass), rstc_reset);
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    device_class_set_legacy_reset(dc, rstc_reset);
+    dc->vmsd = &vmstate_at91_rstc;
 }
 
 static const TypeInfo rstc_type = {
@@ -2230,9 +2437,22 @@ static void shdwc_dev_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
 }
 
+static const VMStateDescription vmstate_at91_shdwc = {
+    .name = "at91-shdwc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(mr, AT91ShdwcState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void shdwc_class_init(ObjectClass *klass, const void *data)
 {
-    device_class_set_legacy_reset(DEVICE_CLASS(klass), shdwc_reset);
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    device_class_set_legacy_reset(dc, shdwc_reset);
+    dc->vmsd = &vmstate_at91_shdwc;
 }
 
 static const TypeInfo shdwc_type = {
@@ -2317,9 +2537,23 @@ static void wdt_dev_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
 }
 
+static const VMStateDescription vmstate_at91_wdt = {
+    .name = "at91-wdt",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(mr, AT91WdtState),
+        VMSTATE_BOOL(mr_written, AT91WdtState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wdt_class_init(ObjectClass *klass, const void *data)
 {
-    device_class_set_legacy_reset(DEVICE_CLASS(klass), wdt_reset);
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    device_class_set_legacy_reset(dc, wdt_reset);
+    dc->vmsd = &vmstate_at91_wdt;
 }
 
 static const TypeInfo wdt_type = {
