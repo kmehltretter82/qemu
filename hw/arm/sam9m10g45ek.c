@@ -3323,7 +3323,10 @@ static void sam9m10g45ek_init(MachineState *machine)
                            qdev_get_gpio_in(aic, SAM9G45_IRQ_EMAC));
     }
 
-    /* USB host: OHCI (FS/LS) + EHCI (HS) share AIC source 22 (UHPHS). */
+    /* USB host: EHCI (HS) + OHCI (FS/LS) as a companion pair sharing AIC
+     * source 22 (UHPHS).  The EHCI owns the ports and hands full/low-speed
+     * devices off to the OHCI companion (like the real UHP HS block), rather
+     * than the two being independent controllers. */
     {
         DeviceState *ohci, *ehci, *usb_or;
 
@@ -3333,17 +3336,21 @@ static void sam9m10g45ek_init(MachineState *machine)
         qdev_connect_gpio_out(usb_or, 0,
                               qdev_get_gpio_in(aic, SAM9G45_IRQ_UHPHS));
 
+        /* EHCI realized first so its "usb-bus.0" exists for the companion. */
+        ehci = qdev_new(TYPE_PLATFORM_EHCI);
+        object_property_set_bool(OBJECT(ehci), "companion-enable", true,
+                                 &error_fatal);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(ehci), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(ehci), 0, SAM9G45_EHCI_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(ehci), 0,
+                           qdev_get_gpio_in(usb_or, 0));
+
         ohci = qdev_new(TYPE_SYSBUS_OHCI);
+        qdev_prop_set_string(ohci, "masterbus", "usb-bus.0");
         qdev_prop_set_uint32(ohci, "num-ports", 2);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(ohci), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(ohci), 0, SAM9G45_OHCI_BASE);
         sysbus_connect_irq(SYS_BUS_DEVICE(ohci), 0,
-                           qdev_get_gpio_in(usb_or, 0));
-
-        ehci = qdev_new(TYPE_PLATFORM_EHCI);
-        sysbus_realize_and_unref(SYS_BUS_DEVICE(ehci), &error_fatal);
-        sysbus_mmio_map(SYS_BUS_DEVICE(ehci), 0, SAM9G45_EHCI_BASE);
-        sysbus_connect_irq(SYS_BUS_DEVICE(ehci), 0,
                            qdev_get_gpio_in(usb_or, 1));
     }
 
