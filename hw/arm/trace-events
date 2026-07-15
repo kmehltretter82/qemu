@@ -96,3 +96,16 @@ z2_aer915_event(int8_t event, int8_t len) "i2c event =0x%x len=%d bytes"
 
 # bcm2838.c
 bcm2838_gic_set_irq(int irq, int level) "gic irq:%d lvl:%d"
+
+# sam9m10g45ek.c (AT91SAM9G45)
+at91_dbgu_tx(uint8_t ch) "DBGU tx 0x%02x"
+at91_dbgu_rx(uint8_t ch) "DBGU rx 0x%02x"
+at91_aic_irq(int src, int level) "AIC source %d level %d"
+at91_hsmci_command(uint8_t cmd, uint32_t arg, unsigned rsplen) "HSMCI CMD%u arg 0x%08x rsplen %u"
+at91_hsmci_rtoe(uint8_t cmd) "HSMCI CMD%u response timeout (no card)"
+at91_dmac_run(int chan, uint32_t saddr, uint32_t daddr, uint32_t len) "DMAC ch%d 0x%08x -> 0x%08x len %u"
+at91_dmac_complete(int chan) "DMAC ch%d transfer complete"
+at91_macb_tx(size_t len) "macb tx frame %zu bytes"
+at91_macb_rx(size_t len) "macb rx frame %zu bytes"
+at91_macb_mdio(int op, unsigned reg, uint16_t val) "macb mdio op %d reg %u val 0x%04x"
+at91_lcdc_mode(int w, int h, int bpp) "LCDC scanout %dx%d %dbpp"

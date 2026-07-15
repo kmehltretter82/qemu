@@ -43,6 +43,7 @@
 #include "hw/misc/unimp.h"
 #include "qom/object.h"
 #include "target/arm/cpu-qom.h"
+#include "trace.h"
 
 /* ---- SoC memory map (datasheet Fig 5-1, section 6.1) -------------------- */
 #define SAM9G45_SDRAM_BASE   0x70000000   /* DDRSDRC0 chip select (main RAM) */
@@ -244,6 +245,7 @@ static void dbgu_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case DBGU_THR:
         ch = value & 0xff;
+        trace_at91_dbgu_tx(ch);
         /* Instant, blocking-free drain: fine for a console. */
         qemu_chr_fe_write_all(&s->chr, &ch, 1);
         dbgu_update_irq(s);
@@ -280,6 +282,7 @@ static void dbgu_receive(void *opaque, const uint8_t *buf, int size)
     if (size <= 0) {
         return;
     }
+    trace_at91_dbgu_rx(buf[0]);
     s->rx_fifo = buf[0];
     s->rx_pending = true;
     dbgu_update_irq(s);
@@ -477,6 +480,7 @@ static void aic_set_irq(void *opaque, int n, int level)
     uint32_t bit = 1u << n;
     bool old = s->raw & bit;
 
+    trace_at91_aic_irq(n, level);
     if (level) {
         s->raw |= bit;
         if (AIC_SRCTYPE_IS_EDGE(s->smr[n]) && !old) {
@@ -1210,12 +1214,14 @@ static void hsmci_do_command(AT91HsmciState *s, uint32_t cmdr)
     s->sr &= ~HSMCI_SR_RTOE;
 
     rlen = sdbus_do_command(&s->sdbus, &req, resp, sizeof(resp));
+    trace_at91_hsmci_command(req.cmd, req.arg, (unsigned)rlen);
 
     /* A command that expects a response but gets none (e.g. an empty card
      * slot) is a response time-out - the driver treats RTOE as card-absent,
      * instead of spinning in __mmc_poll_for_busy. */
     if (HSMCI_CMDR_RSPTYP(cmdr) != HSMCI_RSPTYP_NONE && rlen == 0) {
         s->sr |= HSMCI_SR_RTOE;
+        trace_at91_hsmci_rtoe(req.cmd);
     }
 
     s->rsp_ptr = 0;
@@ -1585,6 +1591,7 @@ static bool lcdc_gfx_update(void *opaque)
     stride = w * bpp / 8;
 
     if (surface_width(surface) != w || surface_height(surface) != h) {
+        trace_at91_lcdc_mode(w, h, bpp);
         qemu_console_resize(s->con, w, h);
         surface = qemu_console_surface(s->con);
         s->invalidate = true;
@@ -2091,7 +2098,8 @@ static void dmac_run_channel(AT91DmacState *s, int n)
 {
     uint32_t dscr = s->ch[n].dscr;
 
-
+    trace_at91_dmac_run(n, s->ch[n].saddr, s->ch[n].daddr,
+                        s->ch[n].ctrla & 0xffff);
     if (dscr == 0) {
         /* single-buffer transfer straight from the channel registers */
         dmac_run_buffer(s->ch[n].saddr, s->ch[n].daddr,
@@ -2111,6 +2119,7 @@ static void dmac_run_channel(AT91DmacState *s, int n)
         s->ebcisr |= DMAC_CBTC(n);
     }
     s->chsr &= ~(1u << n);   /* channel finished */
+    trace_at91_dmac_complete(n);
     dmac_update_irq(s);
 }
 
@@ -2838,6 +2847,7 @@ static void macb_do_tx(AT91MacbState *s)
         if (ctrl & TXD_LAST) {
             uint32_t fctrl;
 
+            trace_at91_macb_tx(frame_len);
             qemu_send_packet(qemu_get_queue(s->nic), frame, frame_len);
             /* Hardware writes the USED bit back only on the frame's first
              * buffer descriptor; that is what the driver inspects on reclaim.
@@ -2926,6 +2936,7 @@ static ssize_t macb_receive(NetClientState *nc, const uint8_t *buf, size_t size)
     s->rsr |= RSR_REC;
     s->isr |= INT_RCOMP;
     macb_update_irq(s);
+    trace_at91_macb_rx(size);
     return size;
 }
 
@@ -3007,6 +3018,7 @@ static void macb_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
     case MACB_MAN: {
         unsigned op   = (val >> 28) & 0x3;   /* 10=read, 01=write */
         unsigned rega = (val >> 18) & 0x1f;
+        trace_at91_macb_mdio(op, rega, val & 0xffff);
         if (op == 2) {
             s->man = (val & 0xffff0000u) | macb_phy_read(s, rega);
         } else {
