@@ -105,4 +105,3 @@ at91_hsmci_command(uint8_t cmd, uint32_t arg, unsigned rsplen) "HSMCI CMD%u arg 
 at91_hsmci_rtoe(uint8_t cmd) "HSMCI CMD%u response timeout (no card)"
 at91_dmac_run(int chan, uint32_t saddr, uint32_t daddr, uint32_t len) "DMAC ch%d 0x%08x -> 0x%08x len %u"
 at91_dmac_complete(int chan) "DMAC ch%d transfer complete"
-at91_lcdc_mode(int w, int h, int bpp) "LCDC scanout %dx%d %dbpp"

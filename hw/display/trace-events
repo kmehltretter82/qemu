@@ -226,3 +226,6 @@ apple_gfx_iosfc_unmap_memory(void *a, void *b, void *c, void *d, void *e, void *
 apple_gfx_iosfc_unmap_memory_region(void* mem, void *region) "unmapping @ %p from memory region %p"
 apple_gfx_iosfc_raise_irq(uint32_t vector) "vector=0x%x"
 
+
+# at91_lcdc.c
+at91_lcdc_mode(int w, int h, int bpp) "LCDC scanout %dx%d %dbpp"
