@@ -38,6 +38,7 @@
 #include "hw/dma/at91_dmac.h"
 #include "hw/sd/at91_hsmci.h"
 #include "hw/gpio/at91_pio.h"
+#include "hw/i2c/at91_twi.h"
 #include "hw/char/at91_dbgu.h"
 #include "hw/intc/at91_aic.h"
 #include "hw/timer/at91_pit.h"
@@ -61,6 +62,8 @@
 #define SAM9G45_PIOD_BASE    0xFFFFF800
 #define SAM9G45_PIOE_BASE    0xFFFFFA00
 #define SAM9G45_DMAC_BASE    0xFFFFEC00   /* DMA Controller                    */
+#define SAM9G45_TWI0_BASE    0xFFF84000   /* Two-Wire Interface 0 (I2C)        */
+#define SAM9G45_TWI1_BASE    0xFFF88000   /* Two-Wire Interface 1 (I2C)        */
 #define SAM9G45_PMC_BASE     0xFFFFFC00   /* Power Management Controller       */
 #define SAM9G45_RSTC_BASE    0xFFFFFD00   /* Reset Controller                  */
 #define SAM9G45_SHDWC_BASE   0xFFFFFD10   /* Shutdown Controller               */
@@ -80,6 +83,8 @@
 #define SAM9G45_IRQ_HSMCI1   29
 #define SAM9G45_IRQ_UHPHS    22   /* USB host (OHCI + EHCI share this) */
 #define SAM9G45_IRQ_DMAC     21
+#define SAM9G45_IRQ_TWI0     12
+#define SAM9G45_IRQ_TWI1     13
 #define SAM9G45_IRQ_EMAC     25
 #define SAM9G45_IRQ_LCDC     23
 #define SAM9G45_IRQ_PIOA     2
@@ -256,6 +261,24 @@ static void sam9m10g45ek_init(MachineState *machine)
     /* High Speed MMC interfaces (SD via -sd / -drive if=sd). */
     sam9_create_hsmci(SAM9G45_HSMCI0_BASE, aic, SAM9G45_IRQ_HSMCI0, 0);
     sam9_create_hsmci(SAM9G45_HSMCI1_BASE, aic, SAM9G45_IRQ_HSMCI1, 1);
+
+    /* TWI (I2C) controllers.  Slaves attach with e.g.
+     * -device at24c-eeprom,bus=i2c-bus.0,address=0x50. */
+    {
+        static const struct { hwaddr base; int irq; } twi[] = {
+            { SAM9G45_TWI0_BASE, SAM9G45_IRQ_TWI0 },
+            { SAM9G45_TWI1_BASE, SAM9G45_IRQ_TWI1 },
+        };
+        int i;
+
+        for (i = 0; i < ARRAY_SIZE(twi); i++) {
+            DeviceState *dev = qdev_new(TYPE_AT91_TWI);
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, twi[i].base);
+            sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                               qdev_get_gpio_in(aic, twi[i].irq));
+        }
+    }
 
     /* Ethernet (10/100 EMAC, Cadence "macb"). */
     {
