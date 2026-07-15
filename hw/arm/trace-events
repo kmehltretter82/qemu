@@ -98,4 +98,3 @@ z2_aer915_event(int8_t event, int8_t len) "i2c event =0x%x len=%d bytes"
 bcm2838_gic_set_irq(int irq, int level) "gic irq:%d lvl:%d"
 
 # sam9m10g45ek.c (AT91SAM9G45)
-at91_aic_irq(int src, int level) "AIC source %d level %d"
