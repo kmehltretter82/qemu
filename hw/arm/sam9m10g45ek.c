@@ -39,7 +39,7 @@
 #include "hw/sd/at91_hsmci.h"
 #include "hw/gpio/at91_pio.h"
 #include "hw/i2c/at91_twi.h"
-#include "hw/char/at91_dbgu.h"
+#include "hw/char/at91_usart.h"
 #include "hw/intc/at91_aic.h"
 #include "hw/timer/at91_pit.h"
 #include "hw/misc/at91_pmc.h"
@@ -64,6 +64,14 @@
 #define SAM9G45_DMAC_BASE    0xFFFFEC00   /* DMA Controller                    */
 #define SAM9G45_TWI0_BASE    0xFFF84000   /* Two-Wire Interface 0 (I2C)        */
 #define SAM9G45_TWI1_BASE    0xFFF88000   /* Two-Wire Interface 1 (I2C)        */
+#define SAM9G45_USART0_BASE  0xFFF8C000   /* USART0 (ttyS1)                    */
+#define SAM9G45_USART1_BASE  0xFFF90000   /* USART1 (ttyS2)                    */
+#define SAM9G45_USART2_BASE  0xFFF94000   /* USART2 (ttyS3)                    */
+#define SAM9G45_USART3_BASE  0xFFF98000   /* USART3 (ttyS4)                    */
+
+/* Debug Unit chip identification (datasheet section 6.3). */
+#define SAM9G45_CIDR  0x819B05A2
+#define SAM9G45_EXID  0x00000004
 #define SAM9G45_PMC_BASE     0xFFFFFC00   /* Power Management Controller       */
 #define SAM9G45_RSTC_BASE    0xFFFFFD00   /* Reset Controller                  */
 #define SAM9G45_SHDWC_BASE   0xFFFFFD10   /* Shutdown Controller               */
@@ -85,6 +93,10 @@
 #define SAM9G45_IRQ_DMAC     21
 #define SAM9G45_IRQ_TWI0     12
 #define SAM9G45_IRQ_TWI1     13
+#define SAM9G45_IRQ_USART0   7
+#define SAM9G45_IRQ_USART1   8
+#define SAM9G45_IRQ_USART2   9
+#define SAM9G45_IRQ_USART3   10
 #define SAM9G45_IRQ_EMAC     25
 #define SAM9G45_IRQ_LCDC     23
 #define SAM9G45_IRQ_PIOA     2
@@ -321,13 +333,37 @@ static void sam9m10g45ek_init(MachineState *machine)
                            qdev_get_gpio_in(usb_or, 1));
     }
 
-    /* DBGU console -> OR gate input 0. */
-    dbgu = qdev_new(TYPE_AT91_DBGU);
+    /* DBGU console -> OR gate input 0.  The DBGU is a cut-down USART that also
+     * exposes the SoC Chip ID registers, so it is the USART model with a
+     * non-zero chip-id. */
+    dbgu = qdev_new(TYPE_AT91_USART);
     qdev_prop_set_chr(dbgu, "chardev", serial_hd(0));
+    qdev_prop_set_uint32(dbgu, "chip-id", SAM9G45_CIDR);
+    qdev_prop_set_uint32(dbgu, "chip-exid", SAM9G45_EXID);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dbgu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(dbgu), 0, SAM9G45_DBGU_BASE);
     sysbus_connect_irq(SYS_BUS_DEVICE(dbgu), 0,
                        qdev_get_gpio_in(orgate, 0));
+
+    /* USART0-3 -> ttyS1..4 on serial_hd(1..4), each on its own AIC source. */
+    {
+        static const struct { hwaddr base; int irq; } usart[] = {
+            { SAM9G45_USART0_BASE, SAM9G45_IRQ_USART0 },
+            { SAM9G45_USART1_BASE, SAM9G45_IRQ_USART1 },
+            { SAM9G45_USART2_BASE, SAM9G45_IRQ_USART2 },
+            { SAM9G45_USART3_BASE, SAM9G45_IRQ_USART3 },
+        };
+        int i;
+
+        for (i = 0; i < ARRAY_SIZE(usart); i++) {
+            DeviceState *dev = qdev_new(TYPE_AT91_USART);
+            qdev_prop_set_chr(dev, "chardev", serial_hd(1 + i));
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, usart[i].base);
+            sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                               qdev_get_gpio_in(aic, usart[i].irq));
+        }
+    }
 
     /* PIT system tick -> OR gate input 1.  Clock it from the board MCK so
      * guest timekeeping matches the modelled PMC clock tree. */
