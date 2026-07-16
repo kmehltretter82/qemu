@@ -9,7 +9,7 @@
  *   RSTC/SHDWC/WDT -> hw/misc/at91_sysc.c
  *   HSMCI -> hw/sd/at91_hsmci.c         DMAC  -> hw/dma/at91_dmac.c
  *   EMAC  -> hw/net/at91_macb.c         LCDC  -> hw/display/at91_lcdc.c
- *   PIO   -> hw/gpio/at91_pio.c
+ *   PIO   -> hw/gpio/at91_pio.c         TSADCC -> hw/adc/at91_tsadcc.c
  *
  * Register-level references are from the Atmel-6438 datasheet; see
  * qemu/.localdir/qemu-at91sam9g45-plan.md.  The system interrupt (AIC source 1)
@@ -40,6 +40,7 @@
 #include "hw/gpio/at91_pio.h"
 #include "hw/i2c/at91_twi.h"
 #include "hw/char/at91_usart.h"
+#include "hw/adc/at91_tsadcc.h"
 #include "hw/intc/at91_aic.h"
 #include "hw/timer/at91_pit.h"
 #include "hw/misc/at91_pmc.h"
@@ -83,6 +84,7 @@
 #define SAM9G45_EHCI_BASE    0x00800000   /* USB Host EHCI (high speed)        */
 #define SAM9G45_EMAC_BASE    0xFFFBC000   /* Ethernet MAC (EMAC / Cadence macb) */
 #define SAM9G45_LCDC_BASE    0x00500000   /* LCD Controller                    */
+#define SAM9G45_TSADCC_BASE  0xFFFB0000   /* Touch Screen ADC Controller       */
 
 #define SAM9G45_DEFAULT_RAM  (128 * MiB)  /* SAM9M10-G45-EK: 128 MB DDR2      */
 
@@ -99,6 +101,7 @@
 #define SAM9G45_IRQ_USART3   10
 #define SAM9G45_IRQ_EMAC     25
 #define SAM9G45_IRQ_LCDC     23
+#define SAM9G45_IRQ_TSADCC   20
 #define SAM9G45_IRQ_PIOA     2
 #define SAM9G45_IRQ_PIOB     3
 #define SAM9G45_IRQ_PIOC     4
@@ -290,6 +293,18 @@ static void sam9m10g45ek_init(MachineState *machine)
             sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
                                qdev_get_gpio_in(aic, twi[i].irq));
         }
+    }
+
+    /* Touch Screen ADC Controller.  Absolute-pointer input (display click
+     * or QMP input-send-event) becomes 4-wire pen contacts; the analog
+     * channels convert to synthetic values. */
+    {
+        DeviceState *adc = qdev_new(TYPE_AT91_TSADCC);
+        qdev_prop_set_uint32(adc, "mck-frequency", SAM9G45_MCK_HZ);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(adc), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(adc), 0, SAM9G45_TSADCC_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(adc), 0,
+                           qdev_get_gpio_in(aic, SAM9G45_IRQ_TSADCC));
     }
 
     /* Ethernet (10/100 EMAC, Cadence "macb"). */
