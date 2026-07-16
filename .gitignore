@@ -23,4 +23,4 @@ GTAGS
 .localdir
 AGENTS.md
 CLAUDE.md
-.logs
+logs/
