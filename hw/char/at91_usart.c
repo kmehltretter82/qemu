@@ -44,6 +44,17 @@
 #define US_RTOR    0x24   /* Receiver Time-out Register               */
 #define US_CIDR    0x40   /* (DBGU) Chip ID Register     (read-only)  */
 #define US_EXID    0x44   /* (DBGU) Chip ID Extension    (read-only)  */
+#define US_NAME    0xF0   /* IP Name Register            (read-only)  */
+#define US_VERSION 0xFC   /* IP Version Register         (read-only)  */
+
+/* US_NAME values ("USAR"/"DBGU" big-endian ASCII) and matching versions.
+ * The atmel_serial driver identifies the IP flavor from these registers
+ * (atmel_get_ip_name(); Atmel vendor kernels fail the probe outright on an
+ * unknown name), distinguishing full USARTs from the cut-down DBGU. */
+#define US_NAME_USART    0x55534152
+#define US_NAME_DBGU     0x44424755
+#define US_VERSION_USART 0x10302
+#define US_VERSION_DBGU  0x10202
 /* PDC (peripheral DMA) registers */
 #define US_RPR     0x100
 #define US_RCR     0x104
@@ -195,6 +206,9 @@ static uint64_t usart_read(void *opaque, hwaddr offset, unsigned size)
     case US_RTOR:  return s->rtor;
     case US_CIDR:  return s->chip_id;             /* 0 for a plain USART */
     case US_EXID:  return s->chip_id ? s->chip_exid : 0;
+    case US_NAME:  return s->chip_id ? US_NAME_DBGU : US_NAME_USART;
+    case US_VERSION:
+        return s->chip_id ? US_VERSION_DBGU : US_VERSION_USART;
     case US_RPR:   return s->rpr;
     case US_RCR:   return s->rcr;
     case US_TPR:   return s->tpr;
