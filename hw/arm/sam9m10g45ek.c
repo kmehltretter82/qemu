@@ -50,6 +50,7 @@
 #include "hw/timer/at91_tc.h"
 #include "hw/misc/at91_pmc.h"
 #include "hw/misc/at91_sysc.h"
+#include "hw/misc/at91_pwm.h"
 #include "hw/misc/unimp.h"
 #include "qom/object.h"
 #include "target/arm/cpu-qom.h"
@@ -94,6 +95,7 @@
 #define SAM9G45_EMAC_BASE    0xFFFBC000   /* Ethernet MAC (EMAC / Cadence macb) */
 #define SAM9G45_LCDC_BASE    0x00500000   /* LCD Controller                    */
 #define SAM9G45_TSADCC_BASE  0xFFFB0000   /* Touch Screen ADC Controller       */
+#define SAM9G45_PWM_BASE     0xFFFB8000   /* Pulse Width Modulation controller */
 
 #define SAM9G45_DEFAULT_RAM  (128 * MiB)  /* SAM9M10-G45-EK: 128 MB DDR2      */
 
@@ -113,6 +115,7 @@
 #define SAM9G45_IRQ_EMAC     25
 #define SAM9G45_IRQ_LCDC     23
 #define SAM9G45_IRQ_TSADCC   20
+#define SAM9G45_IRQ_PWM      19
 #define SAM9G45_IRQ_PIOA     2
 #define SAM9G45_IRQ_PIOB     3
 #define SAM9G45_IRQ_PIOC     4
@@ -360,6 +363,15 @@ static void sam9m10g45ek_init(MachineState *machine)
         sysbus_mmio_map(SYS_BUS_DEVICE(adc), 0, SAM9G45_TSADCC_BASE);
         sysbus_connect_irq(SYS_BUS_DEVICE(adc), 0,
                            qdev_get_gpio_in(aic, SAM9G45_IRQ_TSADCC));
+    }
+
+    /* Pulse Width Modulation controller (4 channels). */
+    {
+        DeviceState *pwm = qdev_new(TYPE_AT91_PWM);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(pwm), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(pwm), 0, SAM9G45_PWM_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(pwm), 0,
+                           qdev_get_gpio_in(aic, SAM9G45_IRQ_PWM));
     }
 
     /* Ethernet (10/100 EMAC, Cadence "macb"). */
