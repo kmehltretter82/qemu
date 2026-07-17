@@ -45,6 +45,7 @@
 #include "hw/adc/at91_tsadcc.h"
 #include "hw/intc/at91_aic.h"
 #include "hw/timer/at91_pit.h"
+#include "hw/timer/at91_tc.h"
 #include "hw/misc/at91_pmc.h"
 #include "hw/misc/at91_sysc.h"
 #include "hw/misc/unimp.h"
@@ -82,6 +83,8 @@
 #define SAM9G45_WDT_BASE     0xFFFFFD40   /* Watchdog Timer                    */
 #define SAM9G45_HSMCI0_BASE  0xFFF80000   /* High Speed MMC Interface 0        */
 #define SAM9G45_HSMCI1_BASE  0xFFFD0000   /* High Speed MMC Interface 1        */
+#define SAM9G45_TCB0_BASE    0xFFF7C000   /* Timer Counter block 0 (TC0-2)     */
+#define SAM9G45_TCB1_BASE    0xFFFD4000   /* Timer Counter block 1 (TC3-5)     */
 #define SAM9G45_OHCI_BASE    0x00700000   /* USB Host OHCI (full/low speed)    */
 #define SAM9G45_EHCI_BASE    0x00800000   /* USB Host EHCI (high speed)        */
 #define SAM9G45_EMAC_BASE    0xFFFBC000   /* Ethernet MAC (EMAC / Cadence macb) */
@@ -108,6 +111,7 @@
 #define SAM9G45_IRQ_PIOB     3
 #define SAM9G45_IRQ_PIOC     4
 #define SAM9G45_IRQ_PIODE    5   /* PIOD and PIOE share this */
+#define SAM9G45_IRQ_TCB      18  /* both TC blocks share this */
 
 /* mmc card-detect lines on PIOD (board DT: cd-gpios = <&pioD 10/11 ...>). */
 #define SAM9G45_MMC0_CD_PIN  10
@@ -422,6 +426,29 @@ static void sam9m10g45ek_init(MachineState *machine)
             sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, usart[i].base);
             sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
                                qdev_get_gpio_in(aic, usart[i].irq));
+        }
+    }
+
+    /* Timer Counter blocks (TC0-2 / TC3-5).  Both share AIC source 18.
+     * Linux's tcb_clksrc uses TCB0 as clocksource + tick clockevent when
+     * enabled, in preference to the PIT. */
+    {
+        static const hwaddr tcb[] = { SAM9G45_TCB0_BASE, SAM9G45_TCB1_BASE };
+        DeviceState *tc_or = qdev_new(TYPE_OR_IRQ);
+        int i;
+
+        qdev_prop_set_uint16(tc_or, "num-lines", 2);
+        qdev_realize_and_unref(tc_or, NULL, &error_fatal);
+        qdev_connect_gpio_out(tc_or, 0,
+                              qdev_get_gpio_in(aic, SAM9G45_IRQ_TCB));
+
+        for (i = 0; i < ARRAY_SIZE(tcb); i++) {
+            DeviceState *tc = qdev_new(TYPE_AT91_TC);
+            qdev_prop_set_uint32(tc, "mck-frequency", SAM9G45_MCK_HZ);
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(tc), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(tc), 0, tcb[i]);
+            sysbus_connect_irq(SYS_BUS_DEVICE(tc), 0,
+                               qdev_get_gpio_in(tc_or, i));
         }
     }
 
