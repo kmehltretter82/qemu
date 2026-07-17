@@ -42,6 +42,8 @@
 #include "hw/gpio/at91_pio.h"
 #include "hw/i2c/at91_twi.h"
 #include "hw/char/at91_usart.h"
+#include "hw/ssi/at91_spi.h"
+#include "hw/ssi/ssi.h"
 #include "hw/adc/at91_tsadcc.h"
 #include "hw/intc/at91_aic.h"
 #include "hw/timer/at91_pit.h"
@@ -72,6 +74,8 @@
 #define SAM9G45_USART1_BASE  0xFFF90000   /* USART1 (ttyS2)                    */
 #define SAM9G45_USART2_BASE  0xFFF94000   /* USART2 (ttyS3)                    */
 #define SAM9G45_USART3_BASE  0xFFF98000   /* USART3 (ttyS4)                    */
+#define SAM9G45_SPI0_BASE    0xFFFA4000   /* Serial Peripheral Interface 0     */
+#define SAM9G45_SPI1_BASE    0xFFFA8000   /* Serial Peripheral Interface 1     */
 
 /* Debug Unit chip identification (datasheet section 6.3). */
 #define SAM9G45_CIDR  0x819B05A2
@@ -104,6 +108,8 @@
 #define SAM9G45_IRQ_USART1   8
 #define SAM9G45_IRQ_USART2   9
 #define SAM9G45_IRQ_USART3   10
+#define SAM9G45_IRQ_SPI0     14
+#define SAM9G45_IRQ_SPI1     15
 #define SAM9G45_IRQ_EMAC     25
 #define SAM9G45_IRQ_LCDC     23
 #define SAM9G45_IRQ_TSADCC   20
@@ -426,6 +432,48 @@ static void sam9m10g45ek_init(MachineState *machine)
             sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, usart[i].base);
             sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
                                qdev_get_gpio_in(aic, usart[i].irq));
+        }
+    }
+
+    /* SPI controllers.  SPI0 carries an SPI-NOR flash (n25q032, a stand-in for
+     * the board's AT45 DataFlash) on native chip-select NPCS0; the controller's
+     * "cs" gpio output drives the flash's chip-select input so each command is
+     * framed by CS.  Attach a backing image with -drive if=mtd,index=1
+     * (index 0 is the NAND).  The stock DTB's flash node is atmel,at45; use a
+     * jedec,spi-nor node to exercise it (mtd_dataflash won't drive an m25p80). */
+    {
+        static const struct { hwaddr base; int irq; } spi[] = {
+            { SAM9G45_SPI0_BASE, SAM9G45_IRQ_SPI0 },
+            { SAM9G45_SPI1_BASE, SAM9G45_IRQ_SPI1 },
+        };
+        DeviceState *spi0 = NULL;
+        int i;
+
+        for (i = 0; i < ARRAY_SIZE(spi); i++) {
+            DeviceState *dev = qdev_new(TYPE_AT91_SPI);
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, spi[i].base);
+            sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                               qdev_get_gpio_in(aic, spi[i].irq));
+            if (i == 0) {
+                spi0 = dev;
+            }
+        }
+
+        {
+            SSIBus *bus = (SSIBus *)qdev_get_child_bus(spi0, "spi");
+            DeviceState *flash = qdev_new("n25q032");
+            DriveInfo *di = drive_get(IF_MTD, 0, 1);
+
+            if (di) {
+                qdev_prop_set_drive_err(flash, "drive",
+                                        blk_by_legacy_dinfo(di), &error_fatal);
+            }
+            qdev_prop_set_uint8(flash, "cs", 0);
+            qdev_realize_and_unref(flash, BUS(bus), &error_fatal);
+            qdev_connect_gpio_out_named(spi0, "cs", 0,
+                                        qdev_get_gpio_in_named(flash,
+                                                               SSI_GPIO_CS, 0));
         }
     }
 

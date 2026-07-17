@@ -62,3 +62,6 @@ allwinner_a10_spi_tx(uint8_t byte) "write 0x%02x"
 allwinner_a10_spi_rx(uint8_t byte) "read 0x%02x"
 allwinner_a10_spi_read(const char* regname, uint32_t value) "reg[%s] => 0x%08x"
 allwinner_a10_spi_write(const char* regname, uint32_t value) "reg[%s] <= 0x%08x"
+
+# at91_spi.c
+at91_spi_xfer(int cs, unsigned tx, unsigned rx) "SPI cs %d tx 0x%04x rx 0x%04x"
