@@ -800,13 +800,18 @@ static bool glue(nand_blk_load_, NAND_PAGE_SIZE)(NANDFlashState *s,
                             OOB_SIZE);
             s->ioaddr = s->io + SECTOR_OFFSET(s->addr) + offset;
         } else {
+            /* blk_pread() takes a byte offset, so the page data lands at
+             * the start of s->io; indexing the buffer by the page's
+             * intra-sector remainder as well (as this code did when the
+             * block API was sector-based) would double-count it and
+             * return every non-sector-aligned page shifted. */
             if (blk_pread(s->blk, PAGE_START(addr),
                           (PAGE_SECTORS + 2) << BDRV_SECTOR_BITS, s->io, 0)
                 < 0) {
                 printf("%s: read error in sector %" PRIu64 "\n",
                                 __func__, PAGE_START(addr) >> 9);
             }
-            s->ioaddr = s->io + (PAGE_START(addr) & 0x1ff) + offset;
+            s->ioaddr = s->io + offset;
         }
     } else {
         memcpy(s->io, s->storage + PAGE_START(s->addr) +
