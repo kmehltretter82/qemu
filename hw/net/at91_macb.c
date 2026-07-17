@@ -4,8 +4,9 @@
  * Faithful model of the classic AT91 EMAC (Cadence "macb", pre-GEM), as
  * driven by the Linux "cdns,at91sam9260-macb" driver: the classic two-word
  * RX/TX buffer descriptors (128-byte RX buffers, frames span buffers),
- * MDIO/PHY maintenance with an emulated auto-negotiated 100M/full PHY, and
- * the NCR/NCFGR/NSR/TSR/RSR/ISR register set.  The MID register reports
+ * MDIO/PHY maintenance with an emulated Davicom DM9161A PHY (the part on
+ * the SAM9M10-G45-EK) auto-negotiated to 100M/full, and the
+ * NCR/NCFGR/NSR/TSR/RSR/ISR register set.  The MID register reports
  * IDNUM < 2 so the driver takes the non-GEM path.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -76,19 +77,31 @@
 #define TXD_USED    (1u << 31)   /* owned by MAC when clear */
 #define TXD_LEN_MASK 0x7ffu
 
-/* Emulated PHY (generic Clause-22, mirrors the cadence_gem stand-in). */
+/* Emulated PHY: Davicom DM9161A, the part on the SAM9M10-G45-EK.  The
+ * IEEE Clause-22 registers plus the Davicom vendor block (DSCR/DSCSR/
+ * 10BTCSR/interrupt), so both the generic PHY driver and Linux's davicom
+ * driver (CONFIG_DAVICOM_PHY, phy id 0x0181b8a0) are happy.  Vendor
+ * registers are storage with datasheet reset values; DSCSR's operation
+ * mode bits track the (always 100BASE-TX/full) negotiated link. */
 #define MACB_PHY_CONTROL   0
 #define MACB_PHY_STATUS    1
 #define MACB_PHY_PHYID1    2
 #define MACB_PHY_PHYID2    3
 #define MACB_PHY_ANEGADV   4
 #define MACB_PHY_LINKPABIL 5
+#define MACB_PHY_ANER      6
+#define DM9161_DSCR        16   /* Davicom specified configuration      */
+#define DM9161_DSCSR       17   /* Davicom configuration and status     */
+#define DM9161_10BTCSR     18   /* 10BASE-T configuration/status        */
+#define DM9161_INTR        21   /* interrupt source/mask                */
 #define PHY_CONTROL_RST    0x8000
 #define PHY_CONTROL_LOOP   0x4000
 #define PHY_CONTROL_ANEG   0x1000
 #define PHY_CONTROL_ANRST  0x0200
 #define PHY_STATUS_LINK    0x0004
 #define PHY_STATUS_ANEGCMPL 0x0020
+#define DSCSR_100FDX       0x8000
+#define DSCSR_ANEG_DONE    0x0008
 
 #define MACB_RX_BUFSIZE 128
 
@@ -127,8 +140,10 @@ static void macb_phy_update_link(AT91MacbState *s)
 {
     if (qemu_get_queue(s->nic)->link_down) {
         s->phy_regs[MACB_PHY_STATUS] &= ~(PHY_STATUS_LINK | PHY_STATUS_ANEGCMPL);
+        s->phy_regs[DM9161_DSCSR] = DSCSR_ANEG_DONE;
     } else {
         s->phy_regs[MACB_PHY_STATUS] |= (PHY_STATUS_LINK | PHY_STATUS_ANEGCMPL);
+        s->phy_regs[DM9161_DSCSR] = DSCSR_100FDX | DSCSR_ANEG_DONE;
     }
 }
 
@@ -137,10 +152,14 @@ static void macb_phy_reset(AT91MacbState *s)
     memset(s->phy_regs, 0, sizeof(s->phy_regs));
     s->phy_regs[MACB_PHY_CONTROL]   = 0x1140;  /* 100M, full duplex, aneg  */
     s->phy_regs[MACB_PHY_STATUS]    = 0x7969;  /* 100/10 caps, aneg able   */
-    s->phy_regs[MACB_PHY_PHYID1]    = 0x0141;
-    s->phy_regs[MACB_PHY_PHYID2]    = 0x0cc2;
+    s->phy_regs[MACB_PHY_PHYID1]    = 0x0181;  /* Davicom DM9161A          */
+    s->phy_regs[MACB_PHY_PHYID2]    = 0xb8a0;
     s->phy_regs[MACB_PHY_ANEGADV]   = 0x01e1;
     s->phy_regs[MACB_PHY_LINKPABIL] = 0xcde1;  /* link partner: 100/full   */
+    s->phy_regs[MACB_PHY_ANER]      = 0x0001;  /* partner is aneg-able     */
+    s->phy_regs[DM9161_DSCR]        = 0x0410;
+    s->phy_regs[DM9161_10BTCSR]     = 0x7800;
+    s->phy_regs[DM9161_INTR]        = 0x0f00;  /* all sources masked       */
     macb_phy_update_link(s);
 }
 
@@ -252,7 +271,9 @@ static ssize_t macb_receive(NetClientState *nc, const uint8_t *buf, size_t size)
     bool first = true;
 
     if (!(s->ncr & NCR_RE) || !desc) {
-        return -1;
+        /* RX disabled: swallow the frame like the real MAC.  Returning an
+         * error here would make slirp treat the whole link as dead. */
+        return size;
     }
 
     do {
@@ -268,11 +289,24 @@ static ssize_t macb_receive(NetClientState *nc, const uint8_t *buf, size_t size)
         size_t n;
 
         if (addr & RXD_USED) {
-            /* No free buffer: report buffer-not-available and drop. */
+            /* No free buffer (can_receive only sees the first descriptor,
+             * so a multi-buffer frame can still run out mid-frame): report
+             * buffer-not-available and DROP the frame, like the hardware.
+             * The frame counts as consumed - an error return would wedge
+             * the peer (slirp already ate the bytes and never retries),
+             * whereas a drop lets TCP retransmission recover.
+             *
+             * Reception resumes at THIS descriptor, not at the dropped
+             * frame's first one: the driver's discard_partial_frame()
+             * consumes the fragment's descriptors and expects the next
+             * frame beyond them - rewinding desynchronizes the model's
+             * write position from the driver's read position and the
+             * guest goes permanently deaf. */
+            s->rx_desc = desc;
             s->rsr |= RSR_BNA;
             s->isr |= INT_RXUBR;
             macb_update_irq(s);
-            return -1;
+            return size;
         }
         n = remaining < space ? remaining : space;
         if (n) {
@@ -376,13 +410,28 @@ static void macb_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
         qemu_flush_queued_packets(qemu_get_queue(s->nic));
         break;
     case MACB_ISR:    s->isr &= ~(uint32_t)val; macb_update_irq(s); break;
-    case MACB_IER:    s->imr &= ~(uint32_t)val; macb_update_irq(s); break;
+    case MACB_IER:
+        s->imr &= ~(uint32_t)val;
+        macb_update_irq(s);
+        /* The driver re-enables RX interrupts at the end of its NAPI poll
+         * cycle, right after refilling the RX ring - the ring refill
+         * itself is pure memory traffic we cannot observe, so this is the
+         * hook to resume delivery of queued packets (can_receive() went
+         * false while the ring was full). */
+        qemu_flush_queued_packets(qemu_get_queue(s->nic));
+        break;
     case MACB_IDR:    s->imr |= (uint32_t)val;  macb_update_irq(s); break;
     case MACB_MAN: {
         unsigned op   = (val >> 28) & 0x3;   /* 10=read, 01=write */
+        unsigned phya = (val >> 23) & 0x1f;
         unsigned rega = (val >> 18) & 0x1f;
         trace_at91_macb_mdio(op, rega, val & 0xffff);
-        if (op == 2) {
+        if (phya != 0) {
+            /* Single PHY on the board (DM9161A at address 0); the mdio
+             * bus scan of the other 31 addresses reads an idle bus,
+             * which floats high. */
+            s->man = (op == 2) ? ((val & 0xffff0000u) | 0xffff) : val;
+        } else if (op == 2) {
             s->man = (val & 0xffff0000u) | macb_phy_read(s, rega);
         } else {
             if (op == 1) {
