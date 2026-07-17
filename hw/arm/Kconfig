@@ -250,6 +250,7 @@ config SAM9G45
     select USB_OHCI_SYSBUS
     select USB_EHCI_SYSBUS
     select I2C
+    select NAND
 
 config VERSATILE
     bool

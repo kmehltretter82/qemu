@@ -29,6 +29,8 @@
 #include "system/system.h"
 #include "system/address-spaces.h"
 #include "system/blockdev.h"
+#include "hw/block/nand.h"
+#include "hw/block/at91_nand.h"
 #include "hw/sd/sd.h"
 #include "hw/usb/hcd-ohci.h"
 #include "hw/usb/hcd-ehci.h"
@@ -110,6 +112,12 @@
 /* mmc card-detect lines on PIOD (board DT: cd-gpios = <&pioD 10/11 ...>). */
 #define SAM9G45_MMC0_CD_PIN  10
 #define SAM9G45_MMC1_CD_PIN  11
+
+/* NAND flash sits in the EBI chip-select 3 window; its ready/busy output
+ * is a PIO input (board DT: gpios = <&pioC 8 ...> in the nand node). */
+#define SAM9G45_EBI_CS3_BASE 0x40000000
+#define SAM9G45_EBI_CS3_SIZE 0x10000000
+#define SAM9G45_NAND_RB_PIN  8
 
 /*
  * Master clock.  The PMC reset registers below model a boot-loader-configured
@@ -235,7 +243,7 @@ static void sam9m10g45ek_init(MachineState *machine)
             { SAM9G45_PIOB_BASE, SAM9G45_IRQ_PIOB },
             { SAM9G45_PIOC_BASE, SAM9G45_IRQ_PIOC },
         };
-        DeviceState *pio_or, *piod, *pioe, *p;
+        DeviceState *pio_or, *piod, *pioe, *p, *pioc = NULL;
         int i;
 
         for (i = 0; i < 3; i++) {
@@ -244,6 +252,9 @@ static void sam9m10g45ek_init(MachineState *machine)
             sysbus_mmio_map(SYS_BUS_DEVICE(p), 0, abc[i].base);
             sysbus_connect_irq(SYS_BUS_DEVICE(p), 0,
                                qdev_get_gpio_in(aic, abc[i].irq));
+            if (abc[i].base == SAM9G45_PIOC_BASE) {
+                pioc = p;
+            }
         }
 
         pio_or = qdev_new(TYPE_OR_IRQ);
@@ -271,6 +282,40 @@ static void sam9m10g45ek_init(MachineState *machine)
                             drive_get(IF_SD, 0, 0) == NULL);
         pio_set_reset_input(piod, SAM9G45_MMC1_CD_PIN,
                             drive_get(IF_SD, 0, 1) == NULL);
+
+        /* NAND flash on EBI chip select 3 (attach with -drive if=mtd,
+         * format=raw; the image uses the raw page + OOB layout, 2112 bytes
+         * per page).  Without a drive the window reads as zeros, so a
+         * READID probe finds no chip and the guest driver bails out
+         * cleanly. */
+        {
+            DriveInfo *di = drive_get(IF_MTD, 0, 0);
+
+            if (di) {
+                DeviceState *chip = qdev_new(TYPE_NAND);
+                DeviceState *ebi = qdev_new(TYPE_AT91_NAND);
+
+                qdev_prop_set_uint8(chip, "manufacturer_id", NAND_MFR_MICRON);
+                /* 2 Gbit x8: 256 MB, 2K pages, 128K blocks (MT29F2G08). */
+                qdev_prop_set_uint8(chip, "chip_id", 0xda);
+                qdev_prop_set_drive_err(chip, "drive",
+                                        blk_by_legacy_dinfo(di), &error_fatal);
+                qdev_realize_and_unref(chip, NULL, &error_fatal);
+
+                object_property_set_link(OBJECT(ebi), "nand", OBJECT(chip),
+                                         &error_fatal);
+                sysbus_realize_and_unref(SYS_BUS_DEVICE(ebi), &error_fatal);
+                sysbus_mmio_map(SYS_BUS_DEVICE(ebi), 0, SAM9G45_EBI_CS3_BASE);
+            } else {
+                create_unimplemented_device("at91-ebi-cs3",
+                                            SAM9G45_EBI_CS3_BASE,
+                                            SAM9G45_EBI_CS3_SIZE);
+            }
+
+            /* Ready/busy PIO input: the modelled chip completes operations
+             * synchronously, so it is always ready. */
+            pio_set_reset_input(pioc, SAM9G45_NAND_RB_PIN, true);
+        }
     }
 
     /* High Speed MMC interfaces (SD via -sd / -drive if=sd). */

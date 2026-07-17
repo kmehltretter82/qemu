@@ -111,3 +111,6 @@ swim_iwmctrl_read(int reg, const char *name, unsigned size, uint64_t value) "reg
 swim_iwmctrl_write(int reg, const char *name, unsigned size, uint64_t value) "reg=%d [%s] size=%u value=0x%"PRIx64
 swim_switch_to_ism(void) "switch from IWM to ISM mode"
 swim_switch_to_iwm(void) "switch from ISM to IWM mode"
+
+# at91_nand.c
+at91_nand_ctrl(const char *kind, uint8_t val) "%s 0x%02x"
