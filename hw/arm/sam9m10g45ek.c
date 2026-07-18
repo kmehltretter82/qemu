@@ -51,6 +51,7 @@
 #include "hw/misc/at91_pmc.h"
 #include "hw/misc/at91_sysc.h"
 #include "hw/misc/at91_pwm.h"
+#include "hw/rtc/at91_rtc.h"
 #include "hw/misc/unimp.h"
 #include "qom/object.h"
 #include "target/arm/cpu-qom.h"
@@ -86,6 +87,9 @@
 #define SAM9G45_SHDWC_BASE   0xFFFFFD10   /* Shutdown Controller               */
 #define SAM9G45_PIT_BASE     0xFFFFFD30   /* Periodic Interval Timer           */
 #define SAM9G45_WDT_BASE     0xFFFFFD40   /* Watchdog Timer                    */
+#define SAM9G45_RTT_BASE     0xFFFFFD20
+#define SAM9G45_GPBR_BASE    0xFFFFFD60
+#define SAM9G45_RTC_BASE     0xFFFFFDB0
 #define SAM9G45_HSMCI0_BASE  0xFFF80000   /* High Speed MMC Interface 0        */
 #define SAM9G45_HSMCI1_BASE  0xFFFD0000   /* High Speed MMC Interface 1        */
 #define SAM9G45_TCB0_BASE    0xFFF7C000   /* Timer Counter block 0 (TC0-2)     */
@@ -213,9 +217,12 @@ static void sam9m10g45ek_init(MachineState *machine)
     sysbus_connect_irq(SYS_BUS_DEVICE(aic), 1,
                        qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_FIQ));
 
-    /* System interrupt (AIC source 1) is the wired-OR of DBGU + PIT. */
+    /*
+     * System interrupt (AIC source 1) is the wired-OR of DBGU, PIT, RTC, RTT,
+     * and other system peripherals on real hardware.
+     */
     orgate = qdev_new(TYPE_OR_IRQ);
-    qdev_prop_set_uint16(orgate, "num-lines", 2);
+    qdev_prop_set_uint16(orgate, "num-lines", 4);
     qdev_realize_and_unref(orgate, NULL, &error_fatal);
     qdev_connect_gpio_out(orgate, 0,
                           qdev_get_gpio_in(aic, SAM9G45_IRQ_SYS));
@@ -247,6 +254,27 @@ static void sam9m10g45ek_init(MachineState *machine)
     sysbus_create_simple(TYPE_AT91_RSTC, SAM9G45_RSTC_BASE, NULL);
     sysbus_create_simple(TYPE_AT91_SHDWC, SAM9G45_SHDWC_BASE, NULL);
     sysbus_create_simple(TYPE_AT91_WDT, SAM9G45_WDT_BASE, NULL);
+
+    /*
+     * Backup-area timekeeping: RTC + RTT use system OR-gate inputs 2 and 3;
+     * GPBR is plain scratch storage.
+     */
+    {
+        DeviceState *rtc = qdev_new(TYPE_AT91_RTC);
+        DeviceState *rtt = qdev_new(TYPE_AT91_RTT);
+
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(rtc), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(rtc), 0, SAM9G45_RTC_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(rtc), 0,
+                           qdev_get_gpio_in(orgate, 2));
+
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(rtt), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(rtt), 0, SAM9G45_RTT_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(rtt), 0,
+                           qdev_get_gpio_in(orgate, 3));
+
+        sysbus_create_simple(TYPE_AT91_GPBR, SAM9G45_GPBR_BASE, NULL);
+    }
 
     /* Parallel I/O controllers (GPIO).  PIOA/B/C get their own AIC source;
      * PIOD + PIOE share source 5 (via an OR gate). */
