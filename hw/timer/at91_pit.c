@@ -36,6 +36,7 @@ struct AT91PitState {
     uint32_t mr;
     uint32_t picnt;        /* completed intervals since last PIVR read */
     bool pits;
+    bool irq_level;        /* last level driven onto the AIC line */
     int64_t last_fire;     /* ns of last interval boundary */
 };
 
@@ -53,7 +54,17 @@ static int64_t pit_period_ns(AT91PitState *s)
 
 static void pit_update_irq(AT91PitState *s)
 {
-    qemu_set_irq(s->irq, (s->pits && (s->mr & PIT_MR_PITIEN)) ? 1 : 0);
+    bool level = s->pits && (s->mr & PIT_MR_PITIEN);
+
+    /* Only drive an edge onto the shared AIC line when the level actually
+     * changes.  Otherwise, once the guest switches its tick to the TCB and
+     * masks PITIEN (but leaves the PIT running as clocksource), every interval
+     * boundary would spam a redundant de-assert onto AIC source 1, which the
+     * PIT shares with the DBGU/RTC/RTT/scheduler tick. */
+    if (level != s->irq_level) {
+        s->irq_level = level;
+        qemu_set_irq(s->irq, level);
+    }
 }
 
 /* Current sub-interval counter value (CPIV). */
@@ -206,6 +217,7 @@ static const VMStateDescription vmstate_at91_pit = {
         VMSTATE_UINT32(mr, AT91PitState),
         VMSTATE_UINT32(picnt, AT91PitState),
         VMSTATE_BOOL(pits, AT91PitState),
+        VMSTATE_BOOL(irq_level, AT91PitState),
         VMSTATE_INT64(last_fire, AT91PitState),
         VMSTATE_TIMER_PTR(timer, AT91PitState),
         VMSTATE_END_OF_LIST()

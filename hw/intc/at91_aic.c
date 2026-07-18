@@ -162,14 +162,22 @@ static uint64_t aic_read(void *opaque, hwaddr offset, unsigned size)
         best = aic_best_irq(s, pending, &best_prio);
         cur_prio = (s->sp > 0) ? s->prio_stack[s->sp - 1] : -1;
         if (best < 0 || best_prio <= cur_prio) {
-            /* Spurious: no eligible interrupt. */
+            /* Spurious: no eligible interrupt (the source de-asserted between
+             * nIRQ being raised and this read).  The driver still writes EOICR
+             * once per IVR read, so we must push here too - pushing the current
+             * level keeps the priority stack balanced without changing it. */
             s->isr = 0;
+            if (s->sp < AIC_STACK_SZ) {
+                s->prio_stack[s->sp++] = cur_prio;
+            }
+            trace_at91_aic_ivr(-1, cur_prio, s->sp);
             return s->spu;
         }
         s->isr = best;
         if (s->sp < AIC_STACK_SZ) {
             s->prio_stack[s->sp++] = best_prio;
         }
+        trace_at91_aic_ivr(best, best_prio, s->sp);
         if (AIC_SRCTYPE_IS_EDGE(s->smr[best])) {
             s->edge &= ~(1u << best);
         }
@@ -245,6 +253,7 @@ static void aic_write(void *opaque, hwaddr offset, uint64_t value,
         if (s->sp > 0) {
             s->sp--;               /* exit point: pop priority stack */
         }
+        trace_at91_aic_eoi(s->sp);
         aic_update(s);
         break;
     case AIC_SPU:

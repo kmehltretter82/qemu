@@ -360,3 +360,5 @@ riscv_aplic_write(uint64_t offset, unsigned size, uint64_t value) "offset: 0x%" 
 
 # at91_aic.c
 at91_aic_irq(int src, int level) "AIC source %d level %d"
+at91_aic_ivr(int src, int prio, int sp) "AIC IVR src %d prio %d sp %d"
+at91_aic_eoi(int sp) "AIC EOICR -> sp %d"
