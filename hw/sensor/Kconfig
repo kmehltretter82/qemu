@@ -36,6 +36,10 @@ config LSM303DLHC_MAG
     depends on I2C
     default y if I2C_DEVICES
 
+config OV2640
+    bool
+    depends on I2C
+
 config ISL_PMBUS_VR
     bool
     depends on PMBUS

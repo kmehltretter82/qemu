@@ -55,6 +55,8 @@
 #include "hw/sd/at91_hsmci.h"
 #include "hw/gpio/at91_pio.h"
 #include "hw/i2c/at91_twi.h"
+#include "hw/i2c/i2c.h"
+#include "hw/misc/at91_isi.h"
 #include "hw/char/at91_usart.h"
 #include "hw/ssi/at91_spi.h"
 #include "hw/ssi/at91_ssc.h"
@@ -122,6 +124,7 @@
 #define SAM9G45_EMAC_BASE    0xFFFBC000   /* Ethernet MAC (EMAC / Cadence macb) */
 #define SAM9G45_LCDC_BASE    0x00500000   /* LCD Controller                    */
 #define SAM9G45_TSADCC_BASE  0xFFFB0000   /* Touch Screen ADC Controller       */
+#define SAM9G45_ISI_BASE     0xFFFB4000   /* Image Sensor Interface            */
 #define SAM9G45_PWM_BASE     0xFFFB8000   /* Pulse Width Modulation controller */
 #define SAM9G45_AC97_BASE    0xFFFAC000   /* AC97 Controller                   */
 #define SAM9G45_TRNG_BASE    0xFFFCC000   /* True Random Number Generator      */
@@ -163,6 +166,7 @@
 #define SAM9G45_IRQ_EMAC     25
 #define SAM9G45_IRQ_LCDC     23
 #define SAM9G45_IRQ_TSADCC   20
+#define SAM9G45_IRQ_ISI      26
 #define SAM9G45_IRQ_PWM      19
 #define SAM9G45_IRQ_AC97     24
 #define SAM9G45_IRQ_TRNG     6
@@ -182,6 +186,9 @@
 
 /* Board USB-device connector VBUS sense (active high). */
 #define SAM9G45_UDPHS_VBUS_PIN  19
+
+/* OV2640 camera module SCCB address (stock DT camera@30 on i2c0). */
+#define SAM9G45_OV2640_ADDR  0x30
 
 /*
  * Master clock.  The PMC reset registers below model a boot-loader-configured
@@ -620,7 +627,9 @@ static void sam9m10g45ek_init(MachineState *machine)
     sam9_create_hsmci(SAM9G45_HSMCI1_BASE, aic, SAM9G45_IRQ_HSMCI1, 1);
 
     /* TWI (I2C) controllers.  Slaves attach with e.g.
-     * -device at24c-eeprom,bus=i2c-bus.0,address=0x50. */
+     * -device at24c-eeprom,bus=i2c-bus.0,address=0x50.  The board's OV2640
+     * camera module control interface sits on TWI0 (EK schematic: ISI
+     * connector), matching the stock device tree's camera@30 node. */
     {
         static const struct { hwaddr base; int irq; } twi[] = {
             { SAM9G45_TWI0_BASE, SAM9G45_IRQ_TWI0 },
@@ -634,7 +643,21 @@ static void sam9m10g45ek_init(MachineState *machine)
             sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, twi[i].base);
             sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
                                qdev_get_gpio_in(aic, twi[i].irq));
+            if (twi[i].base == SAM9G45_TWI0_BASE) {
+                i2c_slave_create_simple(I2C_BUS(qdev_get_child_bus(dev,
+                                                                   "i2c-bus.0")),
+                                        "ov2640", SAM9G45_OV2640_ADDR);
+            }
         }
+    }
+
+    /* Image Sensor Interface; frames are synthesized by the model. */
+    {
+        DeviceState *isi = qdev_new(TYPE_AT91_ISI);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(isi), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(isi), 0, SAM9G45_ISI_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(isi), 0,
+                           qdev_get_gpio_in(aic, SAM9G45_IRQ_ISI));
     }
 
     /* Touch Screen ADC Controller.  Absolute-pointer input (display click
