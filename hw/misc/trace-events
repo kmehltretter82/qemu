@@ -1,5 +1,13 @@
 # See docs/devel/tracing.rst for syntax documentation.
 
+# at91_memc.c
+at91_memc_read(const char *name, uint64_t offset, uint32_t value) "%s offset 0x%03" PRIx64 " -> 0x%08" PRIx32
+at91_memc_write(const char *name, uint64_t offset, uint32_t value) "%s offset 0x%03" PRIx64 " <- 0x%08" PRIx32
+
+# at91_sckc.c
+at91_sckc_read(uint32_t value) "CR -> 0x%08" PRIx32
+at91_sckc_write(uint32_t value) "CR <- 0x%08" PRIx32
+
 # allwinner-cpucfg.c
 allwinner_cpucfg_cpu_reset(uint8_t cpu_id, uint32_t reset_addr) "id %u, reset_addr 0x%" PRIx32
 allwinner_cpucfg_read(uint64_t offset, uint64_t data, unsigned size) "offset 0x%" PRIx64 " data 0x%" PRIx64 " size %" PRIu32

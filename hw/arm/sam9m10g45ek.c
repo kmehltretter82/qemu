@@ -12,6 +12,8 @@
  *   PIO   -> hw/gpio/at91_pio.c         TSADCC -> hw/adc/at91_tsadcc.c
  *   AC97C -> hw/audio/at91_ac97.c
  *   TRNG  -> hw/misc/at91_trng.c
+ *   DDRAMC/SMC/MATRIX/ECC -> hw/misc/at91_memc.c
+ *   SCKC  -> hw/misc/at91_sckc.c
  *
  * Register-level references are from the Atmel-6438 datasheet; see
  * qemu/.localdir/qemu-at91sam9g45-plan.md.  The system interrupt (AIC source 1)
@@ -55,6 +57,8 @@
 #include "hw/misc/at91_sysc.h"
 #include "hw/misc/at91_pwm.h"
 #include "hw/misc/at91_trng.h"
+#include "hw/misc/at91_memc.h"
+#include "hw/misc/at91_sckc.h"
 #include "hw/rtc/at91_rtc.h"
 #include "hw/misc/unimp.h"
 #include "qom/object.h"
@@ -106,6 +110,12 @@
 #define SAM9G45_PWM_BASE     0xFFFB8000   /* Pulse Width Modulation controller */
 #define SAM9G45_AC97_BASE    0xFFFAC000   /* AC97 Controller                   */
 #define SAM9G45_TRNG_BASE    0xFFFCC000   /* True Random Number Generator      */
+#define SAM9G45_ECC_BASE     0xFFFFE200
+#define SAM9G45_DDRAMC0_BASE 0xFFFFE400
+#define SAM9G45_DDRAMC1_BASE 0xFFFFE600
+#define SAM9G45_SMC_BASE     0xFFFFE800
+#define SAM9G45_MATRIX_BASE  0xFFFFEA00
+#define SAM9G45_SCKC_BASE    0xFFFFFD50
 
 #define SAM9G45_DEFAULT_RAM  (128 * MiB)  /* SAM9M10-G45-EK: 128 MB DDR2      */
 
@@ -239,6 +249,18 @@ static void sam9m10g45ek_init(MachineState *machine)
     pmc = qdev_new(TYPE_AT91_PMC);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(pmc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(pmc), 0, SAM9G45_PMC_BASE);
+
+    /*
+     * Memory/system configuration plane.  SDRAM itself is the flat RAM
+     * region above; these devices retain firmware/Linux timing and mode
+     * registers without imposing artificial transaction delays.
+     */
+    sysbus_create_simple(TYPE_AT91_ECC, SAM9G45_ECC_BASE, NULL);
+    sysbus_create_simple(TYPE_AT91_DDRAMC, SAM9G45_DDRAMC0_BASE, NULL);
+    sysbus_create_simple(TYPE_AT91_DDRAMC, SAM9G45_DDRAMC1_BASE, NULL);
+    sysbus_create_simple(TYPE_AT91_SMC, SAM9G45_SMC_BASE, NULL);
+    sysbus_create_simple(TYPE_AT91_MATRIX, SAM9G45_MATRIX_BASE, NULL);
+    sysbus_create_simple(TYPE_AT91_SCKC, SAM9G45_SCKC_BASE, NULL);
 
     /* LCD controller. */
     {
