@@ -1030,6 +1030,15 @@ static int pflash_post_load(void *opaque, int version_id)
 {
     PFlashCFI01 *pfl = opaque;
 
+    /*
+     * ROMD bypasses the device callbacks while the flash is in read-array
+     * mode.  The command state is migrated, so restore the corresponding
+     * ROMD state too; otherwise a destination restored in query/status/write
+     * mode incorrectly returns array contents until the next guest write.
+     */
+    memory_region_rom_device_set_romd(&pfl->mem,
+                                      pfl->cmd == 0x00 && !pfl->wcycle);
+
     if (!pfl->ro) {
         pfl->vmstate = qemu_add_vm_change_state_handler(postload_update_cb,
                                                         pfl);
