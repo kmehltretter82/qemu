@@ -14,6 +14,7 @@
  *   TRNG  -> hw/misc/at91_trng.c
  *   DDRAMC/SMC/MATRIX/ECC -> hw/misc/at91_memc.c
  *   SCKC  -> hw/misc/at91_sckc.c
+ *   SSC   -> hw/ssi/at91_ssc.c
  *
  * Register-level references are from the Atmel-6438 datasheet; see
  * qemu/.localdir/qemu-at91sam9g45-plan.md.  The system interrupt (AIC source 1)
@@ -47,6 +48,7 @@
 #include "hw/i2c/at91_twi.h"
 #include "hw/char/at91_usart.h"
 #include "hw/ssi/at91_spi.h"
+#include "hw/ssi/at91_ssc.h"
 #include "hw/ssi/ssi.h"
 #include "hw/adc/at91_tsadcc.h"
 #include "hw/audio/at91_ac97.h"
@@ -86,6 +88,8 @@
 #define SAM9G45_USART3_BASE  0xFFF98000   /* USART3 (ttyS4)                    */
 #define SAM9G45_SPI0_BASE    0xFFFA4000   /* Serial Peripheral Interface 0     */
 #define SAM9G45_SPI1_BASE    0xFFFA8000   /* Serial Peripheral Interface 1     */
+#define SAM9G45_SSC0_BASE    0xFFF9C000
+#define SAM9G45_SSC1_BASE    0xFFFA0000
 
 /* Debug Unit chip identification (datasheet section 6.3). */
 #define SAM9G45_CIDR  0x819B05A2
@@ -132,6 +136,8 @@
 #define SAM9G45_IRQ_USART3   10
 #define SAM9G45_IRQ_SPI0     14
 #define SAM9G45_IRQ_SPI1     15
+#define SAM9G45_IRQ_SSC0     16
+#define SAM9G45_IRQ_SSC1     17
 #define SAM9G45_IRQ_EMAC     25
 #define SAM9G45_IRQ_LCDC     23
 #define SAM9G45_IRQ_TSADCC   20
@@ -564,6 +570,27 @@ static void sam9m10g45ek_init(MachineState *machine)
             qdev_connect_gpio_out_named(spi0, "cs", 0,
                                         qdev_get_gpio_in_named(flash,
                                                                SSI_GPIO_CS, 0));
+        }
+    }
+
+    /*
+     * Synchronous Serial Controllers.  The models provide PIO/PDC data paths
+     * and local receiver loopback; no external I2S codec is wired by default.
+     */
+    {
+        static const struct { hwaddr base; int irq; } ssc[] = {
+            { SAM9G45_SSC0_BASE, SAM9G45_IRQ_SSC0 },
+            { SAM9G45_SSC1_BASE, SAM9G45_IRQ_SSC1 },
+        };
+        int i;
+
+        for (i = 0; i < ARRAY_SIZE(ssc); i++) {
+            DeviceState *dev = qdev_new(TYPE_AT91_SSC);
+
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, ssc[i].base);
+            sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                               qdev_get_gpio_in(aic, ssc[i].irq));
         }
     }
 
