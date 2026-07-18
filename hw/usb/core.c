@@ -197,6 +197,9 @@ static void do_token_in(USBDevice *s, USBPacket *p)
             if (p->status == USB_RET_ASYNC) {
                 return;
             }
+            if (p->status == USB_RET_NAK) {
+                return;
+            }
             s->setup_state = SETUP_STATE_IDLE;
             p->actual_length = 0;
             usb_pcap_ctrl(p, false);
