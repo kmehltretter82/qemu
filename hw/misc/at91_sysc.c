@@ -149,6 +149,7 @@ static uint64_t shdwc_read(void *opaque, hwaddr offset, unsigned size)
     AT91ShdwcState *s = AT91_SHDWC(opaque);
 
     switch (offset) {
+    case SHDW_CR: return 0;
     case SHDW_MR: return s->mr;
     case SHDW_SR: return 0;
     default:
