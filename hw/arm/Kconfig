@@ -252,6 +252,7 @@ config SAM9G45
     select I2C
     select IDE_MMIO
     select NAND
+    select OV2640
     select PFLASH_CFI01
     select SSI
     select SSI_M25P80
