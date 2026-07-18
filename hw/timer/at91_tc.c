@@ -130,11 +130,17 @@ static uint64_t tc_ticks(AT91TcState *s, int n, int64_t now)
     if (!rate) {
         return 0;
     }
-    /* The chained channel counts from channel 0's epoch so that the
-     * high word matches channel 0's elapsed ticks (BCR SYNC starts them
-     * together anyway). */
+    /*
+     * The chained channel is the exact high word of channel 0.  Do not
+     * approximate it by multiplying elapsed time by (rate >> 16): integer
+     * truncation would make the high word lag the low word and the composed
+     * 32-bit clocksource would jump backwards whenever channel 0 wraps.
+     */
     if (n == 1 && TC_CMR_TCCLKS(s->ch[n].cmr) == 6) {
-        n = 0;
+        uint64_t low_rate = tc_rate(s, 0);
+
+        return muldiv64(now - s->ch[0].epoch, low_rate,
+                        NANOSECONDS_PER_SECOND) >> 16;
     }
     return muldiv64(now - s->ch[n].epoch, rate, NANOSECONDS_PER_SECOND);
 }
