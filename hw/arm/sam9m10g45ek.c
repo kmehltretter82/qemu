@@ -15,6 +15,7 @@
  *   DDRAMC/SMC/MATRIX/ECC -> hw/misc/at91_memc.c
  *   SCKC  -> hw/misc/at91_sckc.c
  *   SSC   -> hw/ssi/at91_ssc.c
+ *   UDPHS -> hw/usb/at91_udphs.c
  *   EBI static SRAM / CFI NOR / CompactFlash -> optional CS attachments below
  *
  * Register-level references are from the Atmel-6438 datasheet; see
@@ -46,6 +47,7 @@
 #include "hw/sd/sd.h"
 #include "hw/usb/hcd-ohci.h"
 #include "hw/usb/hcd-ehci.h"
+#include "hw/usb/at91_udphs.h"
 #include "net/net.h"
 #include "hw/net/at91_macb.h"
 #include "hw/display/at91_lcdc.h"
@@ -115,6 +117,8 @@
 #define SAM9G45_TCB1_BASE    0xFFFD4000   /* Timer Counter block 1 (TC3-5)     */
 #define SAM9G45_OHCI_BASE    0x00700000   /* USB Host OHCI (full/low speed)    */
 #define SAM9G45_EHCI_BASE    0x00800000   /* USB Host EHCI (high speed)        */
+#define SAM9G45_UDPHS_FIFO   0x00600000   /* USB device endpoint FIFO aperture */
+#define SAM9G45_UDPHS_BASE   0xFFF78000   /* USB device controller registers   */
 #define SAM9G45_EMAC_BASE    0xFFFBC000   /* Ethernet MAC (EMAC / Cadence macb) */
 #define SAM9G45_LCDC_BASE    0x00500000   /* LCD Controller                    */
 #define SAM9G45_TSADCC_BASE  0xFFFB0000   /* Touch Screen ADC Controller       */
@@ -144,6 +148,7 @@
 #define SAM9G45_IRQ_HSMCI0   11
 #define SAM9G45_IRQ_HSMCI1   29
 #define SAM9G45_IRQ_UHPHS    22   /* USB host (OHCI + EHCI share this) */
+#define SAM9G45_IRQ_UDPHS    27
 #define SAM9G45_IRQ_DMAC     21
 #define SAM9G45_IRQ_TWI0     12
 #define SAM9G45_IRQ_TWI1     13
@@ -175,6 +180,9 @@
  * is a PIO input (board DT: gpios = <&pioC 8 ...> in the nand node). */
 #define SAM9G45_NAND_RB_PIN  8
 
+/* Board USB-device connector VBUS sense (active high). */
+#define SAM9G45_UDPHS_VBUS_PIN  19
+
 /*
  * Master clock.  The PMC reset registers below model a boot-loader-configured
  * clock tree (PLLA locked at 792 MHz from the 12 MHz crystal, MCK = 792/2/3),
@@ -203,8 +211,19 @@ struct Sam9m10g45ekMachineState {
     uint8_t ebi_sram_cs;
     uint8_t ebi_nor_cs;
     uint8_t ebi_cf_cs;
+    bool udphs_loopback;
     MemoryRegion ebi_sram;
 };
+
+static bool sam9_get_udphs_loopback(Object *obj, Error **errp)
+{
+    return SAM9M10G45EK_MACHINE(obj)->udphs_loopback;
+}
+
+static void sam9_set_udphs_loopback(Object *obj, bool value, Error **errp)
+{
+    SAM9M10G45EK_MACHINE(obj)->udphs_loopback = value;
+}
 
 enum Sam9EbiCsProperty {
     SAM9_EBI_SRAM_CS,
@@ -396,7 +415,7 @@ static void sam9m10g45ek_init(MachineState *machine)
     MemoryRegion *sram;
     Object *cpuobj;
     ARMCPU *cpu;
-    DeviceState *dbgu, *aic, *pit, *pmc, *orgate;
+    DeviceState *dbgu, *aic, *pit, *pmc, *orgate, *piob = NULL;
 
     cpuobj = object_new(machine->cpu_type);
     /* Older ARMv5 cores have no EL3; guard is harmless if absent. */
@@ -529,6 +548,8 @@ static void sam9m10g45ek_init(MachineState *machine)
                                qdev_get_gpio_in(aic, abc[i].irq));
             if (abc[i].base == SAM9G45_PIOC_BASE) {
                 pioc = p;
+            } else if (abc[i].base == SAM9G45_PIOB_BASE) {
+                piob = p;
             }
         }
 
@@ -672,7 +693,8 @@ static void sam9m10g45ek_init(MachineState *machine)
      * devices off to the OHCI companion (like the real UHP HS block), rather
      * than the two being independent controllers. */
     {
-        DeviceState *ohci, *ehci, *usb_or;
+        DeviceState *ohci, *ehci, *usb_or, *udphs;
+        Sam9m10g45ekMachineState *sms = SAM9M10G45EK_MACHINE(machine);
 
         usb_or = qdev_new(TYPE_OR_IRQ);
         qdev_prop_set_uint16(usb_or, "num-lines", 2);
@@ -696,6 +718,28 @@ static void sam9m10g45ek_init(MachineState *machine)
         sysbus_mmio_map(SYS_BUS_DEVICE(ohci), 0, SAM9G45_OHCI_BASE);
         sysbus_connect_irq(SYS_BUS_DEVICE(ohci), 0,
                            qdev_get_gpio_in(usb_or, 1));
+
+        /* USB device port.  The register/FIFO model always exists.  With the
+         * opt-in loopback property, its physical cable endpoint occupies one
+         * EHCI port and VBUS is driven high, allowing the guest's own gadget
+         * and host stacks to exercise each other end-to-end. */
+        udphs = qdev_new(TYPE_AT91_UDPHS);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(udphs), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(udphs), 0, SAM9G45_UDPHS_FIFO);
+        sysbus_mmio_map(SYS_BUS_DEVICE(udphs), 1, SAM9G45_UDPHS_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(udphs), 0,
+                           qdev_get_gpio_in(aic, SAM9G45_IRQ_UDPHS));
+
+        if (sms->udphs_loopback) {
+            USBDevice *cable = USB_DEVICE(qdev_new(TYPE_AT91_UDPHS_USB));
+            BusState *bus = qdev_get_child_bus(ehci, "usb-bus.0");
+
+            g_assert(bus);
+            object_property_set_link(OBJECT(cable), "controller",
+                                     OBJECT(udphs), &error_fatal);
+            usb_realize_and_unref(cable, USB_BUS(bus), &error_fatal);
+            pio_set_reset_input(piob, SAM9G45_UDPHS_VBUS_PIN, true);
+        }
     }
 
     /* DBGU console -> OR gate input 0.  The DBGU is a cut-down USART that also
@@ -875,6 +919,12 @@ static void sam9m10g45ek_machine_class_init(ObjectClass *oc, const void *data)
                               GUINT_TO_POINTER(SAM9_EBI_CF_CS));
     object_class_property_set_description(oc, "ebi-cf-cs",
         "EBI chip select for -drive if=ide CompactFlash (default 4)");
+
+    object_class_property_add_bool(oc, "udphs-loopback",
+                                   sam9_get_udphs_loopback,
+                                   sam9_set_udphs_loopback);
+    object_class_property_set_description(oc, "udphs-loopback",
+        "Connect the USB device port to the board EHCI host (default off)");
 }
 
 static const TypeInfo sam9m10g45ek_machine_typeinfo = {

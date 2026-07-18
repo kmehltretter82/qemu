@@ -10,6 +10,13 @@ usb_port_attach(int bus, const char *port, const char *devspeed, const char *por
 usb_port_detach(int bus, const char *port) "bus %d, port %s"
 usb_port_release(int bus, const char *port) "bus %d, port %s"
 
+# at91_udphs.c
+at91_udphs_reset(const char *speed) "bus reset, %s speed"
+at91_udphs_setup(uint8_t type, uint8_t request, uint16_t value, uint16_t index, uint16_t length) "type=0x%02x request=0x%02x value=0x%04x index=0x%04x length=%u"
+at91_udphs_control(const char *phase, uint32_t status, uint32_t control, unsigned length, unsigned offset) "phase=%s status=0x%08x control=0x%08x length=%u offset=%u"
+at91_udphs_ep_write(unsigned ep, unsigned reg, uint32_t value, uint32_t status, uint32_t control) "ep%u reg=0x%02x value=0x%08x status=0x%08x control=0x%08x"
+at91_udphs_data(unsigned ep, const char *direction, size_t length, bool dma) "ep%u %s length=%zu dma=%d"
+
 # hcd-ohci-pci.c
 usb_ohci_exit(const char *s) "%s"
 
