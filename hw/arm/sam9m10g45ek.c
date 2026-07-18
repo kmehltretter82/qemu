@@ -10,6 +10,7 @@
  *   HSMCI -> hw/sd/at91_hsmci.c         DMAC  -> hw/dma/at91_dmac.c
  *   EMAC  -> hw/net/at91_macb.c         LCDC  -> hw/display/at91_lcdc.c
  *   PIO   -> hw/gpio/at91_pio.c         TSADCC -> hw/adc/at91_tsadcc.c
+ *   AC97C -> hw/audio/at91_ac97.c
  *
  * Register-level references are from the Atmel-6438 datasheet; see
  * qemu/.localdir/qemu-at91sam9g45-plan.md.  The system interrupt (AIC source 1)
@@ -45,6 +46,7 @@
 #include "hw/ssi/at91_spi.h"
 #include "hw/ssi/ssi.h"
 #include "hw/adc/at91_tsadcc.h"
+#include "hw/audio/at91_ac97.h"
 #include "hw/intc/at91_aic.h"
 #include "hw/timer/at91_pit.h"
 #include "hw/timer/at91_tc.h"
@@ -100,6 +102,7 @@
 #define SAM9G45_LCDC_BASE    0x00500000   /* LCD Controller                    */
 #define SAM9G45_TSADCC_BASE  0xFFFB0000   /* Touch Screen ADC Controller       */
 #define SAM9G45_PWM_BASE     0xFFFB8000   /* Pulse Width Modulation controller */
+#define SAM9G45_AC97_BASE    0xFFFAC000   /* AC97 Controller                   */
 
 #define SAM9G45_DEFAULT_RAM  (128 * MiB)  /* SAM9M10-G45-EK: 128 MB DDR2      */
 
@@ -120,6 +123,7 @@
 #define SAM9G45_IRQ_LCDC     23
 #define SAM9G45_IRQ_TSADCC   20
 #define SAM9G45_IRQ_PWM      19
+#define SAM9G45_IRQ_AC97     24
 #define SAM9G45_IRQ_PIOA     2
 #define SAM9G45_IRQ_PIOB     3
 #define SAM9G45_IRQ_PIOC     4
@@ -400,6 +404,16 @@ static void sam9m10g45ek_init(MachineState *machine)
         sysbus_mmio_map(SYS_BUS_DEVICE(pwm), 0, SAM9G45_PWM_BASE);
         sysbus_connect_irq(SYS_BUS_DEVICE(pwm), 0,
                            qdev_get_gpio_in(aic, SAM9G45_IRQ_PWM));
+    }
+
+    /* AC97 controller and LM4549-compatible codec. */
+    {
+        DeviceState *ac97 = qdev_new(TYPE_AT91_AC97);
+
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(ac97), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(ac97), 0, SAM9G45_AC97_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(ac97), 0,
+                           qdev_get_gpio_in(aic, SAM9G45_IRQ_AC97));
     }
 
     /* Ethernet (10/100 EMAC, Cadence "macb"). */

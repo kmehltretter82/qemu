@@ -1,5 +1,9 @@
 # See docs/devel/tracing.rst for syntax documentation.
 
+# at91_ac97.c
+at91_ac97_codec(bool read, unsigned reg, unsigned value) "read=%d reg=0x%02x value=0x%04x"
+at91_ac97_period(const char *direction, uint32_t address) "%s address=0x%08x"
+
 # cs4231.c
 cs4231_mem_readl_dreg(uint32_t reg, uint32_t ret) "read dreg %d: 0x%02x"
 cs4231_mem_readl_reg(uint32_t reg, uint32_t ret) "read reg %d: 0x%08x"
