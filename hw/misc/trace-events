@@ -445,3 +445,6 @@ iommu_testdev_dma_armed(bool armed) "armed=%d"
 
 # at91_pwm.c
 at91_pwm_enable(unsigned ena, unsigned sr) "PWM enable 0x%x -> SR 0x%x"
+
+# at91_trng.c
+at91_trng_data(uint32_t value) "value=0x%08x"

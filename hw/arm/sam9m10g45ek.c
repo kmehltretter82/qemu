@@ -11,6 +11,7 @@
  *   EMAC  -> hw/net/at91_macb.c         LCDC  -> hw/display/at91_lcdc.c
  *   PIO   -> hw/gpio/at91_pio.c         TSADCC -> hw/adc/at91_tsadcc.c
  *   AC97C -> hw/audio/at91_ac97.c
+ *   TRNG  -> hw/misc/at91_trng.c
  *
  * Register-level references are from the Atmel-6438 datasheet; see
  * qemu/.localdir/qemu-at91sam9g45-plan.md.  The system interrupt (AIC source 1)
@@ -53,6 +54,7 @@
 #include "hw/misc/at91_pmc.h"
 #include "hw/misc/at91_sysc.h"
 #include "hw/misc/at91_pwm.h"
+#include "hw/misc/at91_trng.h"
 #include "hw/rtc/at91_rtc.h"
 #include "hw/misc/unimp.h"
 #include "qom/object.h"
@@ -103,6 +105,7 @@
 #define SAM9G45_TSADCC_BASE  0xFFFB0000   /* Touch Screen ADC Controller       */
 #define SAM9G45_PWM_BASE     0xFFFB8000   /* Pulse Width Modulation controller */
 #define SAM9G45_AC97_BASE    0xFFFAC000   /* AC97 Controller                   */
+#define SAM9G45_TRNG_BASE    0xFFFCC000   /* True Random Number Generator      */
 
 #define SAM9G45_DEFAULT_RAM  (128 * MiB)  /* SAM9M10-G45-EK: 128 MB DDR2      */
 
@@ -124,6 +127,7 @@
 #define SAM9G45_IRQ_TSADCC   20
 #define SAM9G45_IRQ_PWM      19
 #define SAM9G45_IRQ_AC97     24
+#define SAM9G45_IRQ_TRNG     6
 #define SAM9G45_IRQ_PIOA     2
 #define SAM9G45_IRQ_PIOB     3
 #define SAM9G45_IRQ_PIOC     4
@@ -414,6 +418,16 @@ static void sam9m10g45ek_init(MachineState *machine)
         sysbus_mmio_map(SYS_BUS_DEVICE(ac97), 0, SAM9G45_AC97_BASE);
         sysbus_connect_irq(SYS_BUS_DEVICE(ac97), 0,
                            qdev_get_gpio_in(aic, SAM9G45_IRQ_AC97));
+    }
+
+    /* True random number generator. */
+    {
+        DeviceState *trng = qdev_new(TYPE_AT91_TRNG);
+
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(trng), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(trng), 0, SAM9G45_TRNG_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(trng), 0,
+                           qdev_get_gpio_in(aic, SAM9G45_IRQ_TRNG));
     }
 
     /* Ethernet (10/100 EMAC, Cadence "macb"). */
