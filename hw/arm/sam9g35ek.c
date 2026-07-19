@@ -120,7 +120,9 @@
 #define SAM9X5_IRQ_MACB0      24
 #define SAM9X5_IRQ_HSMCI1     26
 
-#define SAM9X5_MCK_HZ         133000000
+/* Must match what the guest derives from the PMC reset values above:
+ * PLLA = 12 MHz * 66 = 792 MHz, MCK = PLLA / PRES(2) / MDIV(3) = 132 MHz. */
+#define SAM9X5_MCK_HZ         132000000
 #define SAM9G35_DEFAULT_RAM   (128 * MiB)
 
 static struct arm_boot_info sam9g35ek_binfo;
@@ -204,6 +206,11 @@ static void sam9g35ek_init(MachineState *machine)
     /* PMC clock controller (permissive stub; register-compatible with the
      * at91sam9x5-pmc for the ready-bit spin-waits the clk driver does). */
     pmc = qdev_new(TYPE_AT91_PMC);
+    /* SAM9x5 decodes MCKR with at91sam9x5_master_layout (PRES at bit 4), not
+     * the rm9200/sam9g45 layout the device defaults to.  Without this the
+     * guest reads PRES as /1 and derives MCK = 264 MHz instead of 132 MHz,
+     * running every guest timer at half speed. */
+    qdev_prop_set_uint32(pmc, "mckr-reset", AT91_PMC_MCKR_RESET_SAM9X5);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(pmc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(pmc), 0, SAM9X5_PMC_BASE);
 
