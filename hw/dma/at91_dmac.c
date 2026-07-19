@@ -94,19 +94,30 @@ static void dmac_run_buffer(uint32_t saddr, uint32_t daddr,
     uint32_t sa = saddr, da = daddr;
     uint32_t i;
 
-    for (i = 0; i < btsize; i++) {
-        uint8_t buf[4] = { 0 };
-        unsigned n = sw < dw ? dw : sw;   /* move the wider of the two */
+    /* BTSIZE counts source-width transfers; the total byte count (btsize * sw)
+     * is read in SRC_WIDTH units and re-emitted in DST_WIDTH units.  When the
+     * widths differ (e.g. UART TX: word reads from memory, byte writes to a
+     * fixed THR) a single source read becomes several destination writes, so
+     * stream the bytes through a small FIFO instead of assuming 1 read == 1
+     * write.  Max residency is (dw - 1) + sw <= 7 bytes. */
+    uint8_t fifo[8];
+    unsigned fill = 0;
 
-        if (n > sizeof(buf)) {
-            n = sizeof(buf);
-        }
+    for (i = 0; i < btsize; i++) {
         address_space_read(&address_space_memory, sa,
-                           MEMTXATTRS_UNSPECIFIED, buf, sw);
-        address_space_write(&address_space_memory, da,
-                            MEMTXATTRS_UNSPECIFIED, buf, dw);
+                           MEMTXATTRS_UNSPECIFIED, fifo + fill, sw);
+        fill += sw;
         sa += (smode == 0) ? sw : (smode == 1) ? -sw : 0;
-        da += (dmode == 0) ? dw : (dmode == 1) ? -dw : 0;
+
+        while (fill >= dw) {
+            address_space_write(&address_space_memory, da,
+                                MEMTXATTRS_UNSPECIFIED, fifo, dw);
+            da += (dmode == 0) ? dw : (dmode == 1) ? -dw : 0;
+            fill -= dw;
+            if (fill) {
+                memmove(fifo, fifo + dw, fill);
+            }
+        }
     }
 }
 
