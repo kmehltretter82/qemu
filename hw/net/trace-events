@@ -533,3 +533,6 @@ ethlite_pkt_tx_size_too_big(uint64_t size) "size:0x%" PRIx64
 at91_macb_tx(size_t len) "macb tx frame %zu bytes"
 at91_macb_rx(size_t len) "macb rx frame %zu bytes"
 at91_macb_mdio(int op, unsigned reg, uint16_t val) "macb mdio op %d reg %u val 0x%04x"
+at91_macb_can_rx(int ok, uint32_t ncr, uint32_t rx_desc, uint32_t isr, uint32_t imr, uint32_t rsr) "macb can_rx=%d ncr=0x%08x rx_desc=0x%08x isr=0x%08x imr=0x%08x rsr=0x%08x"
+at91_macb_flush(const char *why) "macb flush_queued_packets from %s"
+at91_macb_re_enable(uint32_t rx_desc, uint32_t rbqp) "macb RX re-enabled, resuming at rx_desc=0x%08x (rbqp=0x%08x)"
