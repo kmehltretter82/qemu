@@ -3246,12 +3246,16 @@ static bool trans_YIELD(DisasContext *s, arg_YIELD *a)
 static bool trans_SEV(DisasContext *s, arg_SEV *a)
 {
     /*
-     * SEV is a NOP for user-mode emulation. For v6T2 and earlier
-     * non-M-profile cores this encoding is a NOP hint.
+     * SEV is a NOP for user-mode emulation. WFE/SEV were introduced in
+     * ARMv6K; for pre-v6K non-M-profile cores this encoding is a NOP hint.
+     * Otherwise SEV must signal the event that wakes WFE sleepers (e.g. an
+     * arm11mpcore ticket-spinlock unlock does "DSB; SEV"), so gate on V6K
+     * rather than V7 -- gating on V7 left ARMv6K (arm11mpcore) SMP guests
+     * deadlocked because WFE halts but the matching SEV was a silent NOP.
      */
 #ifndef CONFIG_USER_ONLY
     if (arm_dc_feature(s, ARM_FEATURE_M) ||
-        arm_dc_feature(s, ARM_FEATURE_V7)) {
+        arm_dc_feature(s, ARM_FEATURE_V6K)) {
         gen_helper_sev(tcg_env);
     }
 #endif
