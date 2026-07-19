@@ -131,6 +131,7 @@ struct AT91TcState {
     qemu_irq irq;
     uint32_t mck_freq;
     uint32_t slck_freq;
+    uint32_t counter_width;   /* 16 (rm9200/sam9g45) or 32 (sam9x5/sama5) */
     uint32_t bmr;
     bool tclk[TC_NCH];
     qemu_irq tioa_out[TC_NCH];
@@ -138,6 +139,18 @@ struct AT91TcState {
 
     AT91TcChan ch[TC_NCH];
 };
+
+/* Free-running counter modulus (0x10000 or 0x1_0000_0000) and top value
+ * (0xffff or 0xffffffff), per the TC block's counter width. */
+static inline uint64_t tc_wrap(const AT91TcChan *c)
+{
+    return UINT64_C(1) << c->parent->counter_width;
+}
+
+static inline uint32_t tc_top(const AT91TcChan *c)
+{
+    return (uint32_t)(tc_wrap(c) - 1);
+}
 
 /* Input clock in Hz for a channel; 0 if unmodelled (external XC input
  * other than the TIOA0 chain). */
@@ -199,9 +212,9 @@ static uint32_t tc_cv_for_ticks(const AT91TcChan *c, uint64_t ticks)
         }
         break;
     case TC_WAVSEL_UPDOWN:
-        period = 2 * UINT64_C(0xffff);
+        period = 2 * (uint64_t)tc_top(c);
         ticks %= period;
-        return ticks <= 0xffff ? ticks : period - ticks;
+        return ticks <= tc_top(c) ? ticks : period - ticks;
     case TC_WAVSEL_UPDOWN_RC:
         top = c->rc;
         if (top) {
@@ -213,7 +226,7 @@ static uint32_t tc_cv_for_ticks(const AT91TcChan *c, uint64_t ticks)
     default:
         break;
     }
-    return ticks & 0xFFFF;
+    return ticks & tc_top(c);
 }
 
 static uint32_t tc_cv(AT91TcState *s, int n, int64_t now)
@@ -354,9 +367,8 @@ static uint64_t tc_next_event(const AT91TcChan *c, uint64_t ticks)
         if ((c->cmr & TC_CMR_CPCTRG) && c->rc) {
             tc_add_next(&next, tc_next_phase(ticks, c->rc, 0));
         } else {
-            tc_add_next(&next, tc_next_phase(ticks, UINT64_C(0x10000),
-                                             c->rc));
-            tc_add_next(&next, tc_next_phase(ticks, UINT64_C(0x10000), 0));
+            tc_add_next(&next, tc_next_phase(ticks, tc_wrap(c), c->rc));
+            tc_add_next(&next, tc_next_phase(ticks, tc_wrap(c), 0));
         }
         return next;
     }
@@ -374,19 +386,19 @@ static uint64_t tc_next_event(const AT91TcChan *c, uint64_t ticks)
             tc_add_next(&next, tc_next_phase(ticks, c->rc, 0));
             break;
         }
-        /* RC=0 behaves as a normal 16-bit free-running counter. */
+        /* RC=0 behaves as a normal free-running counter. */
         /* fall through */
     case TC_WAVSEL_UP:
-        tc_add_next(&next, tc_next_phase(ticks, UINT64_C(0x10000), c->ra));
-        tc_add_next(&next, tc_next_phase(ticks, UINT64_C(0x10000), c->rb));
-        tc_add_next(&next, tc_next_phase(ticks, UINT64_C(0x10000), c->rc));
-        tc_add_next(&next, tc_next_phase(ticks, UINT64_C(0x10000), 0));
+        tc_add_next(&next, tc_next_phase(ticks, tc_wrap(c), c->ra));
+        tc_add_next(&next, tc_next_phase(ticks, tc_wrap(c), c->rb));
+        tc_add_next(&next, tc_next_phase(ticks, tc_wrap(c), c->rc));
+        tc_add_next(&next, tc_next_phase(ticks, tc_wrap(c), 0));
         break;
     case TC_WAVSEL_UPDOWN:
-        tc_add_triangle_matches(&next, ticks, 0xffff, c->ra);
-        tc_add_triangle_matches(&next, ticks, 0xffff, c->rb);
-        tc_add_triangle_matches(&next, ticks, 0xffff, c->rc);
-        tc_add_next(&next, tc_next_phase(ticks, UINT64_C(0x1fffe), 0));
+        tc_add_triangle_matches(&next, ticks, tc_top(c), c->ra);
+        tc_add_triangle_matches(&next, ticks, tc_top(c), c->rb);
+        tc_add_triangle_matches(&next, ticks, tc_top(c), c->rc);
+        tc_add_next(&next, tc_next_phase(ticks, 2 * (uint64_t)tc_top(c), 0));
         break;
     case TC_WAVSEL_UPDOWN_RC:
         if (c->rc) {
@@ -415,7 +427,7 @@ static uint32_t tc_event_flags(const AT91TcChan *c, uint64_t ticks)
             if (cv == c->rc) {
                 flags |= TC_SR_CPCS;
             }
-            if ((ticks & 0xffff) == 0) {
+            if ((ticks & tc_top(c)) == 0) {
                 flags |= TC_SR_COVFS;
             }
         }
@@ -437,8 +449,8 @@ static uint32_t tc_event_flags(const AT91TcChan *c, uint64_t ticks)
         flags |= TC_SR_CPCS;
     }
 
-    if ((mode == TC_WAVSEL_UP && (ticks & 0xffff) == 0) ||
-        (mode == TC_WAVSEL_UPDOWN && ticks % UINT64_C(0x1fffe) == 0) ||
+    if ((mode == TC_WAVSEL_UP && (ticks & tc_top(c)) == 0) ||
+        (mode == TC_WAVSEL_UPDOWN && ticks % (2 * (uint64_t)tc_top(c)) == 0) ||
         (mode == TC_WAVSEL_UPDOWN_RC && c->rc &&
          ticks % (2 * (uint64_t)c->rc) == 0)) {
         flags |= TC_SR_COVFS;
@@ -864,6 +876,10 @@ static void tc_realize(DeviceState *dev, Error **errp)
         error_setg(errp, "at91-tc: mck-frequency must be set");
         return;
     }
+    if (s->counter_width != 16 && s->counter_width != 32) {
+        error_setg(errp, "at91-tc: counter-width must be 16 or 32");
+        return;
+    }
     for (n = 0; n < TC_NCH; n++) {
         s->ch[n].parent = s;
         s->ch[n].idx = n;
@@ -890,6 +906,7 @@ static void tc_dev_init(Object *obj)
 static const Property tc_properties[] = {
     DEFINE_PROP_UINT32("mck-frequency", AT91TcState, mck_freq, 100000000),
     DEFINE_PROP_UINT32("slck-frequency", AT91TcState, slck_freq, 32768),
+    DEFINE_PROP_UINT32("counter-width", AT91TcState, counter_width, 16),
 };
 
 static const VMStateDescription vmstate_at91_tc_chan = {
