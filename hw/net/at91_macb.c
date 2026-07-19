@@ -258,6 +258,7 @@ static bool macb_can_receive(NetClientState *nc)
     int i;
 
     if (!(s->ncr & NCR_RE) || !s->rx_desc) {
+        trace_at91_macb_can_rx(0, s->ncr, s->rx_desc, s->isr, s->imr, s->rsr);
         return false;
     }
     /* Only accept a frame that fits end-to-end.  macb_receive() writes RXD_SOF
@@ -271,10 +272,12 @@ static bool macb_can_receive(NetClientState *nc)
         uint32_t addr = address_space_ldl_le(&address_space_memory, desc,
                                              MEMTXATTRS_UNSPECIFIED, NULL);
         if (addr & RXD_USED) {
+            trace_at91_macb_can_rx(0, s->ncr, s->rx_desc, s->isr, s->imr, s->rsr);
             return false;
         }
         desc = (addr & RXD_WRAP) ? s->rbqp : desc + 8;
     }
+    trace_at91_macb_can_rx(1, s->ncr, s->rx_desc, s->isr, s->imr, s->rsr);
     return true;
 }
 
@@ -429,14 +432,33 @@ static void macb_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
 
     switch (off) {
     case MACB_NCR:
+        /* Re-enabling RX must NOT rewind the descriptor pointer.  On real
+         * hardware the RX DMA advances RBQP as it consumes descriptors and
+         * simply resumes where it left off when RE is set again; only an
+         * explicit RBQP write repositions it.  The Linux macb driver relies
+         * on exactly that: macb_mac_link_down() clears RE/TE and
+         * macb_mac_link_up() sets them again, but neither touches
+         * queue->rx_tail.  Rewinding to s->rbqp here desynced our write
+         * position from the driver's read position on every link bounce, so
+         * we filled descriptors at the ring base that the driver (still
+         * reading further along) never looked at: rx_tail saw USED=0
+         * forever, macb_rx_pending() stayed false, NAPI was never scheduled
+         * and, once a max-size frame's worth of USED descriptors piled up at
+         * the base, macb_can_receive() went permanently false - the guest
+         * went deaf and stayed deaf. */
         if ((val & NCR_RE) && !(s->ncr & NCR_RE)) {
-            s->rx_desc = s->rbqp;
+            if (!s->rx_desc) {
+                /* Only seed the pointer if the driver never programmed RBQP. */
+                s->rx_desc = s->rbqp;
+            }
+            trace_at91_macb_re_enable(s->rx_desc, s->rbqp);
         }
         s->ncr = val & ~NCR_TSTART;      /* TSTART is self-clearing */
         if (val & NCR_TSTART) {
             macb_do_tx(s);
         }
         if (val & NCR_RE) {
+            trace_at91_macb_flush("NCR");
             qemu_flush_queued_packets(qemu_get_queue(s->nic));
         }
         break;
@@ -452,6 +474,7 @@ static void macb_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
         break;
     case MACB_RSR:
         s->rsr &= ~(uint32_t)val;                          /* write-1-clear */
+        trace_at91_macb_flush("RSR");
         qemu_flush_queued_packets(qemu_get_queue(s->nic));
         break;
     case MACB_ISR:    s->isr &= ~(uint32_t)val; macb_update_irq(s); break;
@@ -463,6 +486,7 @@ static void macb_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
          * itself is pure memory traffic we cannot observe, so this is the
          * hook to resume delivery of queued packets (can_receive() went
          * false while the ring was full). */
+        trace_at91_macb_flush("IER");
         qemu_flush_queued_packets(qemu_get_queue(s->nic));
         break;
     case MACB_IDR:    s->imr |= (uint32_t)val;  macb_update_irq(s); break;
