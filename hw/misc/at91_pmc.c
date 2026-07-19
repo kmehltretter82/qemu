@@ -11,6 +11,7 @@
 #include "qemu/log.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "system/memory.h"
 #include "hw/misc/at91_pmc.h"
@@ -53,9 +54,18 @@
  * with MDIV divisors {1,2,4,3}).
  *   PLLAR: DIVA=1, MULA=65  -> PLLA = 12 MHz / 1 * 66 = 792 MHz
  *   MCKR:  CSS=PLLA(2), PRES=/2, MDIV=/3 (idx 3) -> MCK = 792/2/3 = 132 MHz
+ *
+ * The MCKR bit layout is SoC dependent, so "PRES=/2" is encoded differently:
+ * Linux uses at91rm9200_master_layout (mask 0x31F, PRES at bit 2) for rm9200
+ * and sam9g45, but at91sam9x5_master_layout (mask 0x373, PRES at bit 4) for
+ * sam9x5 and later.  Handing an rm9200-encoded MCKR to a sam9x5 guest leaves
+ * PRES reading as 0 (/1), so the guest derives MCK = 792/1/3 = 264 MHz - twice
+ * the modelled rate, which makes every guest timer run at half speed.  Boards
+ * pick the right encoding with the "mckr-reset" property.
  */
-#define PMC_PLLAR_RESET  ((65u << 16) | 1u)              /* 0x00410001 */
-#define PMC_MCKR_RESET   (2u | (1u << 2) | (3u << 8))    /* 0x00000306 */
+#define PMC_PLLAR_RESET        ((65u << 16) | 1u)             /* 0x00410001 */
+#define PMC_MCKR_RESET         (2u | (1u << 2) | (3u << 8))   /* 0x00000306 */
+#define PMC_MCKR_RESET_SAM9X5  (2u | (1u << 4) | (3u << 8))   /* 0x00000312 */
 
 
 struct AT91PmcState {
@@ -68,6 +78,7 @@ struct AT91PmcState {
     uint32_t mor;
     uint32_t pllar;
     uint32_t mckr;
+    uint32_t mckr_reset;   /* SoC-specific MCKR encoding (see above) */
     uint32_t usb;
     uint32_t pck[2];
     uint32_t imr;
@@ -144,7 +155,7 @@ static void pmc_reset(DeviceState *dev)
     s->uckr = 0x10200800;
     s->mor = 0;
     s->pllar = PMC_PLLAR_RESET;
-    s->mckr = PMC_MCKR_RESET;
+    s->mckr = s->mckr_reset;
     s->usb = 0;
     s->pck[0] = 0;
     s->pck[1] = 0;
@@ -180,11 +191,19 @@ static const VMStateDescription vmstate_at91_pmc = {
     }
 };
 
+static const Property pmc_properties[] = {
+    /* MCKR reset value; its bit layout is SoC specific (see the note above).
+     * Defaults to the rm9200/sam9g45 encoding. */
+    DEFINE_PROP_UINT32("mckr-reset", AT91PmcState, mckr_reset,
+                       PMC_MCKR_RESET),
+};
+
 static void pmc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     device_class_set_legacy_reset(dc, pmc_reset);
+    device_class_set_props(dc, pmc_properties);
     dc->vmsd = &vmstate_at91_pmc;
 }
 
