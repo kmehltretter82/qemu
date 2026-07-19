@@ -167,7 +167,8 @@ static void usart_pdc_tx(AT91UsartState *s)
 
         address_space_read(&address_space_memory, s->tpr,
                            MEMTXATTRS_UNSPECIFIED, buf, s->tcr);
-        qemu_chr_fe_write_all(&s->chr, buf, s->tcr);
+        /* Non-blocking (see US_THR): never stall the vCPU on the chardev. */
+        qemu_chr_fe_write(&s->chr, buf, s->tcr);
         s->tpr += s->tcr;
         s->tcr = 0;
         if (s->tncr > 0) {          /* chain to the queued next buffer */
@@ -262,7 +263,12 @@ static void usart_write(void *opaque, hwaddr offset, uint64_t value,
     case US_THR:
         ch = value & 0xff;
         trace_at91_usart_tx(ch);
-        qemu_chr_fe_write_all(&s->chr, &ch, 1);
+        /* Non-blocking: TX is reported as always-ready (US_TXRDY/US_TXEMPTY),
+         * so never block the vCPU on the chardev.  A blocking write_all() here
+         * busy-spins the vCPU thread whenever the backend backpressures (e.g. a
+         * pipe consumer that is not draining instantly, as with syz-manager),
+         * hanging the guest.  Drop bytes the backend cannot take immediately. */
+        qemu_chr_fe_write(&s->chr, &ch, 1);
         usart_update_irq(s);
         break;
     case US_BRGR:  s->brgr = value; break;
