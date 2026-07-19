@@ -57,7 +57,32 @@
 
 typedef struct AT91DmacChan {
     uint32_t saddr, daddr, dscr, ctrla, ctrlb, cfg;
+    bool cyclic;   /* peripheral-paced cyclic list (UART/audio RX): not run */
 } AT91DmacChan;
+
+/* Offset of the "next descriptor" (DSCR) field within a hardware LLI, which is
+ * {saddr, daddr, ctrla, ctrlb, next} = 5 words. */
+#define DMAC_LLI_NEXT_OFF   16
+
+/* A cyclic (looping) descriptor list is used for peripheral-paced receive
+ * (e.g. the USART/DBGU RX ring): its last LLI's next pointer loops back to an
+ * earlier LLI instead of terminating at 0. */
+static bool dmac_chain_is_cyclic(uint32_t head)
+{
+    uint32_t cur = head;
+    int g = 0;
+
+    while (cur != 0 && g++ < 1024) {
+        uint32_t nxt = 0;
+        address_space_read(&address_space_memory, cur + DMAC_LLI_NEXT_OFF,
+                           MEMTXATTRS_UNSPECIFIED, &nxt, sizeof(nxt));
+        if (nxt == head) {
+            return true;
+        }
+        cur = nxt;
+    }
+    return false;
+}
 
 struct AT91DmacState {
     SysBusDevice parent_obj;
@@ -178,8 +203,24 @@ static uint64_t dmac_read(void *opaque, hwaddr offset, unsigned size)
         switch (reg) {
         case DMAC_SADDR: return s->ch[n].saddr;
         case DMAC_DADDR: return s->ch[n].daddr;
-        case DMAC_DSCR:  return s->ch[n].dscr;
-        case DMAC_CTRLA: return s->ch[n].ctrla;
+        case DMAC_DSCR:
+            /* For a cyclic RX channel that we deliberately leave idle (no DMA
+             * flow-control modelled), report the head descriptor's "next"
+             * pointer: real hardware advances DSCR to the next LLI as soon as
+             * it loads the current one.  Together with CTRLA==0 this makes the
+             * at_hdmac residue calculation take the first-descriptor path and
+             * compute residue == total_len, i.e. "nothing received" - so the
+             * USART driver does not push a flood of phantom RX bytes. */
+            if (s->ch[n].cyclic && s->ch[n].dscr != 0) {
+                uint32_t nxt = s->ch[n].dscr;
+                address_space_read(&address_space_memory,
+                                   s->ch[n].dscr + DMAC_LLI_NEXT_OFF,
+                                   MEMTXATTRS_UNSPECIFIED, &nxt, sizeof(nxt));
+                return nxt;
+            }
+            return s->ch[n].dscr;
+        case DMAC_CTRLA:
+            return s->ch[n].cyclic ? 0 : s->ch[n].ctrla;
         case DMAC_CTRLB: return s->ch[n].ctrlb;
         case DMAC_CFG:   return s->ch[n].cfg;
         default:         return 0;
@@ -238,15 +279,33 @@ static void dmac_write(void *opaque, hwaddr offset, uint64_t value,
         for (n = 0; n < DMAC_N_CHANNELS; n++) {
             if (val & (1u << n)) {
                 s->chsr |= 1u << n;
-                s->pending |= 1u << n;
+                /* A cyclic list is peripheral-paced (UART/audio RX), driven by
+                 * the device's DMA request which we do not model.  Running it
+                 * would fabricate phantom data; instead flag it and leave it
+                 * "running" - its residue reads report an idle head so the
+                 * driver sees "nothing received". */
+                if (s->ch[n].dscr != 0 &&
+                    dmac_chain_is_cyclic(s->ch[n].dscr)) {
+                    s->ch[n].cyclic = true;
+                } else {
+                    s->ch[n].cyclic = false;
+                    s->pending |= 1u << n;   /* run this transfer */
+                }
             }
         }
         qemu_bh_schedule(s->bh);   /* transfer asynchronously */
         break;
     }
-    case DMAC_CHDR:
+    case DMAC_CHDR: {
+        int n;
         s->chsr &= ~(val & 0xFF);
+        for (n = 0; n < DMAC_N_CHANNELS; n++) {
+            if (val & (1u << n)) {
+                s->ch[n].cyclic = false;
+            }
+        }
         break;
+    }
     default:
         qemu_log_mask(LOG_UNIMP, "at91-dmac: write to unimplemented "
                       "offset 0x%03" HWADDR_PRIx " = 0x%08x\n", offset, val);
@@ -306,7 +365,7 @@ static int dmac_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_at91_dmac_chan = {
     .name = "at91-dmac-chan",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(saddr, AT91DmacChan),
@@ -315,6 +374,7 @@ static const VMStateDescription vmstate_at91_dmac_chan = {
         VMSTATE_UINT32(ctrla, AT91DmacChan),
         VMSTATE_UINT32(ctrlb, AT91DmacChan),
         VMSTATE_UINT32(cfg, AT91DmacChan),
+        VMSTATE_BOOL_V(cyclic, AT91DmacChan, 2),
         VMSTATE_END_OF_LIST()
     }
 };
