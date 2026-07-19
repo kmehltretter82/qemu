@@ -104,6 +104,8 @@
 #define DSCSR_ANEG_DONE    0x0008
 
 #define MACB_RX_BUFSIZE 128
+/* Worst-case 128-byte buffers one max-size Ethernet frame can span. */
+#define MACB_RX_MAX_DESC (((1536) + MACB_RX_BUFSIZE - 1) / MACB_RX_BUFSIZE)
 
 struct AT91MacbState {
     SysBusDevice parent_obj;
@@ -252,14 +254,28 @@ static void macb_do_tx(AT91MacbState *s)
 static bool macb_can_receive(NetClientState *nc)
 {
     AT91MacbState *s = qemu_get_nic_opaque(nc);
-    uint32_t addr;
+    uint32_t desc = s->rx_desc;
+    int i;
 
     if (!(s->ncr & NCR_RE) || !s->rx_desc) {
         return false;
     }
-    addr = address_space_ldl_le(&address_space_memory, s->rx_desc,
-                                MEMTXATTRS_UNSPECIFIED, NULL);
-    return !(addr & RXD_USED);
+    /* Only accept a frame that fits end-to-end.  macb_receive() writes RXD_SOF
+     * on the first descriptor and RXD_EOF on the last; if it runs out of free
+     * descriptors mid-frame it drops the frame, leaving a SOF-without-EOF
+     * fragment in the ring.  The Linux macb driver then rewinds rx_tail to that
+     * still-RXD_USED SOF descriptor waiting for the missing EOF, so macb_rx_poll
+     * reschedules forever (RX softirq storm).  Require a whole max-size frame's
+     * worth of free descriptors so slirp backpressures instead of us dropping. */
+    for (i = 0; i < MACB_RX_MAX_DESC; i++) {
+        uint32_t addr = address_space_ldl_le(&address_space_memory, desc,
+                                             MEMTXATTRS_UNSPECIFIED, NULL);
+        if (addr & RXD_USED) {
+            return false;
+        }
+        desc = (addr & RXD_WRAP) ? s->rbqp : desc + 8;
+    }
+    return true;
 }
 
 static ssize_t macb_receive(NetClientState *nc, const uint8_t *buf, size_t size)
@@ -274,6 +290,35 @@ static ssize_t macb_receive(NetClientState *nc, const uint8_t *buf, size_t size)
         /* RX disabled: swallow the frame like the real MAC.  Returning an
          * error here would make slirp treat the whole link as dead. */
         return size;
+    }
+
+    /* Pre-flight the whole frame before touching the ring.  If we hit a used
+     * descriptor mid-write we must NOT leave a SOF-without-EOF fragment: the
+     * Linux macb driver rewinds rx_tail to that still-used SOF descriptor and
+     * spins in macb_rx_poll() forever (RX softirq storm).  So verify every
+     * descriptor the frame needs is free up front; if not, drop it cleanly
+     * (BNA) without writing anything, leaving the ring untouched. */
+    {
+        uint32_t probe = desc;
+        size_t need = size;
+        bool pfirst = true;
+
+        while (need > 0) {
+            uint32_t paddr = address_space_ldl_le(&address_space_memory, probe,
+                                                  MEMTXATTRS_UNSPECIFIED, NULL);
+            size_t pspace = MACB_RX_BUFSIZE -
+                            (pfirst ? ((s->ncfgr >> 14) & 0x3) : 0);
+
+            if (paddr & RXD_USED) {
+                s->rsr |= RSR_BNA;
+                s->isr |= INT_RXUBR;
+                macb_update_irq(s);
+                return size;
+            }
+            need -= need < pspace ? need : pspace;
+            probe = (paddr & RXD_WRAP) ? s->rbqp : probe + 8;
+            pfirst = false;
+        }
     }
 
     do {
