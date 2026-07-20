@@ -685,6 +685,17 @@ static void ti925t_initfn(Object *obj)
     cpu->reset_sctlr = 0x00000070;
 }
 
+static void sa110_initfn(Object *obj)
+{
+    ARMCPU *cpu = ARM_CPU(obj);
+
+    cpu->dtb_compatible = "intel,sa110";
+    set_feature(&cpu->env, ARM_FEATURE_STRONGARM);
+    set_feature(&cpu->env, ARM_FEATURE_DUMMY_C15_REGS);
+    cpu->midr = 0x4401A102;
+    cpu->reset_sctlr = 0x00000070;
+}
+
 static void sa1100_initfn(Object *obj)
 {
     ARMCPU *cpu = ARM_CPU(obj);
@@ -726,6 +737,7 @@ static const ARMCPUInfo arm_tcg_cpus[] = {
     { .name = "cortex-r5f",  .initfn = cortex_r5f_initfn },
     { .name = "cortex-r52",  .initfn = cortex_r52_initfn },
     { .name = "ti925t",      .initfn = ti925t_initfn },
+    { .name = "sa110",       .initfn = sa110_initfn },
     { .name = "sa1100",      .initfn = sa1100_initfn },
     { .name = "sa1110",      .initfn = sa1110_initfn },
 };
