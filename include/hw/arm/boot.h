@@ -45,6 +45,19 @@ struct arm_boot_info {
     const char *initrd_filename;
     const char *dtb_filename;
     hwaddr loader_start;
+    /*
+     * Offset from loader_start at which a 32-bit zImage is loaded;
+     * 0 means the default (0x10000). Boards whose firmware loaded
+     * kernels at a fixed conventional address (e.g. NetWinder's
+     * NeTTrom at 0x8000) can set this so bootloader-format images
+     * that assume that convention work with -kernel.
+     */
+    hwaddr kernel_load_offset;
+    /*
+     * Write boot parameters as a pre-ATAG "struct param_struct"
+     * instead of a tagged list, for vendor-era (2.2/2.4) kernels.
+     */
+    bool old_param;
     hwaddr dtb_start;
     hwaddr dtb_limit;
     /* If set to True, arm_load_kernel() will not load DTB.

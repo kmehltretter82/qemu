@@ -337,6 +337,87 @@ static void set_kernel_args(const struct arm_boot_info *info, AddressSpace *as)
     WRITE_WORD(p, 0);
 }
 
+/*
+ * Write the pre-ATAG "struct param_struct" boot parameter block
+ * (linux-2.x include/asm-arm/setup.h). Vendor-era ARM kernels and
+ * firmware-format images (e.g. NetWinder kernels expecting NeTTrom
+ * parameters) reject or mis-parse an ATAG list, so boards can opt
+ * into this layout with arm_boot_info::old_param.
+ */
+static void set_kernel_args_old(const struct arm_boot_info *info,
+                                AddressSpace *as)
+{
+    hwaddr p;
+    hwaddr base = info->loader_start;
+    int initrd_size = info->initrd_size;
+    uint32_t pages_in_bank;
+    int i;
+
+    p = base + KERNEL_ARGS_ADDR;
+    /* page_size */
+    WRITE_WORD(p, 4096);
+    /* nr_pages */
+    WRITE_WORD(p, info->ram_size / 4096);
+    /* ramdisk_size */
+    WRITE_WORD(p, 0);
+    /* flags: FLAG_READONLY */
+    WRITE_WORD(p, 1);
+    /* rootdev: /dev/ram0 if we are booting an initrd */
+    WRITE_WORD(p, initrd_size ? 0x0100 : 0);
+    /* video_num_cols */
+    WRITE_WORD(p, 0);
+    /* video_num_rows */
+    WRITE_WORD(p, 0);
+    /* video_x */
+    WRITE_WORD(p, 0);
+    /* video_y */
+    WRITE_WORD(p, 0);
+    /* memc_control_reg */
+    WRITE_WORD(p, 0);
+    /* sounddefault, adfsdrives, bytes_per_char_h/v (byte fields) */
+    WRITE_WORD(p, 0);
+    /* pages_in_bank[4] */
+    pages_in_bank = info->ram_size / 4096 / 4;
+    for (i = 0; i < 4; i++) {
+        WRITE_WORD(p, pages_in_bank);
+    }
+    /* pages_in_vram */
+    WRITE_WORD(p, 0);
+    /*
+     * initrd_start is a *virtual* address in this layout; these
+     * kernels all map RAM at 0xc0000000 (PAGE_OFFSET) with
+     * PHYS_OFFSET == loader_start.
+     */
+    if (initrd_size) {
+        WRITE_WORD(p,
+                   0xc0000000 + (info->initrd_start - info->loader_start));
+        WRITE_WORD(p, initrd_size);
+    } else {
+        WRITE_WORD(p, 0);
+        WRITE_WORD(p, 0);
+    }
+    /* rd_start */
+    WRITE_WORD(p, 0);
+    /* system_rev */
+    WRITE_WORD(p, 0);
+    /* system_serial_low */
+    WRITE_WORD(p, 0);
+    /* system_serial_high */
+    WRITE_WORD(p, 0);
+    /* mem_fclk_21285: 0 means the kernel default */
+    WRITE_WORD(p, 0);
+
+    /*
+     * commandline lives at offset 0x500 (after u1[256] and u2[1024]);
+     * fresh RAM is zeroed, so an absent commandline reads as empty.
+     */
+    if (info->kernel_cmdline && *info->kernel_cmdline) {
+        address_space_write(as, base + KERNEL_ARGS_ADDR + 0x500,
+                            MEMTXATTRS_UNSPECIFIED, info->kernel_cmdline,
+                            strlen(info->kernel_cmdline) + 1);
+    }
+}
+
 static int fdt_add_memory_node(void *fdt, uint32_t acells, hwaddr mem_base,
                                uint32_t scells, hwaddr mem_len,
                                int numa_node_id)
@@ -727,7 +808,11 @@ static void do_cpu_reset(void *opaque)
                 cpu_set_pc(cs, info->loader_start);
 
                 if (!have_dtb(info)) {
-                    set_kernel_args(info, as);
+                    if (info->old_param) {
+                        set_kernel_args_old(info, as);
+                    } else {
+                        set_kernel_args(info, as);
+                    }
                 }
             } else if (info->secondary_cpu_reset_hook) {
                 info->secondary_cpu_reset_hook(cpu, info);
@@ -958,9 +1043,12 @@ static void arm_setup_direct_kernel_boot(ARMCPU *cpu,
         }
     } else if (kernel_size < 0) {
         /* 32-bit ARM */
-        entry = info->loader_start + KERNEL_LOAD_ADDR;
+        hwaddr load_offset = info->kernel_load_offset ?
+            info->kernel_load_offset : KERNEL_LOAD_ADDR;
+
+        entry = info->loader_start + load_offset;
         kernel_size = load_image_targphys_as(info->kernel_filename, entry,
-                                             ram_end - KERNEL_LOAD_ADDR, as,
+                                             ram_end - load_offset, as,
                                              NULL);
         is_linux = 1;
         if (kernel_size >= 0) {
