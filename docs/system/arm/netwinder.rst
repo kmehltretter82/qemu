@@ -16,7 +16,8 @@ Emulated hardware:
   (the machine's timekeeping source)
 - 4 MiB flash at 0x41000000 (NeTTrom firmware home)
 - DC21285 PCI host bridge with the onboard DC21143 Tulip ethernet in
-  slot 10; use ``-nic user,model=tulip``
+  slot 10 (use ``-nic user,model=tulip``) and the W83C553/SL82C105
+  IDE pair in slot 12 (attach disks with ``-drive ...,if=ide``)
 
 Serial ports: ``-serial`` 0 and 1 are the SuperIO 16550s (``ttyS0``
 is the console), 2 is the 21285 internal UART.
@@ -36,5 +37,4 @@ with the ``old-param`` machine property::
       -kernel vmlinuz-2.4.27-netwinder -initrd initrd.gz \
       -append 'console=ttyS0 root=/dev/ram0' -serial stdio
 
-Not yet modelled: SuperIO IDE, GPIO/LEDs and the DS1620
-thermometer.
+Not yet modelled: GPIO/LEDs and the DS1620 thermometer.

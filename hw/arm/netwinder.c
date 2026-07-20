@@ -35,6 +35,7 @@
 #include "hw/timer/i8254.h"
 #include "hw/pci/pci.h"
 #include "hw/pci-host/dc21285-pci.h"
+#include "hw/ide/pci.h"
 #include "system/address-spaces.h"
 #include "system/block-backend.h"
 #include "system/system.h"
@@ -162,6 +163,16 @@ static void netwinder_init(MachineState *machine)
     /* Onboard DC21143 ethernet in slot 10 (-> 21285 IN1) */
     pci_init_nic_in_slot(PCI_HOST_BRIDGE(nms->pci)->bus, "tulip", NULL,
                          "0a");
+
+    /*
+     * Winbond W83C553/SL82C105 pair in slot 12: the IDE function is
+     * function 1 and runs in legacy mode (ports 0x1f0, ISA IRQ 14);
+     * pata_sl82c105 requires the bridge shell at function 0.
+     */
+    pci_create_simple_multifunction(PCI_HOST_BRIDGE(nms->pci)->bus,
+                                    PCI_DEVFN(12, 0), "w83c553-isa");
+    pci_ide_create_devs(pci_create_simple(PCI_HOST_BRIDGE(nms->pci)->bus,
+                                          PCI_DEVFN(12, 1), "sl82c105-ide"));
 
     iack_region = g_new(MemoryRegion, 1);
     memory_region_init_io(iack_region, NULL, &netwinder_iack_ops, NULL,
