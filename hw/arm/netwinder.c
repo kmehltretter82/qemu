@@ -57,6 +57,7 @@ struct NetwinderMachineState {
     DC21285State *fb;
     DC21285PCIState *pci;
     bool old_param;
+    bool legacy_ide;
 };
 
 #define TYPE_NETWINDER_MACHINE MACHINE_TYPE_NAME("netwinder")
@@ -98,6 +99,7 @@ static void netwinder_init(MachineState *machine)
 {
     NetwinderMachineState *nms = NETWINDER_MACHINE(machine);
     DeviceState *dev, *pcidev;
+    PCIDevice *idedev;
     DriveInfo *dinfo;
     MemoryRegion *isa_region, *iack_region, *dma_alias;
     ISABus *isa_bus;
@@ -171,8 +173,11 @@ static void netwinder_init(MachineState *machine)
      */
     pci_create_simple_multifunction(PCI_HOST_BRIDGE(nms->pci)->bus,
                                     PCI_DEVFN(12, 0), "w83c553-isa");
-    pci_ide_create_devs(pci_create_simple(PCI_HOST_BRIDGE(nms->pci)->bus,
-                                          PCI_DEVFN(12, 1), "sl82c105-ide"));
+    idedev = pci_new(PCI_DEVFN(12, 1), "sl82c105-ide");
+    qdev_prop_set_bit(DEVICE(idedev), "legacy", nms->legacy_ide);
+    pci_realize_and_unref(idedev, PCI_HOST_BRIDGE(nms->pci)->bus,
+                          &error_fatal);
+    pci_ide_create_devs(idedev);
 
     iack_region = g_new(MemoryRegion, 1);
     memory_region_init_io(iack_region, NULL, &netwinder_iack_ops, NULL,
@@ -183,6 +188,16 @@ static void netwinder_init(MachineState *machine)
     netwinder_binfo.ram_size = machine->ram_size;
     netwinder_binfo.old_param = nms->old_param;
     arm_load_kernel(nms->cpu, machine, &netwinder_binfo);
+}
+
+static bool netwinder_get_legacy_ide(Object *obj, Error **errp)
+{
+    return NETWINDER_MACHINE(obj)->legacy_ide;
+}
+
+static void netwinder_set_legacy_ide(Object *obj, bool value, Error **errp)
+{
+    NETWINDER_MACHINE(obj)->legacy_ide = value;
 }
 
 static bool netwinder_get_old_param(Object *obj, Error **errp)
@@ -210,6 +225,13 @@ static void netwinder_machine_class_init(ObjectClass *oc, const void *data)
     mc->valid_cpu_types = valid_cpu_types;
     mc->default_ram_size = 64 * MiB;
     mc->default_ram_id = "netwinder.ram";
+
+    object_class_property_add_bool(oc, "legacy-ide",
+                                   netwinder_get_legacy_ide,
+                                   netwinder_set_legacy_ide);
+    object_class_property_set_description(oc, "legacy-ide",
+        "Strap the SL82C105 IDE controller into legacy/compatibility mode "
+        "(fixed ports 0x1f0/0x170) as the real NetWinder does");
 
     object_class_property_add_bool(oc, "old-param",
                                    netwinder_get_old_param,
