@@ -86,6 +86,10 @@ config SH_PCI
     bool
     select PCI
 
+config DC21285_PCI
+    bool
+    select PCI
+
 config ARTICIA
     bool
     select PCI

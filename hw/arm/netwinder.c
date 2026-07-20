@@ -33,6 +33,8 @@
 #include "hw/intc/i8259.h"
 #include "hw/char/serial-isa.h"
 #include "hw/timer/i8254.h"
+#include "hw/pci/pci.h"
+#include "hw/pci-host/dc21285-pci.h"
 #include "system/address-spaces.h"
 #include "system/block-backend.h"
 #include "system/system.h"
@@ -52,6 +54,7 @@ struct NetwinderMachineState {
 
     ARMCPU *cpu;
     DC21285State *fb;
+    DC21285PCIState *pci;
     bool old_param;
 };
 
@@ -67,26 +70,6 @@ static struct arm_boot_info netwinder_binfo = {
      * address and self-corrupts when started anywhere else.
      */
     .kernel_load_offset = 0x8000,
-};
-
-/*
- * Empty ISA I/O cycles float high; devices on the bus overlay this
- * with their own port regions.
- */
-static uint64_t netwinder_isa_bg_read(void *opaque, hwaddr addr, unsigned size)
-{
-    return (uint64_t)-1;
-}
-
-static void netwinder_isa_bg_write(void *opaque, hwaddr addr, uint64_t value,
-                                   unsigned size)
-{
-}
-
-static const MemoryRegionOps netwinder_isa_bg_ops = {
-    .read = netwinder_isa_bg_read,
-    .write = netwinder_isa_bg_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
 /*
@@ -113,9 +96,9 @@ static const MemoryRegionOps netwinder_iack_ops = {
 static void netwinder_init(MachineState *machine)
 {
     NetwinderMachineState *nms = NETWINDER_MACHINE(machine);
-    DeviceState *dev;
+    DeviceState *dev, *pcidev;
     DriveInfo *dinfo;
-    MemoryRegion *isa_region, *iack_region;
+    MemoryRegion *isa_region, *iack_region, *dma_alias;
     ISABus *isa_bus;
     qemu_irq *isa_irqs;
 
@@ -139,10 +122,32 @@ static void netwinder_init(MachineState *machine)
                           dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
                           64 * KiB, 4, 0x00, 0x00, 0x00, 0x00, 0);
 
-    /* ISA (SuperIO) behind the 21285 PCI I/O window */
-    isa_region = g_new(MemoryRegion, 1);
-    memory_region_init_io(isa_region, NULL, &netwinder_isa_bg_ops, NULL,
-                          "isa-io", 64 * KiB);
+    /* PCI host bridge: config windows, memory window, I/O window */
+    pcidev = qdev_new(TYPE_DC21285_PCI);
+    nms->pci = DC21285_PCI(pcidev);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(pcidev), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(pcidev), 0, 0x7b000000); /* type 0 cfg */
+    sysbus_mmio_map(SYS_BUS_DEVICE(pcidev), 1, 0x7a000000); /* type 1 cfg */
+    sysbus_mmio_map(SYS_BUS_DEVICE(pcidev), 2, 0x80000000); /* PCI memory */
+    for (int i = 0; i < 4; i++) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(pcidev), i,
+                           qdev_get_gpio_in(dev, DC21285_IRQ_IN0 + i));
+    }
+
+    /*
+     * Inbound window: the 21285 exposes system RAM to PCI bus
+     * masters at bus address 0xe0000000 (Linux's BUS_OFFSET).
+     */
+    dma_alias = g_new(MemoryRegion, 1);
+    memory_region_init_alias(dma_alias, NULL, "pci-inbound-ram",
+                             machine->ram, 0, machine->ram_size);
+    memory_region_add_subregion(&nms->pci->pci_mem, 0xe0000000, dma_alias);
+
+    /*
+     * The SuperIO's ISA ports decode in the PCI I/O window; the ISA
+     * bus therefore lives in the PCI host's I/O space.
+     */
+    isa_region = &nms->pci->pci_io;
     memory_region_add_subregion(get_system_memory(), NETWINDER_PCI_IO_BASE,
                                 isa_region);
     isa_bus = isa_bus_new(NULL, get_system_memory(), isa_region,
@@ -153,6 +158,10 @@ static void netwinder_init(MachineState *machine)
     serial_hds_isa_init(isa_bus, 0, 2);
     /* NetWinder timekeeping is the SuperIO's i8254 PIT on ISA IRQ 0 */
     i8254_pit_init(isa_bus, 0x40, 0, NULL);
+
+    /* Onboard DC21143 ethernet in slot 10 (-> 21285 IN1) */
+    pci_init_nic_in_slot(PCI_HOST_BRIDGE(nms->pci)->bus, "tulip", NULL,
+                         "0a");
 
     iack_region = g_new(MemoryRegion, 1);
     memory_region_init_io(iack_region, NULL, &netwinder_iack_ops, NULL,

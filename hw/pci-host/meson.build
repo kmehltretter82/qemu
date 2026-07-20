@@ -25,6 +25,7 @@ pci_ss.add(when: 'CONFIG_UNIN_PCI', if_true: files('uninorth.c'))
 pci_ss.add(when: 'CONFIG_PPCE500_PCI', if_true: files('ppce500.c'))
 # AmigaOne
 pci_ss.add(when: 'CONFIG_ARTICIA', if_true: files('articia.c'))
+pci_ss.add(when: 'CONFIG_DC21285_PCI', if_true: files('dc21285-pci.c'))
 # Pegasos2
 pci_ss.add(when: 'CONFIG_MV64361', if_true: files('mv64361.c'))
 
