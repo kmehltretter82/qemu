@@ -27,6 +27,9 @@
 #include "hw/arm/machines-qom.h"
 #include "hw/misc/acorn-iomd.h"
 #include "hw/char/serial-mm.h"
+#include "hw/ide/mmio.h"
+#include "hw/core/qdev-properties.h"
+#include "system/blockdev.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
 #include "target/arm/cpu-qom.h"
@@ -35,6 +38,8 @@
 #define RISCPC_RAM_BASE     0x10000000
 #define RISCPC_IOMD_BASE    0x03200000
 #define RISCPC_SERIAL_BASE  0x03010fe0
+#define RISCPC_IDE_CMD_BASE 0x030107c0
+#define RISCPC_IDE_CTL_BASE 0x03010fd8
 
 #define MACH_TYPE_RISCPC    1
 
@@ -77,7 +82,7 @@ static const MemoryRegionOps riscpc_bus_ops = {
 static void riscpc_init(MachineState *machine)
 {
     RiscPCMachineState *rms = RISCPC_MACHINE(machine);
-    DeviceState *dev;
+    DeviceState *dev, *ide;
 
     MemoryRegion *iobus = g_new(MemoryRegion, 1);
     MemoryRegion *podule = g_new(MemoryRegion, 1);
@@ -109,6 +114,22 @@ static void riscpc_init(MachineState *machine)
     serial_mm_init(get_system_memory(), RISCPC_SERIAL_BASE, 2,
                    qdev_get_gpio_in(dev, ACORN_IOMD_IRQ_SERIAL),
                    1843200, serial_hd(0), DEVICE_LITTLE_ENDIAN);
+
+    /*
+     * Onboard SuperIO IDE (Linux pata_platform: cmd 0x030107c0,
+     * ctl 0x03010fd8, byte registers on word boundaries, IOMD
+     * bank B "harddisk" interrupt).
+     */
+    ide = qdev_new(TYPE_MMIO_IDE);
+    qdev_prop_set_uint32(ide, "shift", 2);
+    /* connect before realize: the IDE bus latches its IRQ there */
+    sysbus_connect_irq(SYS_BUS_DEVICE(ide), 0,
+                       qdev_get_gpio_in(dev, ACORN_IOMD_IRQ_HARDDISK));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(ide), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(ide), 0, RISCPC_IDE_CMD_BASE);
+    sysbus_mmio_map(SYS_BUS_DEVICE(ide), 1, RISCPC_IDE_CTL_BASE);
+    mmio_ide_init_drives(ide, drive_get(IF_IDE, 0, 0),
+                         drive_get(IF_IDE, 0, 1));
 
     riscpc_binfo.ram_size = machine->ram_size;
     riscpc_binfo.old_param = rms->old_param;

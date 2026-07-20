@@ -51,5 +51,6 @@ struct AcornIOMDState {
 
 /* GPIO input line numbers */
 #define ACORN_IOMD_IRQ_SERIAL   10  /* bank B bit 2: SuperIO 16550 */
+#define ACORN_IOMD_IRQ_HARDDISK 9   /* bank B bit 1: onboard IDE */
 
 #endif

@@ -12,6 +12,8 @@ Emulated hardware:
 - Acorn IOMD: interrupt controller (banks A/B, DMA requests, FIQ),
   two 2 MHz IOC-style 16-bit timers, stubbed KART keyboard link
 - SuperIO 16550 at 0x03010fe0 (``ttyS0``, IOMD bank B bit 2)
+- onboard SuperIO IDE at 0x030107c0 (Linux ``pata_platform``;
+  attach disks with ``-drive ...,if=ide``)
 - RAM at physical 0x10000000 (the RiscPC's non-zero RAM base)
 - I/O and EASI podule spaces read as a floating bus (0xff), so the
   kernel's expansion-card probe correctly finds empty slots
@@ -30,4 +32,4 @@ Vendor-era kernels booted by the RISC OS loader expect a
 ``param_struct`` parameter block; use ``-M riscpc,old-param=on``.
 
 Not yet modelled: VIDC20 video, the KART keyboard/quadrature mouse,
-podules (including ICS IDE), floppy and sound DMA.
+podules (including ICS IDE expansion cards), floppy and sound DMA.
