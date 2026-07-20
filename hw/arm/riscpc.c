@@ -122,10 +122,9 @@ static void riscpc_init(MachineState *machine)
      */
     ide = qdev_new(TYPE_MMIO_IDE);
     qdev_prop_set_uint32(ide, "shift", 2);
-    /* connect before realize: the IDE bus latches its IRQ there */
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(ide), &error_fatal);
     sysbus_connect_irq(SYS_BUS_DEVICE(ide), 0,
                        qdev_get_gpio_in(dev, ACORN_IOMD_IRQ_HARDDISK));
-    sysbus_realize_and_unref(SYS_BUS_DEVICE(ide), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(ide), 0, RISCPC_IDE_CMD_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(ide), 1, RISCPC_IDE_CTL_BASE);
     mmio_ide_init_drives(ide, drive_get(IF_IDE, 0, 0),

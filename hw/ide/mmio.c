@@ -25,6 +25,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "system/dma.h"
@@ -117,12 +118,27 @@ static const VMStateDescription vmstate_ide_mmio = {
     }
 };
 
+/*
+ * Boards conventionally connect a sysbus device's IRQs after realizing
+ * it, so the value of s->irq at realize time is not yet meaningful.
+ * Hand the IDE bus a proxy that forwards to s->irq when the interrupt
+ * is actually raised; latching the value here would silently drop
+ * every interrupt for such boards.
+ */
+static void mmio_ide_set_irq(void *opaque, int n, int level)
+{
+    MMIOIDEState *s = opaque;
+
+    qemu_set_irq(s->irq, level);
+}
+
 static void mmio_ide_realizefn(DeviceState *dev, Error **errp)
 {
     SysBusDevice *d = SYS_BUS_DEVICE(dev);
     MMIOIDEState *s = MMIO_IDE(dev);
 
-    ide_bus_init_output_irq(&s->bus, s->irq);
+    ide_bus_init_output_irq(&s->bus, qemu_allocate_irq(mmio_ide_set_irq,
+                                                       s, 0));
 
     memory_region_init_io(&s->iomem1, OBJECT(s), &mmio_ide_ops, s,
                           "ide-mmio.1", 16 << s->shift);
