@@ -20,10 +20,18 @@
 #include "hw/pci/pci_device.h"
 #include "hw/ide/pci.h"
 #include "hw/isa/isa.h"
+#include "hw/core/qdev-properties.h"
 #include "ide-internal.h"
 
 #define TYPE_SL82C105_IDE "sl82c105-ide"
 #define TYPE_W83C553_ISA  "w83c553-isa"
+
+OBJECT_DECLARE_SIMPLE_TYPE(SL82C105State, SL82C105_IDE)
+
+struct SL82C105State {
+    PCIIDEState parent_obj;
+    bool legacy;
+};
 
 #define PCI_VENDOR_ID_WINBOND_2      0x10ad
 #define PCI_DEVICE_ID_WINBOND_82C105 0x0105
@@ -114,11 +122,45 @@ static void sl82c105_ide_reset(DeviceState *dev)
 static void sl82c105_ide_realize(PCIDevice *dev, Error **errp)
 {
     PCIIDEState *d = PCI_IDE(dev);
+    SL82C105State *s = SL82C105_IDE(dev);
     uint8_t *pci_conf = dev->config;
     /* On the NetWinder the W83C553 routes the IDE interrupts to
      * the ISA controller (IRQ_ISA_HARDDISK1/2), not to PCI INTx. */
     static const int isairq[2] = {14, 15};
     unsigned i;
+
+    if (s->legacy) {
+        /*
+         * Legacy/compatibility mode, as the NetWinder straps the part:
+         * fixed ports 0x1f0/0x170, no address BARs. Linux's PCI core
+         * then installs the fixed "legacy IDE quirk" resources.
+         */
+        pci_conf[PCI_CLASS_PROG] = 0x80;
+
+        sl82c105_bmdma_setup_bar(d);
+        pci_register_bar(dev, 4, PCI_BASE_ADDRESS_SPACE_IO, &d->bmdma_bar);
+        pci_conf[PCI_INTERRUPT_PIN] = 0x01;
+
+        for (i = 0; i < 2; i++) {
+            static const struct { int cmd, ctl; } ports[2] = {
+                {0x1f0, 0x3f6}, {0x170, 0x376}
+            };
+            int ret;
+
+            ide_bus_init(&d->bus[i], sizeof(d->bus[i]), DEVICE(d), i, 2);
+            ret = ide_init_ioport(&d->bus[i], NULL, ports[i].cmd,
+                                  ports[i].ctl);
+            if (ret) {
+                error_setg_errno(errp, -ret, "Failed to realize %s port %u",
+                                 object_get_typename(OBJECT(d)), i);
+                return;
+            }
+            ide_bus_init_output_irq(&d->bus[i], isa_get_irq(NULL, isairq[i]));
+            bmdma_init(&d->bus[i], &d->bmdma[i], d);
+            ide_bus_register_restart_cb(&d->bus[i]);
+        }
+        return;
+    }
 
     /* native mode, both channels */
     pci_conf[PCI_CLASS_PROG] = 0x8f;
@@ -165,6 +207,10 @@ static void sl82c105_ide_exitfn(PCIDevice *dev)
     }
 }
 
+static const Property sl82c105_properties[] = {
+    DEFINE_PROP_BOOL("legacy", SL82C105State, legacy, false),
+};
+
 static void sl82c105_ide_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -179,11 +225,13 @@ static void sl82c105_ide_class_init(ObjectClass *klass, const void *data)
     k->class_id = PCI_CLASS_STORAGE_IDE;
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
     dc->hotpluggable = false;
+    device_class_set_props(dc, sl82c105_properties);
 }
 
 static const TypeInfo sl82c105_ide_info = {
     .name          = TYPE_SL82C105_IDE,
     .parent        = TYPE_PCI_IDE,
+    .instance_size = sizeof(SL82C105State),
     .class_init    = sl82c105_ide_class_init,
 };
 
