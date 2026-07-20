@@ -241,6 +241,13 @@ config DC21285
     bool
     select PTIMER
 
+config RISCPC
+    bool
+    default y
+    depends on TCG && ARM
+    select ACORN_IOMD
+    select SERIAL_MM
+
 config NETWINDER
     bool
     default y

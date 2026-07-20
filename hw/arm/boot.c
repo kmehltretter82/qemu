@@ -376,10 +376,14 @@ static void set_kernel_args_old(const struct arm_boot_info *info,
     WRITE_WORD(p, 0);
     /* sounddefault, adfsdrives, bytes_per_char_h/v (byte fields) */
     WRITE_WORD(p, 0);
-    /* pages_in_bank[4] */
-    pages_in_bank = info->ram_size / 4096 / 4;
+    /*
+     * pages_in_bank[4]: all memory in bank 0. The banks are not
+     * physically contiguous on some boards (RiscPC SIMM slots are
+     * 64MB apart), and QEMU models one contiguous RAM block.
+     */
+    pages_in_bank = info->ram_size / 4096;
     for (i = 0; i < 4; i++) {
-        WRITE_WORD(p, pages_in_bank);
+        WRITE_WORD(p, i == 0 ? pages_in_bank : 0);
     }
     /* pages_in_vram */
     WRITE_WORD(p, 0);
