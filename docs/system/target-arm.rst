@@ -98,6 +98,8 @@ Board-specific documentation
    arm/orangepi
    arm/raspi
    arm/collie
+   arm/netwinder
+   arm/riscpc
    arm/sx1
    arm/stellaris
    arm/stm32
