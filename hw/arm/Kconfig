@@ -237,6 +237,21 @@ config COLLIE
     select ZAURUS_SCOOP
     select STRONGARM
 
+config DC21285
+    bool
+    select PTIMER
+
+config NETWINDER
+    bool
+    default y
+    depends on TCG && ARM
+    select DC21285
+    select PFLASH_CFI01
+    select ISA_BUS
+    select I8259
+    select SERIAL_ISA
+    select I8254
+
 config SX1
     bool
     default y
