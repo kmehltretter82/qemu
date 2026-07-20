@@ -258,6 +258,8 @@ config NETWINDER
     select I8259
     select SERIAL_ISA
     select I8254
+    select DC21285_PCI
+    select TULIP
 
 config SX1
     bool

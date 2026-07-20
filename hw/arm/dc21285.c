@@ -31,6 +31,7 @@
 
 /* CSR offsets (word registers) */
 #define CSR_VENDOR_DEVICE   0x000
+#define CSR_PCICMD          0x004
 #define CSR_CLASSREV        0x008
 #define CSR_SA110_CNTL      0x13c
 
@@ -347,6 +348,18 @@ static void dc21285_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case CSR_FIQ_SOFT:
         dc21285_set_raw(s, INT_SOFTIRQ, value & 1);
+        break;
+
+    case CSR_PCICMD:
+        /*
+         * Low half is the PCI command register (storage); the status
+         * half is write-one-to-clear. Linux clears the abort flags
+         * this way and treats config cycles as failed while any are
+         * set.
+         */
+        s->regs[CSR_PCICMD >> 2] =
+            (s->regs[CSR_PCICMD >> 2] & 0xffff0000 & ~value) |
+            (value & 0xffff);
         break;
 
     default:
