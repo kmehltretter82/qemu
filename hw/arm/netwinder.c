@@ -52,6 +52,7 @@ struct NetwinderMachineState {
 
     ARMCPU *cpu;
     DC21285State *fb;
+    bool old_param;
 };
 
 #define TYPE_NETWINDER_MACHINE MACHINE_TYPE_NAME("netwinder")
@@ -60,6 +61,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(NetwinderMachineState, NETWINDER_MACHINE)
 static struct arm_boot_info netwinder_binfo = {
     .loader_start = 0,
     .board_id = MACH_TYPE_NETWINDER,
+    /*
+     * NeTTrom loads kernels at 0x8000, and NetWinder-era vmlinuz
+     * images (e.g. Debian's) carry a shim that assumes exactly that
+     * address and self-corrupts when started anywhere else.
+     */
+    .kernel_load_offset = 0x8000,
 };
 
 /*
@@ -154,7 +161,18 @@ static void netwinder_init(MachineState *machine)
                                 iack_region);
 
     netwinder_binfo.ram_size = machine->ram_size;
+    netwinder_binfo.old_param = nms->old_param;
     arm_load_kernel(nms->cpu, machine, &netwinder_binfo);
+}
+
+static bool netwinder_get_old_param(Object *obj, Error **errp)
+{
+    return NETWINDER_MACHINE(obj)->old_param;
+}
+
+static void netwinder_set_old_param(Object *obj, bool value, Error **errp)
+{
+    NETWINDER_MACHINE(obj)->old_param = value;
 }
 
 static void netwinder_machine_class_init(ObjectClass *oc, const void *data)
@@ -172,6 +190,13 @@ static void netwinder_machine_class_init(ObjectClass *oc, const void *data)
     mc->valid_cpu_types = valid_cpu_types;
     mc->default_ram_size = 64 * MiB;
     mc->default_ram_id = "netwinder.ram";
+
+    object_class_property_add_bool(oc, "old-param",
+                                   netwinder_get_old_param,
+                                   netwinder_set_old_param);
+    object_class_property_set_description(oc, "old-param",
+        "Pass boot parameters as a NeTTrom-style param_struct instead of "
+        "ATAGs (needed by vendor-era 2.2/2.4 kernels)");
 }
 
 static const TypeInfo netwinder_machine_typeinfo = {
