@@ -123,6 +123,7 @@ static void riscpc_init(MachineState *machine)
     rms->iomd = ACORN_IOMD(dev);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, RISCPC_IOMD_BASE);
+    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 1, ACORN_IOMD_MOUSE_BASE);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
                        qdev_get_gpio_in(DEVICE(rms->cpu), ARM_CPU_IRQ));
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1,
@@ -139,6 +140,8 @@ static void riscpc_init(MachineState *machine)
     object_property_set_link(OBJECT(vidc), "iomd", OBJECT(dev), &error_fatal);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(vidc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(vidc), 0, RISCPC_VIDC_BASE);
+    sysbus_connect_irq(SYS_BUS_DEVICE(vidc), 0,
+                       qdev_get_gpio_in(dev, ACORN_IOMD_IRQ_VSYNC));
 
     serial_mm_init(get_system_memory(), RISCPC_SERIAL_BASE, 2,
                    qdev_get_gpio_in(dev, ACORN_IOMD_IRQ_SERIAL),

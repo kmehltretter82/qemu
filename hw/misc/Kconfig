@@ -1,5 +1,6 @@
 config ACORN_IOMD
     bool
+    select PS2
     select PTIMER
 
 config APPLESMC

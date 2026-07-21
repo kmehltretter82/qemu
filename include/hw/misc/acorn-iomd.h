@@ -11,6 +11,8 @@
 
 #include "hw/core/sysbus.h"
 #include "hw/core/ptimer.h"
+#include "hw/input/ps2.h"
+#include "ui/input.h"
 #include "qom/object.h"
 
 #define TYPE_ACORN_IOMD "acorn-iomd"
@@ -47,11 +49,35 @@ struct AcornIOMDState {
     uint32_t regs[ACORN_IOMD_NUM_REGS];
 
     AcornIOMDTimer timer[ACORN_IOMD_NUM_TIMERS];
+
+    /*
+     * KART: the RiscPC's keyboard link is a PS/2 port, so the guest
+     * driver (Linux rpckbd, serio type SERIO_8042) speaks straight to
+     * QEMU's ps2 core.
+     */
+    PS2KbdState kbd;
+    uint32_t kctrl;
+
+    /*
+     * Quadrature mouse: free-running 16-bit position counters that the
+     * guest samples and differences itself, plus a button register in a
+     * separate decode at 0x03310000.
+     */
+    MemoryRegion mouse_iomem;
+    QemuInputHandlerState *mouse_handler;
+    int16_t mouse_x, mouse_y;
+    uint8_t mouse_buttons;
 };
 
-/* GPIO input line numbers */
+/* GPIO input line numbers, matching Linux arch/arm/mach-rpc irqs.h */
+#define ACORN_IOMD_IRQ_VSYNC     3  /* bank A bit 3: VIDC20 vertical sync */
+#define ACORN_IOMD_IRQ_HARDDISK  9  /* bank B bit 1: onboard IDE */
 #define ACORN_IOMD_IRQ_SERIAL   10  /* bank B bit 2: SuperIO 16550 */
-#define ACORN_IOMD_IRQ_HARDDISK 9   /* bank B bit 1: onboard IDE */
+#define ACORN_IOMD_IRQ_KBDTX    14  /* bank B bit 6 */
+#define ACORN_IOMD_IRQ_KBDRX    15  /* bank B bit 7 */
+
+/* Mouse button register, read by Linux rpcmouse at IOMEM(0xe0310000) */
+#define ACORN_IOMD_MOUSE_BASE   0x03310000
 
 /*
  * Video DMA, driven by the guest framebuffer driver and consumed by the

@@ -35,6 +35,8 @@
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
 #include "system/address-spaces.h"
+#include "qemu/timer.h"
+#include "hw/core/irq.h"
 
 /* Register groups, from bits 31..28 of the written word. */
 #define VIDC20_PALETTE      0x0
@@ -320,6 +322,22 @@ static const GraphicHwOps vidc20_gfx_ops = {
     .gfx_update = vidc20_update_display,
 };
 
+/*
+ * Vertical sync.  Linux rpcmouse samples the quadrature counters on this
+ * interrupt rather than being pushed events, so without it the mouse
+ * never moves.  IOMD bank A is latched, so a pulse is enough.
+ */
+#define VIDC20_FRAME_NS (NANOSECONDS_PER_SECOND / 60)
+
+static void vidc20_vblank(void *opaque)
+{
+    VIDC20State *s = opaque;
+
+    qemu_irq_pulse(s->vsync);
+    timer_mod(s->vblank_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VIDC20_FRAME_NS);
+}
+
 static void vidc20_reset_hold(Object *obj, ResetType type)
 {
     VIDC20State *s = VIDC20(obj);
@@ -359,7 +377,12 @@ static void vidc20_realize(DeviceState *dev, Error **errp)
     memory_region_init_io(&s->iomem, OBJECT(s), &vidc20_ops, s,
                           "vidc20", 0x100000);
     sysbus_init_mmio(sbd, &s->iomem);
+    sysbus_init_irq(sbd, &s->vsync);
     s->con = qemu_graphic_console_create(dev, 0, &vidc20_gfx_ops, s);
+
+    s->vblank_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, vidc20_vblank, s);
+    timer_mod(s->vblank_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VIDC20_FRAME_NS);
 }
 
 static const VMStateDescription vmstate_vidc20 = {

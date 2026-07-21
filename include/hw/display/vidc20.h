@@ -26,6 +26,8 @@ struct VIDC20State {
     MemoryRegionSection fbsection;
     AcornIOMDState *iomd;           /* supplies the DMA address */
     QemuConsole *con;
+    qemu_irq vsync;                 /* to IOMD bank A bit 3 */
+    QEMUTimer *vblank_timer;
 
     /* 28-bit palette entries as written, plus a cached ARGB form */
     uint32_t palette[256];
