@@ -34,6 +34,7 @@
 #include "hw/core/boards.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/or-irq.h"
+#include "hw/arm/at91_bootrom.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/machines-qom.h"
 #include "system/system.h"
@@ -219,6 +220,8 @@ struct Sam9m10g45ekMachineState {
     uint8_t ebi_nor_cs;
     uint8_t ebi_cf_cs;
     bool udphs_loopback;
+    MemoryRegion sram;
+    MemoryRegion sram_alias;
     MemoryRegion ebi_sram;
 };
 
@@ -418,8 +421,8 @@ static void sam9_create_hsmci(hwaddr base, DeviceState *aic, int irqno,
 
 static void sam9m10g45ek_init(MachineState *machine)
 {
+    Sam9m10g45ekMachineState *s = SAM9M10G45EK_MACHINE(machine);
     MemoryRegion *sysmem = get_system_memory();
-    MemoryRegion *sram;
     Object *cpuobj;
     ARMCPU *cpu;
     DeviceState *dbgu, *aic, *pit, *pmc, *orgate, *piob = NULL;
@@ -437,10 +440,9 @@ static void sam9m10g45ek_init(MachineState *machine)
 
     /* 64 KB internal SRAM (0x00300000) - the kernel maps it as an mmio-sram
      * pool and reads back what it writes, so it needs real backing memory. */
-    sram = g_new(MemoryRegion, 1);
-    memory_region_init_ram(sram, NULL, "at91.sram", SAM9G45_SRAM_SIZE,
+    memory_region_init_ram(&s->sram, NULL, "at91.sram", SAM9G45_SRAM_SIZE,
                            &error_fatal);
-    memory_region_add_subregion(sysmem, SAM9G45_SRAM_BASE, sram);
+    memory_region_add_subregion(sysmem, SAM9G45_SRAM_BASE, &s->sram);
 
     /*
      * Optional static-memory attachments on EBI CS0..CS5.  CS3 remains
@@ -891,6 +893,30 @@ static void sam9m10g45ek_init(MachineState *machine)
     sysbus_mmio_map(SYS_BUS_DEVICE(pit), 0, SAM9G45_PIT_BASE);
     sysbus_connect_irq(SYS_BUS_DEVICE(pit), 0,
                        qdev_get_gpio_in(orgate, 1));
+
+    /*
+     * With no direct kernel, model the internal ROM's SD-card boot path.
+     * ROM code finds and validates BOOT.BIN, copies it into internal SRAM,
+     * remaps that SRAM at address zero, then branches to zero.  Parsing the
+     * card on the host models the proprietary ROM while BOOT.BIN and every
+     * later stage access the card through the guest-visible HSMCI device.
+     */
+    if (!machine->kernel_filename) {
+        DriveInfo *di = drive_get(IF_SD, 0, 0);
+        BlockBackend *blk = di ? blk_by_legacy_dinfo(di) : NULL;
+        Error *err = NULL;
+
+        if (blk && blk_is_available(blk) &&
+            at91_bootrom_load_sd(blk, SAM9G45_SRAM_BASE, SAM9G45_SRAM_SIZE,
+                                 &err)) {
+            memory_region_init_alias(&s->sram_alias, NULL, "at91.sram-remap",
+                                     &s->sram, 0,
+                                     SAM9G45_SRAM_SIZE);
+            memory_region_add_subregion(sysmem, 0, &s->sram_alias);
+        } else if (err) {
+            warn_report_err(err);
+        }
+    }
 
     sam9m10g45ek_binfo.loader_start = SAM9G45_SDRAM_BASE;
     sam9m10g45ek_binfo.ram_size = machine->ram_size;
