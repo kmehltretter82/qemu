@@ -248,6 +248,7 @@ config RISCPC
     select ACORN_IOMD
     select SERIAL_MM
     select IDE_MMIO
+    select VIDC20
 
 config NETWINDER
     bool

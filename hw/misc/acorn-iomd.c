@@ -73,6 +73,33 @@
 
 #define KCTRL_TXEMPTY   (1 << 7)
 
+/*
+ * Video DMA state for the VIDC20 model.  The video registers (0x1c0..0x1e0)
+ * have no side effects, so they land in the generic backing store; this is
+ * just a typed view of them.  VIDINIT is the live pointer - acornfb
+ * rewrites it to pan (acornfb.c:442) - and VIDSTART the buffer base.
+ */
+bool acorn_iomd_video_dma(AcornIOMDState *s, hwaddr *base)
+{
+    uint32_t cr = s->regs[ACORN_IOMD_VIDCR >> 2];
+    uint32_t init = s->regs[ACORN_IOMD_VIDINIT >> 2];
+    uint32_t start = s->regs[ACORN_IOMD_VIDSTART >> 2];
+
+    if (!(cr & ACORN_IOMD_VIDCR_ENABLE)) {
+        return false;
+    }
+
+    /*
+     * Bit 30 is the wrap flag acornfb sets via video_set_dma() when the
+     * pan offset reaches the end of the buffer; it is not part of the
+     * address.
+     */
+    init &= ~(1u << 30);
+
+    *base = init ? init : start;
+    return *base != 0;
+}
+
 static void iomd_update(AcornIOMDState *s)
 {
     int level = (s->irqa_latch & s->irqa_mask) ||

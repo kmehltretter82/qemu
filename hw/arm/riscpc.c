@@ -10,8 +10,8 @@
  *   0x10000000  RAM (PHYS_OFFSET is non-zero!)
  *
  * The serial console is the SuperIO's first 16550 (ttyS0) on IOMD
- * bank B bit 2. VIDC20 video, the KART keyboard link and podules are
- * not modelled yet.
+ * bank B bit 2. The KART keyboard link and podules are not modelled
+ * yet.
  *
  * Copyright (c) 2026 Karl Mehltretter
  *
@@ -27,6 +27,7 @@
 #include "hw/arm/machines-qom.h"
 #include "hw/arm/acorn32-boot.h"
 #include "hw/misc/acorn-iomd.h"
+#include "hw/display/vidc20.h"
 #include "system/reset.h"
 #include "hw/char/serial-mm.h"
 #include "hw/ide/mmio.h"
@@ -39,6 +40,7 @@
 
 #define RISCPC_RAM_BASE     0x10000000
 #define RISCPC_IOMD_BASE    0x03200000
+#define RISCPC_VIDC_BASE    0x03400000
 #define RISCPC_SERIAL_BASE  0x03010fe0
 #define RISCPC_IDE_CMD_BASE 0x030107c0
 #define RISCPC_IDE_CTL_BASE 0x03010fd8
@@ -97,7 +99,7 @@ static void riscpc_netbsd_reset(void *opaque)
 static void riscpc_init(MachineState *machine)
 {
     RiscPCMachineState *rms = RISCPC_MACHINE(machine);
-    DeviceState *dev, *ide;
+    DeviceState *dev, *ide, *vidc;
 
     MemoryRegion *iobus = g_new(MemoryRegion, 1);
     MemoryRegion *podule = g_new(MemoryRegion, 1);
@@ -125,6 +127,18 @@ static void riscpc_init(MachineState *machine)
                        qdev_get_gpio_in(DEVICE(rms->cpu), ARM_CPU_IRQ));
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1,
                        qdev_get_gpio_in(DEVICE(rms->cpu), ARM_CPU_FIQ));
+
+    /*
+     * VIDC20.  It has no frame store of its own - on a RiscPC without
+     * VRAM fitted the framebuffer is ordinary DRAM, and the IOMD hands
+     * over the DMA address - so it reads straight out of system memory.
+     */
+    vidc = qdev_new(TYPE_VIDC20);
+    object_property_set_link(OBJECT(vidc), "framebuffer-memory",
+                             OBJECT(get_system_memory()), &error_fatal);
+    object_property_set_link(OBJECT(vidc), "iomd", OBJECT(dev), &error_fatal);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(vidc), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(vidc), 0, RISCPC_VIDC_BASE);
 
     serial_mm_init(get_system_memory(), RISCPC_SERIAL_BASE, 2,
                    qdev_get_gpio_in(dev, ACORN_IOMD_IRQ_SERIAL),
