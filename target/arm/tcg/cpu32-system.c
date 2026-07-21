@@ -685,6 +685,42 @@ static void ti925t_initfn(Object *obj)
     cpu->reset_sctlr = 0x00000070;
 }
 
+/*
+ * SA-110 does not decode OPC_2 for every CP15 register.  The data sheet
+ * (DEC StrongARM Data Sheet V2.0) is explicit about when the undefined
+ * instruction trap is taken, and it is not this case:
+ *
+ *   S5.1 "These operations are only allowed in non-user modes and the
+ *         undefined instruction trap will be taken if accesses are
+ *         attempted in user mode."
+ *   S5.1 "CRm - Function bits for some MRC/MCR instructions
+ *         OPC_2 - Function bits for some MRC/MCR instructions"
+ *   S5.2 "Only some of registers 0-15 are valid: the result of an access
+ *         to an invalid register is unpredictable."
+ *
+ * So from a privileged mode these do not fault; they return an
+ * unpredictable value.  Without them QEMU raises undefined instruction
+ * and any guest that probes for a later architecture's ID registers dies
+ * - NetBSD/acorn32's cpu_attach reads ACTLR (c1,c0,1) and ID_MMFR2
+ * (c0,c0,6) unconditionally and drops into ddb here.
+ *
+ * "Unpredictable" permits any value, so RAZ is the simplest compliant
+ * choice.  Note that real silicon most likely returns the base register,
+ * since the point is that OPC_2 is not decoded - but the data sheet does
+ * not say so, and nothing should depend on it either way.
+ *
+ * Encodings already claimed by real registers are left alone: c0,c0,0-3
+ * are MIDR/CTR/TCMTR/TLBTR and c1,c0,0/2/3 are SCTLR/CPACR.
+ */
+static const ARMCPRegInfo sa110_undecoded_opc2_cp_reginfo[] = {
+    { .name = "SA110_C0_UNDECODED", .cp = 15, .crn = 0, .crm = 0,
+      .opc1 = 0, .opc2 = 6, .access = PL1_R,
+      .type = ARM_CP_CONST, .resetvalue = 0 },
+    { .name = "SA110_C1_UNDECODED", .cp = 15, .crn = 1, .crm = 0,
+      .opc1 = 0, .opc2 = 1, .access = PL1_RW,
+      .type = ARM_CP_CONST, .resetvalue = 0 },
+};
+
 static void sa110_initfn(Object *obj)
 {
     ARMCPU *cpu = ARM_CPU(obj);
@@ -694,6 +730,7 @@ static void sa110_initfn(Object *obj)
     set_feature(&cpu->env, ARM_FEATURE_DUMMY_C15_REGS);
     cpu->midr = 0x4401A102;
     cpu->reset_sctlr = 0x00000070;
+    define_arm_cp_regs(cpu, sa110_undecoded_opc2_cp_reginfo);
 }
 
 static void sa1100_initfn(Object *obj)
