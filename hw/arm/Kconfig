@@ -247,6 +247,7 @@ config RISCPC
     depends on TCG && ARM
     select ACORN_IOMD
     select SERIAL_MM
+    select IDE_MMIO
 
 config NETWINDER
     bool
@@ -260,6 +261,7 @@ config NETWINDER
     select I8254
     select DC21285_PCI
     select TULIP
+    select IDE_SL82C105
 
 config SX1
     bool
