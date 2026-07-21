@@ -25,7 +25,9 @@
 #include "hw/core/boards.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/machines-qom.h"
+#include "hw/arm/acorn32-boot.h"
 #include "hw/misc/acorn-iomd.h"
+#include "system/reset.h"
 #include "hw/char/serial-mm.h"
 #include "hw/ide/mmio.h"
 #include "hw/core/qdev-properties.h"
@@ -49,6 +51,7 @@ struct RiscPCMachineState {
     ARMCPU *cpu;
     AcornIOMDState *iomd;
     bool old_param;
+    hwaddr netbsd_entry;
 };
 
 #define TYPE_RISCPC_MACHINE MACHINE_TYPE_NAME("riscpc")
@@ -78,6 +81,18 @@ static const MemoryRegionOps riscpc_bus_ops = {
     .write = riscpc_bus_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
+
+/*
+ * The NetBSD entry stub runs from RAM with translation off, so the CPU
+ * just needs its PC pointed at it out of reset.
+ */
+static void riscpc_netbsd_reset(void *opaque)
+{
+    RiscPCMachineState *rms = opaque;
+
+    cpu_reset(CPU(rms->cpu));
+    cpu_set_pc(CPU(rms->cpu), rms->netbsd_entry);
+}
 
 static void riscpc_init(MachineState *machine)
 {
@@ -129,6 +144,21 @@ static void riscpc_init(MachineState *machine)
     sysbus_mmio_map(SYS_BUS_DEVICE(ide), 1, RISCPC_IDE_CTL_BASE);
     mmio_ide_init_drives(ide, drive_get(IF_IDE, 0, 0),
                          drive_get(IF_IDE, 0, 1));
+
+    /*
+     * NetBSD/acorn32 is an ARM ELF linked at 0xf0000000 and must be
+     * entered with the MMU already on; Linux is a raw zImage entered
+     * flat.  The two are told apart by the kernel image itself, so no
+     * extra machine option is needed.
+     */
+    if (acorn32_kernel_p(machine->kernel_filename)) {
+        if (!acorn32_load_netbsd(machine, RISCPC_RAM_BASE,
+                                 &rms->netbsd_entry, &error_fatal)) {
+            return;
+        }
+        qemu_register_reset(riscpc_netbsd_reset, rms);
+        return;
+    }
 
     riscpc_binfo.ram_size = machine->ram_size;
     riscpc_binfo.old_param = rms->old_param;
