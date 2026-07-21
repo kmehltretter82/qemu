@@ -169,10 +169,21 @@ static void riscpc_init(MachineState *machine)
      * extra machine option is needed.
      */
     if (acorn32_kernel_p(machine->kernel_filename)) {
+        hwaddr fb_base;
+        uint32_t fb_size;
+
         if (!acorn32_load_netbsd(machine, RISCPC_RAM_BASE,
-                                 &rms->netbsd_entry, &error_fatal)) {
+                                 &rms->netbsd_entry, &fb_base, &fb_size,
+                                 &error_fatal)) {
             return;
         }
+        /*
+         * !BtNetBSD runs under RISC OS, so the display is already
+         * scanning out when the kernel is entered; initarm() simply
+         * trusts bootconfig.display_phys and never programs the DMA.
+         * Leave it running, or nothing is ever displayed.
+         */
+        acorn_iomd_set_video_dma(rms->iomd, fb_base, fb_base + fb_size - 16);
         qemu_register_reset(riscpc_netbsd_reset, rms);
         return;
     }

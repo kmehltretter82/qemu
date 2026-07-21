@@ -26,6 +26,7 @@ bool acorn32_kernel_p(const char *filename);
  * *entry is the physical address the CPU should start executing at.
  */
 bool acorn32_load_netbsd(MachineState *machine, hwaddr ram_base,
-                         hwaddr *entry, Error **errp);
+                         hwaddr *entry, hwaddr *fb_base, uint32_t *fb_size,
+                         Error **errp);
 
 #endif

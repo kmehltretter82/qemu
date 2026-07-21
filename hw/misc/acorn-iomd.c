@@ -112,6 +112,25 @@ bool acorn_iomd_video_dma(AcornIOMDState *s, hwaddr *base)
     return *base != 0;
 }
 
+static void iomd_apply_boot_video(AcornIOMDState *s)
+{
+    if (!s->boot_video) {
+        return;
+    }
+    s->regs[ACORN_IOMD_VIDSTART >> 2] = s->boot_vidstart;
+    s->regs[ACORN_IOMD_VIDINIT >> 2] = s->boot_vidstart;
+    s->regs[ACORN_IOMD_VIDEND >> 2] = s->boot_vidend;
+    s->regs[ACORN_IOMD_VIDCR >> 2] = ACORN_IOMD_VIDCR_ENABLE;
+}
+
+void acorn_iomd_set_video_dma(AcornIOMDState *s, hwaddr start, hwaddr end)
+{
+    s->boot_video = true;
+    s->boot_vidstart = start;
+    s->boot_vidend = end;
+    iomd_apply_boot_video(s);
+}
+
 static void iomd_update(AcornIOMDState *s)
 {
     int level = (s->irqa_latch & s->irqa_mask) ||
@@ -410,6 +429,7 @@ static void iomd_reset_hold(Object *obj, ResetType type)
     s->mouse_y = 0;
     s->mouse_buttons = 0;
     memset(s->regs, 0, sizeof(s->regs));
+    iomd_apply_boot_video(s);
 
     for (i = 0; i < ACORN_IOMD_NUM_TIMERS; i++) {
         AcornIOMDTimer *t = &s->timer[i];

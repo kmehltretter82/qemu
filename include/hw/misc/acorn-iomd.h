@@ -63,6 +63,10 @@ struct AcornIOMDState {
      * guest samples and differences itself, plus a button register in a
      * separate decode at 0x03310000.
      */
+    /* display handed over already running by a bootloader, see below */
+    bool boot_video;
+    uint32_t boot_vidstart, boot_vidend;
+
     MemoryRegion mouse_iomem;
     QemuInputHandlerState *mouse_handler;
     int16_t mouse_x, mouse_y;
@@ -98,5 +102,13 @@ struct AcornIOMDState {
  * what acornfb rewrites to pan); VIDSTART is the buffer base.
  */
 bool acorn_iomd_video_dma(AcornIOMDState *s, hwaddr *base);
+
+/*
+ * Start video DMA on behalf of a bootloader.  On real hardware the
+ * display is already running when the loader hands over - RISC OS set it
+ * up - and guests that are told about a framebuffer in their boot
+ * parameters may never program the DMA themselves.
+ */
+void acorn_iomd_set_video_dma(AcornIOMDState *s, hwaddr start, hwaddr end);
 
 #endif

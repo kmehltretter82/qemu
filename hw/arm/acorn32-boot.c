@@ -369,7 +369,8 @@ static void acorn32_write_bootconfig(hwaddr pa, hwaddr ram_base,
 }
 
 bool acorn32_load_netbsd(MachineState *machine, hwaddr ram_base,
-                         hwaddr *entry, Error **errp)
+                         hwaddr *entry, hwaddr *fb_base, uint32_t *fb_size,
+                         Error **errp)
 {
     Acorn32LoadCtx ctx;
     uint64_t elf_entry, lowaddr, highaddr;
@@ -422,5 +423,7 @@ bool acorn32_load_netbsd(MachineState *machine, hwaddr ram_base,
     acorn32_write_stub(stub_pa, l1_pa, bc_pa);
 
     *entry = stub_pa;
+    *fb_base = fb_pa;
+    *fb_size = FRAMEBUFFER_SIZE;
     return true;
 }
