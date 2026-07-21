@@ -1,9 +1,9 @@
 /*
  * Atmel/Microchip AT91 system-controller reset path: RSTC / SHDWC / WDT.
  *
- * RSTC_CR (key 0xa5 + PROCRST/PERRST) requests a system reset; SHDW_CR (key +
- * SHDW) requests a shutdown; the WDT is a benign write-once stub that probes
- * but never fires.
+ * RSTC_CR (key 0xa5 + PROCRST) requests a system reset; EXTRST only pulses the
+ * external NRST pin.  SHDW_CR (key + SHDW) requests a shutdown; the WDT is a
+ * benign write-once stub that probes but never fires.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -38,7 +38,8 @@ static inline bool at91_key_ok(uint32_t val)
 #define RSTC_CR_PROCRST  (1u << 0)
 #define RSTC_CR_PERRST   (1u << 2)
 #define RSTC_CR_EXTRST   (1u << 3)
-#define RSTC_SR_RESET    0x00000001   /* general reset, NRST high, no cmd busy */
+#define RSTC_SR_NRSTL    (1u << 16)
+#define RSTC_SR_RESET    RSTC_SR_NRSTL  /* external NRST is deasserted */
 
 struct AT91RstcState {
     SysBusDevice parent_obj;
@@ -68,10 +69,10 @@ static void rstc_write(void *opaque, hwaddr offset, uint64_t value,
 
     switch (offset) {
     case RSTC_CR:
-        if (at91_key_ok(val) &&
-            (val & (RSTC_CR_PROCRST | RSTC_CR_PERRST | RSTC_CR_EXTRST))) {
+        if (at91_key_ok(val) && (val & RSTC_CR_PROCRST)) {
             qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
         }
+        /* PERRST and EXTRST complete synchronously in this model. */
         break;
     case RSTC_MR:
         if (at91_key_ok(val)) {
