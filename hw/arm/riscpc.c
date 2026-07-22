@@ -10,8 +10,8 @@
  *   0x10000000  RAM (PHYS_OFFSET is non-zero!)
  *
  * The serial console is the SuperIO's first 16550 (ttyS0) on IOMD
- * bank B bit 2. The KART keyboard link and podules are not modelled
- * yet.
+ * bank B bit 2. IOMD also provides its KART keyboard link and quadrature
+ * mouse; podules are not modelled yet.
  *
  * Copyright (c) 2026 Karl Mehltretter
  *
@@ -29,6 +29,9 @@
 #include "hw/misc/acorn-iomd.h"
 #include "hw/display/vidc20.h"
 #include "system/reset.h"
+#ifdef __EMSCRIPTEN__
+void rpc_fb_start(void);
+#endif
 #include "hw/char/serial-mm.h"
 #include "hw/ide/mmio.h"
 #include "hw/core/qdev-properties.h"
@@ -161,6 +164,16 @@ static void riscpc_init(MachineState *machine)
     sysbus_mmio_map(SYS_BUS_DEVICE(ide), 1, RISCPC_IDE_CTL_BASE);
     mmio_ide_init_drives(ide, drive_get(IF_IDE, 0, 0),
                          drive_get(IF_IDE, 0, 1));
+
+#ifdef __EMSCRIPTEN__
+    /*
+     * The wasm build runs with -display none, so nothing drives the
+     * console refresh. Kick the canvas and input pump in ui/wasm-canvas.c.
+     * A machine reaching into ui/ is not upstream-shaped; it avoids adding
+     * a DisplayType to the QAPI schema for a fork-only backend.
+     */
+    rpc_fb_start();
+#endif
 
     /*
      * NetBSD/acorn32 is an ARM ELF linked at 0xf0000000 and must be

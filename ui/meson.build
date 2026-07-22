@@ -198,3 +198,7 @@ if have_system
 endif
 
 modules += {'ui': ui_modules}
+
+if host_os == 'emscripten'
+  system_ss.add(files('wasm-canvas.c'))
+endif
