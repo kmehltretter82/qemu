@@ -422,6 +422,8 @@ typedef struct CPUArchState {
 
         uint32_t c9_insn; /* Cache lockdown registers.  */
         uint32_t c9_data;
+        uint32_t tcm_insn_region; /* ARM926 CP15 c9 ITCM region register */
+        uint32_t tcm_data_region; /* ARM926 CP15 c9 DTCM region register */
         uint64_t c9_pmcr; /* performance monitor control register */
         uint64_t c9_pmcnten; /* perf monitor counter enables */
         uint64_t c9_pmovsr; /* perf monitor overflow status */
@@ -1118,6 +1120,12 @@ struct ArchCPU {
     uint32_t reset_auxcr;
     bool reset_hivecs;
     uint8_t reset_l0gptsz;
+
+    /* ARM926 external TCM size pins and their AHB-visible backing aliases. */
+    uint32_t tcm_insn_target;
+    uint32_t tcm_data_target;
+    uint8_t tcm_insn_size;
+    uint8_t tcm_data_size;
 
     /*
      * Intermediate values used during property parsing.
@@ -2154,6 +2162,7 @@ enum arm_features {
     ARM_FEATURE_MVFR, /* Media and VFP Feature Registers 0 and 1 */
     ARM_FEATURE_DUMMY_C15_REGS, /* RAZ/WI all of cp15 crn=15 */
     ARM_FEATURE_CACHE_TEST_CLEAN, /* 926/1026 style test-and-clean ops */
+    ARM_FEATURE_TCM, /* ARM926-style CP15 ITCM/DTCM region registers */
     ARM_FEATURE_CACHE_DIRTY_REG, /* 1136/1176 cache dirty status register */
     ARM_FEATURE_CACHE_BLOCK_OPS, /* v6 optional cache block operations */
     ARM_FEATURE_MPIDR, /* has cp15 MPIDR */

@@ -40,6 +40,16 @@ OBJECT_DECLARE_CPU_TYPE(ARMCPU, ARMCPUClass, ARM_CPU)
 #define ARM_CPU_VINMI 5
 #define ARM_CPU_VFNMI 6
 
+/*
+ * Configure the external size pins and AHB backing addresses of an ARM926's
+ * tightly coupled memories.  Size values use the CP15 c9 region encoding
+ * (0 = absent, 6 = 32 KiB, 7 = 64 KiB).
+ */
+bool arm_cpu_has_tcm(ARMCPU *cpu);
+void arm_cpu_tcm_configure(ARMCPU *cpu, uint8_t insn_size,
+                           uint8_t data_size, uint32_t insn_target,
+                           uint32_t data_target);
+
 /* For M profile, some registers are banked secure vs non-secure;
  * these are represented as a 2-element array where the first element
  * is the non-secure copy and the second is the secure copy.
