@@ -20,6 +20,16 @@ run-test-armv6m-undef: QEMU_OPTS=-semihosting-config enable=on,target=native,cha
 
 ARM_TESTS+=test-armv6m-undef
 
+at91sam9g45-tcm: at91sam9g45-tcm.S at91sam9g45-tcm.ld
+	$(CC) -mcpu=arm926ej-s -nostdlib -static -Wl,--build-id=none \
+		-Wl,-T$(ARM_SRC)/at91sam9g45-tcm.ld -x assembler-with-cpp \
+		-Wa,--noexecstack $< -o $@
+
+run-at91sam9g45-tcm: QEMU_OPTS=-M sam9m10g45ek \
+	-semihosting-config enable=on,target=native,chardev=output -kernel
+
+ARM_TESTS+=at91sam9g45-tcm
+
 # These objects provide the basic boot code and helper functions for all tests
 CRT_OBJS=boot.o
 

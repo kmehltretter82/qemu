@@ -81,6 +81,8 @@
 
 /* ---- SoC memory map (datasheet Fig 5-1, section 6.1) -------------------- */
 #define SAM9G45_SDRAM_BASE   0x70000000   /* DDRSDRC0 chip select (main RAM) */
+#define SAM9G45_ITCM_BASE     0x00100000   /* SRAM A through the AHB matrix   */
+#define SAM9G45_DTCM_BASE     0x00200000   /* SRAM B through the AHB matrix   */
 #define SAM9G45_SRAM_BASE    0x00300000   /* internal SRAM                    */
 #define SAM9G45_SRAM_SIZE    0x00010000   /* 64 KB                            */
 #define SAM9G45_PERIPH_BASE  0xFFF78000   /* start of APB peripheral window  */
@@ -428,7 +430,8 @@ static void sam9m10g45ek_init(MachineState *machine)
     MemoryRegion *sysmem = get_system_memory();
     Object *cpuobj;
     ARMCPU *cpu;
-    DeviceState *dbgu, *aic, *pit, *pmc, *orgate, *dmac, *piob = NULL;
+    DeviceState *dbgu, *aic, *pit, *pmc, *matrix, *orgate, *dmac;
+    DeviceState *piob = NULL;
     Clock *mck;
 
     cpuobj = object_new(machine->cpu_type);
@@ -442,11 +445,12 @@ static void sam9m10g45ek_init(MachineState *machine)
     /* DDR2 SDRAM at the DDRSDRC0 chip select. */
     memory_region_add_subregion(sysmem, SAM9G45_SDRAM_BASE, machine->ram);
 
-    /* 64 KB internal SRAM (0x00300000) - the kernel maps it as an mmio-sram
-     * pool and reads back what it writes, so it needs real backing memory. */
+    /*
+     * The MATRIX maps this shared 64 KiB backing as ordinary SRAM, DTCM, or
+     * split ITCM/DTCM.  At reset all of it appears at 0x00300000.
+     */
     memory_region_init_ram(&s->sram, NULL, "at91.sram", SAM9G45_SRAM_SIZE,
                            &error_fatal);
-    memory_region_add_subregion(sysmem, SAM9G45_SRAM_BASE, &s->sram);
 
     /*
      * Optional static-memory attachments on EBI CS0..CS5.  CS3 remains
@@ -496,7 +500,18 @@ static void sam9m10g45ek_init(MachineState *machine)
     sysbus_create_simple(TYPE_AT91_DDRAMC, SAM9G45_DDRAMC0_BASE, NULL);
     sysbus_create_simple(TYPE_AT91_DDRAMC, SAM9G45_DDRAMC1_BASE, NULL);
     sysbus_create_simple(TYPE_AT91_SMC, SAM9G45_SMC_BASE, NULL);
-    sysbus_create_simple(TYPE_AT91_MATRIX, SAM9G45_MATRIX_BASE, NULL);
+    matrix = qdev_new(TYPE_AT91_MATRIX);
+    object_property_set_link(OBJECT(matrix), "cpu", OBJECT(cpu),
+                             &error_fatal);
+    object_property_set_link(OBJECT(matrix), "sram", OBJECT(&s->sram),
+                             &error_fatal);
+    object_property_set_link(OBJECT(matrix), "memory", OBJECT(sysmem),
+                             &error_fatal);
+    qdev_prop_set_uint64(matrix, "itcm-ahb-base", SAM9G45_ITCM_BASE);
+    qdev_prop_set_uint64(matrix, "dtcm-ahb-base", SAM9G45_DTCM_BASE);
+    qdev_prop_set_uint64(matrix, "sram-ahb-base", SAM9G45_SRAM_BASE);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(matrix), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(matrix), 0, SAM9G45_MATRIX_BASE);
     sysbus_create_simple(TYPE_AT91_SCKC, SAM9G45_SCKC_BASE, NULL);
 
     /* LCD controller. */

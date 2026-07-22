@@ -4073,6 +4073,72 @@ arm_mmu_idx_to_security_space(CPUARMState *env, ARMMMUIdx mmu_idx)
     return ss;
 }
 
+static bool arm_tcm_region_translate(uint32_t reg, uint32_t target,
+                                     hwaddr address, hwaddr *translated)
+{
+    uint8_t size = extract32(reg, 2, 4);
+    uint32_t bytes;
+    uint32_t base;
+
+    if (!(reg & 1) || size < 3) {
+        return false;
+    }
+    bytes = 1U << (size + 9);
+    base = (reg & 0xfffff000) & ~(bytes - 1);
+    if (address < base || address - base >= bytes) {
+        return false;
+    }
+    *translated = target + (address - base);
+    return true;
+}
+
+static void arm_tcm_translate(CPUARMState *env, MMUAccessType access_type,
+                              GetPhysAddrResult *result)
+{
+    ARMCPU *cpu = env_archcpu(env);
+    hwaddr itcm_address = 0;
+    hwaddr dtcm_address = 0;
+    bool itcm_match;
+    bool dtcm_match;
+
+    if (!arm_feature(env, ARM_FEATURE_TCM)) {
+        return;
+    }
+
+    itcm_match = arm_tcm_region_translate(env->cp15.tcm_insn_region,
+                                          cpu->tcm_insn_target,
+                                          result->f.phys_addr,
+                                          &itcm_address);
+    dtcm_match = arm_tcm_region_translate(env->cp15.tcm_data_region,
+                                          cpu->tcm_data_target,
+                                          result->f.phys_addr,
+                                          &dtcm_address);
+    if (!itcm_match && !dtcm_match) {
+        return;
+    }
+
+    /*
+     * TCM matching is against the physical address after VMSA translation.
+     * Instruction accesses use only ITCM.  Data accesses prefer DTCM if the
+     * two regions overlap, then fall back to the data-visible ITCM.
+     *
+     * QEMU's softmmu TLB has one host addend shared by its read, write and
+     * execute tags.  Restrict each fill to its access class so an overlapping
+     * ITCM/DTCM region (or an instruction fetch falling through DTCM to main
+     * memory) cannot reuse the other side's physical mapping.
+     */
+    result->f.lg_page_size = TARGET_PAGE_BITS;
+    if (access_type == MMU_INST_FETCH) {
+        if (itcm_match) {
+            result->f.phys_addr = itcm_address;
+        }
+        result->f.prot &= PAGE_EXEC;
+    } else {
+        result->f.phys_addr = dtcm_match ? dtcm_address : itcm_address;
+        result->f.prot &= PAGE_READ | PAGE_WRITE;
+    }
+}
+
 bool get_phys_addr(CPUARMState *env, vaddr address,
                    MMUAccessType access_type, MemOp memop, ARMMMUIdx mmu_idx,
                    GetPhysAddrResult *result, ARMMMUFaultInfo *fi)
@@ -4082,9 +4148,14 @@ bool get_phys_addr(CPUARMState *env, vaddr address,
         .in_space = arm_mmu_idx_to_security_space(env, mmu_idx),
         .in_prot_check = 1 << access_type,
     };
+    bool ok;
 
-    return get_phys_addr_gpc(env, &ptw, address, access_type,
-                             memop, result, fi);
+    ok = get_phys_addr_gpc(env, &ptw, address, access_type,
+                           memop, result, fi);
+    if (ok) {
+        arm_tcm_translate(env, access_type, result);
+    }
+    return ok;
 }
 
 static bool arm_cpu_get_phys_addr(CPUARMState *env, vaddr addr,
@@ -4104,6 +4175,7 @@ static bool arm_cpu_get_phys_addr(CPUARMState *env, vaddr addr,
 
     if (ok) {
         /* translation succeeded */
+        arm_tcm_translate(env, MMU_DATA_LOAD, &res);
         result->physaddr = res.f.phys_addr;
         result->attrs = res.f.attrs;
         result->attrs.debug = 1;

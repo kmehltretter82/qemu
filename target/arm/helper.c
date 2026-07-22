@@ -549,6 +549,91 @@ static const ARMCPRegInfo not_v7_cp_reginfo[] = {
       .opc1 = 0, .opc2 = 1, .access = PL1_RW, .type = ARM_CP_NOP },
 };
 
+static uint32_t arm_tcm_size_bytes(uint8_t size)
+{
+    /* CP15 encodes 4 KiB as 3, then successive powers of two. */
+    return size >= 3 ? 1U << (size + 9) : 0;
+}
+
+static uint32_t arm_tcm_region_value(uint32_t old, uint8_t size)
+{
+    uint32_t bytes = arm_tcm_size_bytes(size);
+    uint32_t base = old & 0xfffff000;
+
+    if (bytes) {
+        base &= ~(bytes - 1);
+    }
+    return base | ((uint32_t)size << 2) | (old & 1);
+}
+
+static uint64_t arm_tcmtr_read(CPUARMState *env, const ARMCPRegInfo *ri)
+{
+    ARMCPU *cpu = env_archcpu(env);
+
+    /* ARM926 implements at most one instruction and one data TCM bank. */
+    return (cpu->tcm_insn_size ? 1 : 0) |
+           (cpu->tcm_data_size ? 1U << 16 : 0);
+}
+
+static void arm_tcm_region_reset(CPUARMState *env,
+                                 const ARMCPRegInfo *ri)
+{
+    ARMCPU *cpu = env_archcpu(env);
+    uint8_t size = ri->opc2 ? cpu->tcm_insn_size : cpu->tcm_data_size;
+
+    /* INITRAM is low on SAM9G45, so both TCMs reset disabled. */
+    raw_write(env, ri, (uint32_t)size << 2);
+}
+
+static void arm_tcm_region_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                                 uint64_t value)
+{
+    ARMCPU *cpu = env_archcpu(env);
+    uint8_t size = ri->opc2 ? cpu->tcm_insn_size : cpu->tcm_data_size;
+    uint32_t reg = ((uint32_t)value & 0xfffff001) |
+                   ((uint32_t)size << 2);
+
+    reg = arm_tcm_region_value(reg, size);
+    raw_write(env, ri, reg);
+    tlb_flush(CPU(cpu));
+}
+
+static const ARMCPRegInfo arm_tcm_cp_reginfo[] = {
+    { .name = "DTCMRR", .cp = 15, .crn = 9, .crm = 1,
+      .opc1 = 0, .opc2 = 0, .access = PL1_RW,
+      .fieldoffset = offsetof(CPUARMState, cp15.tcm_data_region),
+      .resetfn = arm_tcm_region_reset,
+      .writefn = arm_tcm_region_write, .raw_writefn = raw_write },
+    { .name = "ITCMRR", .cp = 15, .crn = 9, .crm = 1,
+      .opc1 = 0, .opc2 = 1, .access = PL1_RW,
+      .fieldoffset = offsetof(CPUARMState, cp15.tcm_insn_region),
+      .resetfn = arm_tcm_region_reset,
+      .writefn = arm_tcm_region_write, .raw_writefn = raw_write },
+};
+
+bool arm_cpu_has_tcm(ARMCPU *cpu)
+{
+    return arm_feature(&cpu->env, ARM_FEATURE_TCM);
+}
+
+void arm_cpu_tcm_configure(ARMCPU *cpu, uint8_t insn_size,
+                           uint8_t data_size, uint32_t insn_target,
+                           uint32_t data_target)
+{
+    CPUARMState *env = &cpu->env;
+
+    g_assert(arm_cpu_has_tcm(cpu));
+    cpu->tcm_insn_size = insn_size;
+    cpu->tcm_data_size = data_size;
+    cpu->tcm_insn_target = insn_target;
+    cpu->tcm_data_target = data_target;
+    env->cp15.tcm_insn_region =
+        arm_tcm_region_value(env->cp15.tcm_insn_region, insn_size);
+    env->cp15.tcm_data_region =
+        arm_tcm_region_value(env->cp15.tcm_data_region, data_size);
+    tlb_flush(CPU(cpu));
+}
+
 static void cpacr_write(CPUARMState *env, const ARMCPRegInfo *ri,
                         uint64_t value)
 {
@@ -6501,6 +6586,9 @@ void register_cp_regs_for_features(ARMCPU *cpu)
     } else {
         define_arm_cp_regs(cpu, not_v7_cp_reginfo);
     }
+    if (arm_feature(env, ARM_FEATURE_TCM)) {
+        define_arm_cp_regs(cpu, arm_tcm_cp_reginfo);
+    }
     if (arm_feature(env, ARM_FEATURE_V8)) {
         /*
          * v8 ID registers, which all have impdef reset values.
@@ -7291,6 +7379,10 @@ void register_cp_regs_for_features(ARMCPU *cpu)
             }
             id_mpuir_reginfo.access = PL1_RW;
             id_tlbtr_reginfo.access = PL1_RW;
+        }
+        if (arm_feature(env, ARM_FEATURE_TCM)) {
+            id_cp_reginfo[2].type = ARM_CP_NO_RAW;
+            id_cp_reginfo[2].readfn = arm_tcmtr_read;
         }
         if (arm_feature(env, ARM_FEATURE_V8)) {
             define_arm_cp_regs(cpu, id_v8_midr_cp_reginfo);
