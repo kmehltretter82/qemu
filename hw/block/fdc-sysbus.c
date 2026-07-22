@@ -47,6 +47,7 @@ struct FDCtrlSysBusClass {
 
     bool use_strict_io;
     bool use_riscpc_pseudo_dma;
+    bool use_82077_command_set;
     unsigned int reg_shift;
 };
 
@@ -255,6 +256,7 @@ static void sysbus_fdc_common_instance_init(Object *obj)
      * fdctrl->dma_chann accordingly.
      */
     fdctrl->dma_chann = -1;
+    fdctrl->use_82077_command_set = sbdc->use_82077_command_set;
     sys->reg_shift = sbdc->reg_shift;
 
     qdev_set_legacy_instance_id(dev, 0 /* io */, 2); /* FIXME */
@@ -349,8 +351,10 @@ static void riscpc_fdc_class_init(ObjectClass *klass, const void *data)
 
     sbdc->use_strict_io = true;
     sbdc->use_riscpc_pseudo_dma = true;
+    /* The RiscPC SuperIO uses an SMC 82077AA-compatible FDC core. */
+    sbdc->use_82077_command_set = true;
     sbdc->reg_shift = 2;
-    dc->desc = "RiscPC 82C711-compatible floppy controller";
+    dc->desc = "RiscPC SMC FDC37C665-compatible floppy controller";
     device_class_set_props(dc, sysbus_fdc_properties);
 }
 

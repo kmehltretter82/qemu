@@ -2210,11 +2210,32 @@ static const FDCtrlCommand handlers[] = {
 /* Associate command to an index in the 'handlers' array */
 static uint8_t command_to_handler[256];
 
-static const FDCtrlCommand *get_command(uint8_t cmd)
+static bool fdctrl_command_is_82078_only(uint8_t cmd)
+{
+    switch (cmd) {
+    case FD_CMD_RESTORE:
+    case FD_CMD_SAVE:
+    case FD_CMD_POWERDOWN_MODE:
+    case FD_CMD_PART_ID:
+    case FD_CMD_OPTION:
+    case FD_CMD_DRIVE_SPECIFICATION_COMMAND:
+    case FD_CMD_FORMAT_AND_WRITE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static const FDCtrlCommand *get_command(FDCtrl *fdctrl, uint8_t cmd)
 {
     int idx;
 
-    idx = command_to_handler[cmd];
+    if (fdctrl->use_82077_command_set &&
+        fdctrl_command_is_82078_only(cmd)) {
+        idx = ARRAY_SIZE(handlers) - 1;
+    } else {
+        idx = command_to_handler[cmd];
+    }
     FLOPPY_DPRINTF("%s command\n", handlers[idx].name);
     return &handlers[idx];
 }
@@ -2285,7 +2306,7 @@ static void fdctrl_write_data(FDCtrl *fdctrl, uint32_t value)
         if (pos == 0) {
             /* The first byte specifies the command. Now we start reading
              * as many parameters as this command requires. */
-            cmd = get_command(value);
+            cmd = get_command(fdctrl, value);
             fdctrl->data_len = cmd->parameters + 1;
             if (cmd->parameters) {
                 fdctrl->msr |= FD_MSR_RQM;
@@ -2301,7 +2322,7 @@ static void fdctrl_write_data(FDCtrl *fdctrl, uint32_t value)
          * command, so let its handler inspect every parameter; it keeps the
          * controller in command phase until the terminator.
          */
-        cmd = get_command(fdctrl->fifo[0]);
+        cmd = get_command(fdctrl, fdctrl->fifo[0]);
         if (cmd->value == FD_CMD_DRIVE_SPECIFICATION_COMMAND && pos != 0) {
             cmd->handler(fdctrl, cmd->direction);
             break;

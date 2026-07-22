@@ -98,6 +98,7 @@ struct FDCtrl {
     IsaDma *dma;
     /* Controller's identification */
     uint8_t version;
+    bool use_82077_command_set;
     /* HW */
     uint8_t sra;
     uint8_t srb;
