@@ -85,6 +85,7 @@ struct AT91HsmciState {
     MemoryRegion iomem;
     SDBus sdbus;
     qemu_irq irq;
+    qemu_irq dma_request;
 
     uint32_t mr, dtor, sdcr, argr, blkr, cstor, dma, cfg, wpmr;
     uint32_t sr;
@@ -100,6 +101,13 @@ struct AT91HsmciState {
 static void hsmci_update_irq(AT91HsmciState *s)
 {
     qemu_set_irq(s->irq, (s->sr & s->imr) ? 1 : 0);
+}
+
+static void hsmci_update_dma_request(AT91HsmciState *s)
+{
+    qemu_set_irq(s->dma_request,
+                 s->data_len > 0 &&
+                 (s->sr & (HSMCI_SR_RXRDY | HSMCI_SR_TXRDY)));
 }
 
 static void hsmci_do_command(AT91HsmciState *s, uint32_t cmdr)
@@ -160,6 +168,7 @@ static void hsmci_do_command(AT91HsmciState *s, uint32_t cmdr)
         } else {
             s->sr |= HSMCI_SR_TXRDY;
         }
+        hsmci_update_dma_request(s);
     }
     hsmci_update_irq(s);
 }
@@ -169,6 +178,7 @@ static void hsmci_xfer_done(AT91HsmciState *s)
     s->sr &= ~(HSMCI_SR_RXRDY | HSMCI_SR_TXRDY);
     s->sr |= HSMCI_SR_TXRDY | HSMCI_SR_BLKE | HSMCI_SR_NOTBUSY;
     s->data_len = 0;
+    hsmci_update_dma_request(s);
 }
 
 static uint32_t hsmci_read_data(AT91HsmciState *s)
@@ -308,6 +318,8 @@ static void hsmci_reset(DeviceState *dev)
     s->data_len = 0;
     s->blklen = 0;
     s->reading = false;
+    hsmci_update_irq(s);
+    hsmci_update_dma_request(s);
 }
 
 static void hsmci_dev_init(Object *obj)
@@ -321,14 +333,26 @@ static void hsmci_dev_init(Object *obj)
     s->iomem.disable_reentrancy_guard = true;
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->dma_request,
+                             AT91_HSMCI_DMA_REQUEST, 1);
     qbus_init(&s->sdbus, sizeof(s->sdbus), TYPE_AT91_HSMCI_BUS, DEVICE(obj),
               "sd-bus");
+}
+
+static int hsmci_post_load(void *opaque, int version_id)
+{
+    AT91HsmciState *s = opaque;
+
+    hsmci_update_irq(s);
+    hsmci_update_dma_request(s);
+    return 0;
 }
 
 static const VMStateDescription vmstate_at91_hsmci = {
     .name = "at91-hsmci",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = hsmci_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(mr, AT91HsmciState),
         VMSTATE_UINT32(dtor, AT91HsmciState),

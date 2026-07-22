@@ -12,4 +12,6 @@
 #define TYPE_AT91_HSMCI_BUS "at91-hsmci-bus"
 OBJECT_DECLARE_SIMPLE_TYPE(AT91HsmciState, AT91_HSMCI)
 
+#define AT91_HSMCI_DMA_REQUEST "dma-request"
+
 #endif /* HW_SD_AT91_HSMCI_H */
