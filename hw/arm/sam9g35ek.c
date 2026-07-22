@@ -166,6 +166,7 @@ static void sam9g35ek_init(MachineState *machine)
     Object *cpuobj;
     ARMCPU *cpu;
     DeviceState *aic, *pit, *pmc, *dbgu, *sys_or, *pioab_or, *piocd_or;
+    DeviceState *wdt;
     DeviceState *dmac_dev[2];
     Clock *mck;
 
@@ -262,7 +263,11 @@ static void sam9g35ek_init(MachineState *machine)
     /* Reset / shutdown / watchdog controllers. */
     sysbus_create_simple(TYPE_AT91_RSTC, SAM9X5_RSTC_BASE, NULL);
     sysbus_create_simple(TYPE_AT91_SHDWC, SAM9X5_SHDWC_BASE, NULL);
-    sysbus_create_simple(TYPE_AT91_WDT, SAM9X5_WDT_BASE, NULL);
+    wdt = qdev_new(TYPE_AT91_WDT);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(wdt), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(wdt), 0, SAM9X5_WDT_BASE);
+    sysbus_connect_irq(SYS_BUS_DEVICE(wdt), 0,
+                       qdev_get_gpio_in(sys_or, 3));
 
     /* Real-time clock -> system OR-gate input 2. */
     {

@@ -4,6 +4,11 @@
 at91_memc_read(const char *name, uint64_t offset, uint32_t value) "%s offset 0x%03" PRIx64 " -> 0x%08" PRIx32
 at91_memc_write(const char *name, uint64_t offset, uint32_t value) "%s offset 0x%03" PRIx64 " <- 0x%08" PRIx32
 
+# at91_sysc.c
+at91_wdt_reload(uint32_t ticks) "reload for %" PRIu32 " ticks"
+at91_wdt_fault(uint32_t status, bool interrupt, bool reset) "status 0x%02" PRIx32 " interrupt %d reset %d"
+at91_wdt_post_load(int version, uint32_t mr, bool pending, uint64_t expire) "version %d MR 0x%08" PRIx32 " pending %d expire %" PRIu64
+
 # at91_sckc.c
 at91_sckc_read(uint32_t value) "CR -> 0x%08" PRIx32
 at91_sckc_write(uint32_t value) "CR <- 0x%08" PRIx32
