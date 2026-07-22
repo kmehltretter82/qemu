@@ -15,6 +15,7 @@
 #include "qemu/host-utils.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
@@ -50,6 +51,12 @@
 /* CTRLB address modes: 0 = increment, 1 = decrement, 2 = fixed */
 #define DMAC_CTRLB_SRC_MODE(b)   (((b) >> 24) & 0x3)
 #define DMAC_CTRLB_DST_MODE(b)   (((b) >> 28) & 0x3)
+#define DMAC_CTRLB_FC(b)         (((b) >> 21) & 0x7)
+
+#define DMAC_FC_MEM2PER          1
+#define DMAC_FC_PER2MEM          2
+#define DMAC_FC_PER2MEM_PER      4
+#define DMAC_FC_MEM2PER_PER      5
 
 /* EBCISR/EBCIMR bits */
 #define DMAC_BTC(x)   (1u << (x))          /* buffer transfer completed */
@@ -73,9 +80,9 @@ static bool dmac_chain_is_cyclic(uint32_t head)
     int g = 0;
 
     while (cur != 0 && g++ < 1024) {
-        uint32_t nxt = 0;
-        address_space_read(&address_space_memory, cur + DMAC_LLI_NEXT_OFF,
-                           MEMTXATTRS_UNSPECIFIED, &nxt, sizeof(nxt));
+        uint32_t nxt = address_space_ldl_le(&address_space_memory,
+                                            cur + DMAC_LLI_NEXT_OFF,
+                                            MEMTXATTRS_UNSPECIFIED, NULL);
         if (nxt == head) {
             return true;
         }
@@ -91,10 +98,78 @@ struct AT91DmacState {
     qemu_irq irq;
     QEMUBH *bh;                /* runs transfers asynchronously */
     uint32_t pending;          /* channels awaiting transfer */
+    uint64_t requests;         /* levels of connected peripheral requests */
+    uint64_t request_mask;     /* requests for which flow control is modelled */
 
     uint32_t gcfg, en, ebcimr, ebcisr, chsr;
     AT91DmacChan ch[DMAC_N_CHANNELS];
 };
+
+static uint32_t dmac_channel_ctrlb(AT91DmacState *s, int n)
+{
+    uint32_t ctrlb = s->ch[n].ctrlb;
+
+    if (s->ch[n].dscr) {
+        ctrlb = address_space_ldl_le(&address_space_memory,
+                                     s->ch[n].dscr + 12,
+                                     MEMTXATTRS_UNSPECIFIED, NULL);
+    }
+    return ctrlb;
+}
+
+static int dmac_channel_request_id(AT91DmacState *s, int n)
+{
+    uint32_t fc = DMAC_CTRLB_FC(dmac_channel_ctrlb(s, n));
+    uint32_t cfg = s->ch[n].cfg;
+
+    switch (fc) {
+    case DMAC_FC_PER2MEM:
+    case DMAC_FC_PER2MEM_PER:
+        return (cfg & 0xf) | (((cfg >> 10) & 0x3) << 4);
+    case DMAC_FC_MEM2PER:
+    case DMAC_FC_MEM2PER_PER:
+        return ((cfg >> 4) & 0xf) | (((cfg >> 14) & 0x3) << 4);
+    default:
+        return -1;
+    }
+}
+
+static bool dmac_channel_ready(AT91DmacState *s, int n)
+{
+    int request = dmac_channel_request_id(s, n);
+
+    return request < 0 || !(s->request_mask & (UINT64_C(1) << request)) ||
+           (s->requests & (UINT64_C(1) << request));
+}
+
+static void dmac_schedule_channel(AT91DmacState *s, int n)
+{
+    if (dmac_channel_ready(s, n)) {
+        s->pending |= 1u << n;
+        qemu_bh_schedule(s->bh);
+    }
+}
+
+static void dmac_request(void *opaque, int request, int level)
+{
+    AT91DmacState *s = opaque;
+    uint64_t bit = UINT64_C(1) << request;
+    int n;
+
+    if (level) {
+        s->requests |= bit;
+    } else {
+        s->requests &= ~bit;
+        return;
+    }
+
+    for (n = 0; n < DMAC_N_CHANNELS; n++) {
+        if ((s->chsr & (1u << n)) && !s->ch[n].cyclic &&
+            dmac_channel_request_id(s, n) == request) {
+            dmac_schedule_channel(s, n);
+        }
+    }
+}
 
 static void dmac_update_irq(AT91DmacState *s)
 {
@@ -162,8 +237,17 @@ static void dmac_run_channel(AT91DmacState *s, int n)
         int guard = 0;
         while (dscr != 0 && guard++ < 1024) {
             uint32_t d[5];
-            address_space_read(&address_space_memory, dscr,
-                               MEMTXATTRS_UNSPECIFIED, d, sizeof(d));
+
+            d[0] = address_space_ldl_le(&address_space_memory, dscr,
+                                        MEMTXATTRS_UNSPECIFIED, NULL);
+            d[1] = address_space_ldl_le(&address_space_memory, dscr + 4,
+                                        MEMTXATTRS_UNSPECIFIED, NULL);
+            d[2] = address_space_ldl_le(&address_space_memory, dscr + 8,
+                                        MEMTXATTRS_UNSPECIFIED, NULL);
+            d[3] = address_space_ldl_le(&address_space_memory, dscr + 12,
+                                        MEMTXATTRS_UNSPECIFIED, NULL);
+            d[4] = address_space_ldl_le(&address_space_memory, dscr + 16,
+                                        MEMTXATTRS_UNSPECIFIED, NULL);
             dmac_run_buffer(d[0], d[1], d[2], d[3]);
             s->ebcisr |= DMAC_BTC(n);
             dscr = d[4];
@@ -185,6 +269,9 @@ static void dmac_bh(void *opaque)
     while (s->pending) {
         int n = ctz32(s->pending);
         s->pending &= ~(1u << n);
+        if (!(s->chsr & (1u << n)) || !dmac_channel_ready(s, n)) {
+            continue;
+        }
         dmac_run_channel(s, n);
     }
 }
@@ -212,11 +299,10 @@ static uint64_t dmac_read(void *opaque, hwaddr offset, unsigned size)
              * compute residue == total_len, i.e. "nothing received" - so the
              * USART driver does not push a flood of phantom RX bytes. */
             if (s->ch[n].cyclic && s->ch[n].dscr != 0) {
-                uint32_t nxt = s->ch[n].dscr;
-                address_space_read(&address_space_memory,
-                                   s->ch[n].dscr + DMAC_LLI_NEXT_OFF,
-                                   MEMTXATTRS_UNSPECIFIED, &nxt, sizeof(nxt));
-                return nxt;
+                return address_space_ldl_le(&address_space_memory,
+                                            s->ch[n].dscr +
+                                            DMAC_LLI_NEXT_OFF,
+                                            MEMTXATTRS_UNSPECIFIED, NULL);
             }
             return s->ch[n].dscr;
         case DMAC_CTRLA:
@@ -289,16 +375,16 @@ static void dmac_write(void *opaque, hwaddr offset, uint64_t value,
                     s->ch[n].cyclic = true;
                 } else {
                     s->ch[n].cyclic = false;
-                    s->pending |= 1u << n;   /* run this transfer */
+                    dmac_schedule_channel(s, n);
                 }
             }
         }
-        qemu_bh_schedule(s->bh);   /* transfer asynchronously */
         break;
     }
     case DMAC_CHDR: {
         int n;
         s->chsr &= ~(val & 0xFF);
+        s->pending &= ~(val & 0xFF);
         for (n = 0; n < DMAC_N_CHANNELS; n++) {
             if (val & (1u << n)) {
                 s->ch[n].cyclic = false;
@@ -331,6 +417,7 @@ static void dmac_reset(DeviceState *dev)
     s->ebcisr = 0;
     s->chsr = 0;
     s->pending = 0;
+    s->requests = 0;
     memset(s->ch, 0, sizeof(s->ch));
 }
 
@@ -342,6 +429,9 @@ static void dmac_dev_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &dmac_ops, s, "at91-dmac", 0x200);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_in_named(DEVICE(obj), dmac_request,
+                            AT91_DMAC_REQUEST_GPIO,
+                            AT91_DMAC_MAX_REQUESTS);
 }
 
 static void dmac_realize(DeviceState *dev, Error **errp)
@@ -397,12 +487,17 @@ static const VMStateDescription vmstate_at91_dmac = {
     }
 };
 
+static const Property dmac_properties[] = {
+    DEFINE_PROP_UINT64(AT91_DMAC_REQUEST_MASK, AT91DmacState, request_mask, 0),
+};
+
 static void dmac_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = dmac_realize;
     device_class_set_legacy_reset(dc, dmac_reset);
+    device_class_set_props(dc, dmac_properties);
     dc->vmsd = &vmstate_at91_dmac;
 }
 

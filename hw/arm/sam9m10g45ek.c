@@ -402,7 +402,7 @@ static void sam9_create_ebi_devices(MachineState *machine)
 /* Create an HSMCI controller, wire its interrupt to the AIC, and attach an
  * SD card from the matching -sd drive (if any). */
 static void sam9_create_hsmci(hwaddr base, DeviceState *aic, int irqno,
-                              int sd_unit)
+                              int sd_unit, DeviceState *dmac, int dma_request)
 {
     DeviceState *mci = qdev_new(TYPE_AT91_HSMCI);
     DriveInfo *di = drive_get(IF_SD, 0, sd_unit);
@@ -410,6 +410,8 @@ static void sam9_create_hsmci(hwaddr base, DeviceState *aic, int irqno,
     sysbus_realize_and_unref(SYS_BUS_DEVICE(mci), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(mci), 0, base);
     sysbus_connect_irq(SYS_BUS_DEVICE(mci), 0, qdev_get_gpio_in(aic, irqno));
+    qdev_connect_gpio_out_named(mci, AT91_HSMCI_DMA_REQUEST, 0,
+        qdev_get_gpio_in_named(dmac, AT91_DMAC_REQUEST_GPIO, dma_request));
 
     if (di) {
         DeviceState *card = qdev_new(TYPE_SD_CARD);
@@ -426,7 +428,7 @@ static void sam9m10g45ek_init(MachineState *machine)
     MemoryRegion *sysmem = get_system_memory();
     Object *cpuobj;
     ARMCPU *cpu;
-    DeviceState *dbgu, *aic, *pit, *pmc, *orgate, *piob = NULL;
+    DeviceState *dbgu, *aic, *pit, *pmc, *orgate, *dmac, *piob = NULL;
     Clock *mck;
 
     cpuobj = object_new(machine->cpu_type);
@@ -507,13 +509,13 @@ static void sam9m10g45ek_init(MachineState *machine)
     }
 
     /* DMA controller. */
-    {
-        DeviceState *dmac = qdev_new(TYPE_AT91_DMAC);
-        sysbus_realize_and_unref(SYS_BUS_DEVICE(dmac), &error_fatal);
-        sysbus_mmio_map(SYS_BUS_DEVICE(dmac), 0, SAM9G45_DMAC_BASE);
-        sysbus_connect_irq(SYS_BUS_DEVICE(dmac), 0,
-                           qdev_get_gpio_in(aic, SAM9G45_IRQ_DMAC));
-    }
+    dmac = qdev_new(TYPE_AT91_DMAC);
+    qdev_prop_set_uint64(dmac, AT91_DMAC_REQUEST_MASK,
+                         (UINT64_C(1) << 0) | (UINT64_C(1) << 13));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dmac), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(dmac), 0, SAM9G45_DMAC_BASE);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dmac), 0,
+                       qdev_get_gpio_in(aic, SAM9G45_IRQ_DMAC));
 
     /* Reset / shutdown / watchdog controllers. */
     sysbus_create_simple(TYPE_AT91_RSTC, SAM9G45_RSTC_BASE, NULL);
@@ -628,8 +630,10 @@ static void sam9m10g45ek_init(MachineState *machine)
     }
 
     /* High Speed MMC interfaces (SD via -sd / -drive if=sd). */
-    sam9_create_hsmci(SAM9G45_HSMCI0_BASE, aic, SAM9G45_IRQ_HSMCI0, 0);
-    sam9_create_hsmci(SAM9G45_HSMCI1_BASE, aic, SAM9G45_IRQ_HSMCI1, 1);
+    sam9_create_hsmci(SAM9G45_HSMCI0_BASE, aic, SAM9G45_IRQ_HSMCI0, 0,
+                      dmac, 0);
+    sam9_create_hsmci(SAM9G45_HSMCI1_BASE, aic, SAM9G45_IRQ_HSMCI1, 1,
+                      dmac, 13);
 
     /* TWI (I2C) controllers.  Slaves attach with e.g.
      * -device at24c-eeprom,bus=i2c-bus.0,address=0x50.  The board's OV2640
