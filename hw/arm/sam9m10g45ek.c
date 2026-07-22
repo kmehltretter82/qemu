@@ -430,7 +430,7 @@ static void sam9m10g45ek_init(MachineState *machine)
     MemoryRegion *sysmem = get_system_memory();
     Object *cpuobj;
     ARMCPU *cpu;
-    DeviceState *dbgu, *aic, *pit, *pmc, *matrix, *orgate, *dmac;
+    DeviceState *dbgu, *aic, *pit, *pmc, *matrix, *orgate, *dmac, *wdt;
     DeviceState *piob = NULL;
     Clock *mck;
 
@@ -480,7 +480,7 @@ static void sam9m10g45ek_init(MachineState *machine)
      * and other system peripherals on real hardware.
      */
     orgate = qdev_new(TYPE_OR_IRQ);
-    qdev_prop_set_uint16(orgate, "num-lines", 4);
+    qdev_prop_set_uint16(orgate, "num-lines", 5);
     qdev_realize_and_unref(orgate, NULL, &error_fatal);
     qdev_connect_gpio_out(orgate, 0,
                           qdev_get_gpio_in(aic, SAM9G45_IRQ_SYS));
@@ -535,7 +535,11 @@ static void sam9m10g45ek_init(MachineState *machine)
     /* Reset / shutdown / watchdog controllers. */
     sysbus_create_simple(TYPE_AT91_RSTC, SAM9G45_RSTC_BASE, NULL);
     sysbus_create_simple(TYPE_AT91_SHDWC, SAM9G45_SHDWC_BASE, NULL);
-    sysbus_create_simple(TYPE_AT91_WDT, SAM9G45_WDT_BASE, NULL);
+    wdt = qdev_new(TYPE_AT91_WDT);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(wdt), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(wdt), 0, SAM9G45_WDT_BASE);
+    sysbus_connect_irq(SYS_BUS_DEVICE(wdt), 0,
+                       qdev_get_gpio_in(orgate, 4));
 
     /*
      * Backup-area timekeeping: RTC + RTT use system OR-gate inputs 2 and 3;
