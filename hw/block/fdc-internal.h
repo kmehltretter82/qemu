@@ -149,6 +149,10 @@ void fdctrl_realize_common(DeviceState *dev, FDCtrl *fdctrl, Error **errp);
 
 int fdctrl_transfer_handler(void *opaque, int nchan, int dma_pos, int dma_len);
 
+/* Helpers for machines whose host CPU services the non-DMA FIFO directly. */
+bool fdctrl_pio_transfer_active(FDCtrl *fdctrl);
+void fdctrl_pio_terminal_count(FDCtrl *fdctrl);
+
 void fdctrl_init_drives(FloppyBus *bus, DriveInfo **fds);
 
 #endif

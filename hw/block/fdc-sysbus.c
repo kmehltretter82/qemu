@@ -27,6 +27,7 @@
 #include "qapi/error.h"
 #include "qom/object.h"
 #include "system/memory.h"
+#include "hw/core/irq.h"
 #include "hw/core/sysbus.h"
 #include "hw/block/fdc.h"
 #include "migration/vmstate.h"
@@ -45,6 +46,8 @@ struct FDCtrlSysBusClass {
     /*< public >*/
 
     bool use_strict_io;
+    bool use_riscpc_pseudo_dma;
+    unsigned int reg_shift;
 };
 
 struct FDCtrlSysBus {
@@ -54,17 +57,26 @@ struct FDCtrlSysBus {
 
     struct FDCtrl state;
     MemoryRegion iomem;
+    MemoryRegion dma_iomem;
+    qemu_irq irq;
+    qemu_irq dma_irq;
+    unsigned int reg_shift;
 };
 
-static uint64_t fdctrl_read_mem(void *opaque, hwaddr reg, unsigned ize)
+static uint64_t fdctrl_read_mem(void *opaque, hwaddr reg, unsigned size)
 {
-    return fdctrl_read(opaque, (uint32_t)reg);
+    FDCtrlSysBus *sys = opaque;
+
+    return fdctrl_read(&sys->state, (uint32_t)(reg >> sys->reg_shift));
 }
 
 static void fdctrl_write_mem(void *opaque, hwaddr reg,
                              uint64_t value, unsigned size)
 {
-    fdctrl_write(opaque, (uint32_t)reg, value);
+    FDCtrlSysBus *sys = opaque;
+
+    fdctrl_write(&sys->state, (uint32_t)(reg >> sys->reg_shift),
+                 value);
 }
 
 static const MemoryRegionOps fdctrl_mem_ops = {
@@ -96,6 +108,86 @@ static void fdctrl_handle_tc(void *opaque, int irq, int level)
     trace_fdctrl_tc_pulse(level);
 }
 
+/*
+ * The RiscPC has no PC-style DMA controller for its SuperIO FDC.  DRQ is
+ * wired to IOMD FIQ 0 instead, and the FIQ handler moves one byte through a
+ * pair of pseudo-DMA addresses.  Accessing the upper address transfers the
+ * final byte and asserts terminal count.
+ */
+#define RISCPC_FDC_FIFO_REG 5
+#define RISCPC_FDC_DMA_TC   4
+
+static void fdctrl_riscpc_irq(void *opaque, int irq, int level)
+{
+    FDCtrlSysBus *sys = opaque;
+
+    if (!level) {
+        qemu_set_irq(sys->irq, 0);
+        qemu_set_irq(sys->dma_irq, 0);
+    } else if (fdctrl_pio_transfer_active(&sys->state)) {
+        qemu_set_irq(sys->irq, 0);
+        qemu_set_irq(sys->dma_irq, 1);
+    } else {
+        qemu_set_irq(sys->dma_irq, 0);
+        qemu_set_irq(sys->irq, 1);
+    }
+}
+
+static void fdctrl_riscpc_dma_byte_done(FDCtrlSysBus *sys)
+{
+    if (fdctrl_pio_transfer_active(&sys->state)) {
+        qemu_set_irq(sys->dma_irq, 1);
+    } else {
+        qemu_set_irq(sys->irq, 1);
+    }
+}
+
+static uint64_t fdctrl_riscpc_dma_read(void *opaque, hwaddr addr,
+                                       unsigned size)
+{
+    FDCtrlSysBus *sys = opaque;
+    uint32_t value;
+
+    if (!fdctrl_pio_transfer_active(&sys->state)) {
+        return 0xff;
+    }
+
+    qemu_set_irq(sys->dma_irq, 0);
+    value = fdctrl_read(&sys->state, RISCPC_FDC_FIFO_REG);
+    if (addr == RISCPC_FDC_DMA_TC) {
+        fdctrl_pio_terminal_count(&sys->state);
+    }
+    fdctrl_riscpc_dma_byte_done(sys);
+    return value;
+}
+
+static void fdctrl_riscpc_dma_write(void *opaque, hwaddr addr,
+                                    uint64_t value, unsigned size)
+{
+    FDCtrlSysBus *sys = opaque;
+
+    if (!fdctrl_pio_transfer_active(&sys->state)) {
+        return;
+    }
+
+    qemu_set_irq(sys->dma_irq, 0);
+    fdctrl_write(&sys->state, RISCPC_FDC_FIFO_REG, value);
+    if (addr == RISCPC_FDC_DMA_TC) {
+        fdctrl_pio_terminal_count(&sys->state);
+    }
+    fdctrl_riscpc_dma_byte_done(sys);
+}
+
+static const MemoryRegionOps fdctrl_riscpc_dma_ops = {
+    .read = fdctrl_riscpc_dma_read,
+    .write = fdctrl_riscpc_dma_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 1,
+    },
+};
+
 void fdctrl_init_sysbus(qemu_irq irq, hwaddr mmio_base, DriveInfo **fds)
 {
     DeviceState *dev;
@@ -108,6 +200,24 @@ void fdctrl_init_sysbus(qemu_irq irq, hwaddr mmio_base, DriveInfo **fds)
     sysbus_realize_and_unref(sbd, &error_fatal);
     sysbus_connect_irq(sbd, 0, irq);
     sysbus_mmio_map(sbd, 0, mmio_base);
+
+    fdctrl_init_drives(&sys->state.bus, fds);
+}
+
+void fdctrl_init_riscpc(qemu_irq irq, qemu_irq fiq, hwaddr io_base,
+                        hwaddr dma_base, DriveInfo **fds)
+{
+    DeviceState *dev = qdev_new("riscpc-fdc");
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+    FDCtrlSysBus *sys = SYSBUS_FDC(dev);
+
+    sysbus_realize_and_unref(sbd, &error_fatal);
+    sysbus_connect_irq(sbd, 0, irq);
+    sysbus_connect_irq(sbd, 1, fiq);
+
+    /* IDE's alternate-status byte occupies FDC register 6 in this window. */
+    sysbus_mmio_map_overlap(sbd, 0, io_base, -1);
+    sysbus_mmio_map(sbd, 1, dma_base);
 
     fdctrl_init_drives(&sys->state.bus, fds);
 }
@@ -145,16 +255,26 @@ static void sysbus_fdc_common_instance_init(Object *obj)
      * fdctrl->dma_chann accordingly.
      */
     fdctrl->dma_chann = -1;
+    sys->reg_shift = sbdc->reg_shift;
 
     qdev_set_legacy_instance_id(dev, 0 /* io */, 2); /* FIXME */
 
     memory_region_init_io(&sys->iomem, obj,
                           sbdc->use_strict_io ? &fdctrl_mem_strict_ops
                                               : &fdctrl_mem_ops,
-                          fdctrl, "fdc", 0x08);
+                          sys, "fdc", 0x08 << sbdc->reg_shift);
     sysbus_init_mmio(sbd, &sys->iomem);
 
-    sysbus_init_irq(sbd, &fdctrl->irq);
+    if (sbdc->use_riscpc_pseudo_dma) {
+        sysbus_init_irq(sbd, &sys->irq);
+        sysbus_init_irq(sbd, &sys->dma_irq);
+        fdctrl->irq = qemu_allocate_irq(fdctrl_riscpc_irq, sys, 0);
+        memory_region_init_io(&sys->dma_iomem, obj, &fdctrl_riscpc_dma_ops,
+                              sys, "riscpc-fdc-pseudo-dma", 8);
+        sysbus_init_mmio(sbd, &sys->dma_iomem);
+    } else {
+        sysbus_init_irq(sbd, &fdctrl->irq);
+    }
     qdev_init_gpio_in(dev, fdctrl_handle_tc, 1);
 }
 
@@ -222,6 +342,24 @@ static const TypeInfo sysbus_fdc_typeinfo = {
     .class_init    = sysbus_fdc_class_init,
 };
 
+static void riscpc_fdc_class_init(ObjectClass *klass, const void *data)
+{
+    FDCtrlSysBusClass *sbdc = SYSBUS_FDC_CLASS(klass);
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    sbdc->use_strict_io = true;
+    sbdc->use_riscpc_pseudo_dma = true;
+    sbdc->reg_shift = 2;
+    dc->desc = "RiscPC 82C711-compatible floppy controller";
+    device_class_set_props(dc, sysbus_fdc_properties);
+}
+
+static const TypeInfo riscpc_fdc_typeinfo = {
+    .name          = "riscpc-fdc",
+    .parent        = TYPE_SYSBUS_FDC,
+    .class_init    = riscpc_fdc_class_init,
+};
+
 static const Property sun4m_fdc_properties[] = {
     DEFINE_PROP_SIGNED("fdtype", FDCtrlSysBus, state.qdev_for_drives[0].type,
                         FLOPPY_DRIVE_TYPE_AUTO, qdev_prop_fdc_drive_type,
@@ -251,6 +389,7 @@ static void sysbus_fdc_register_types(void)
 {
     type_register_static(&sysbus_fdc_common_typeinfo);
     type_register_static(&sysbus_fdc_typeinfo);
+    type_register_static(&riscpc_fdc_typeinfo);
     type_register_static(&sun4m_fdc_typeinfo);
 }
 

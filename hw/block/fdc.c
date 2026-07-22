@@ -1459,6 +1459,22 @@ static void fdctrl_stop_transfer(FDCtrl *fdctrl, uint8_t status0,
     fdctrl_raise_irq(fdctrl);
 }
 
+bool fdctrl_pio_transfer_active(FDCtrl *fdctrl)
+{
+    return fdctrl->phase == FD_PHASE_EXECUTION &&
+           (fdctrl->msr & FD_MSR_NONDMA);
+}
+
+void fdctrl_pio_terminal_count(FDCtrl *fdctrl)
+{
+    if (!fdctrl_pio_transfer_active(fdctrl)) {
+        return;
+    }
+
+    fdctrl->msr &= ~FD_MSR_RQM;
+    fdctrl_stop_transfer(fdctrl, 0x00, 0x00, 0x00);
+}
+
 /* Prepare a data transfer (either DMA or FIFO) */
 static void fdctrl_start_transfer(FDCtrl *fdctrl, int direction)
 {
@@ -1542,7 +1558,7 @@ static void fdctrl_start_transfer(FDCtrl *fdctrl, int direction)
         fdctrl->data_len *= tmp;
     }
     fdctrl->eot = fdctrl->fifo[6];
-    if (fdctrl->dor & FD_DOR_DMAEN) {
+    if (fdctrl->dma_chann != -1 && (fdctrl->dor & FD_DOR_DMAEN)) {
         /* DMA transfer is enabled. */
         IsaDmaClass *k = ISADMA_GET_CLASS(fdctrl->dma);
 
@@ -2092,7 +2108,7 @@ static void fdctrl_handle_drive_specification_command(FDCtrl *fdctrl, int direct
     pos %= FD_SECTOR_LEN;
     if (fdctrl->fifo[pos] & 0x80) {
         /* Command parameters done */
-        if (fdctrl->fifo[pos] & 0x40) {
+        if (!(fdctrl->fifo[pos] & 0x40)) {
             fdctrl->fifo[0] = fdctrl->fifo[1];
             fdctrl->fifo[2] = 0;
             fdctrl->fifo[3] = 0;
@@ -2100,7 +2116,7 @@ static void fdctrl_handle_drive_specification_command(FDCtrl *fdctrl, int direct
         } else {
             fdctrl_to_command_phase(fdctrl);
         }
-    } else if (fdctrl->data_len > 7) {
+    } else if (fdctrl->data_pos == fdctrl->data_len) {
         /* ERROR */
         fdctrl->fifo[0] = 0x80 |
             (cur_drv->head << 2) | GET_CUR_DRV(fdctrl);
@@ -2277,6 +2293,20 @@ static void fdctrl_write_data(FDCtrl *fdctrl, uint32_t value)
             fdctrl->msr |= FD_MSR_CMDBUSY;
         }
 
+        /*
+         * DRIVE SPECIFICATION has a variable-length command phase.  Up to
+         * four drive bytes are followed by a terminator byte whose DN bit is
+         * set.  NRP in that byte selects whether there is no result phase.
+         * Waiting for the maximum parameter count deadlocks a shorter, valid
+         * command, so let its handler inspect every parameter; it keeps the
+         * controller in command phase until the terminator.
+         */
+        cmd = get_command(fdctrl->fifo[0]);
+        if (cmd->value == FD_CMD_DRIVE_SPECIFICATION_COMMAND && pos != 0) {
+            cmd->handler(fdctrl, cmd->direction);
+            break;
+        }
+
         if (fdctrl->data_pos == fdctrl->data_len) {
             /* We have all parameters now, execute the command */
             fdctrl->phase = FD_PHASE_EXECUTION;
@@ -2286,7 +2316,6 @@ static void fdctrl_write_data(FDCtrl *fdctrl, uint32_t value)
                 break;
             }
 
-            cmd = get_command(fdctrl->fifo[0]);
             FLOPPY_DPRINTF("Calling handler for '%s'\n", cmd->name);
             cmd->handler(fdctrl, cmd->direction);
         }

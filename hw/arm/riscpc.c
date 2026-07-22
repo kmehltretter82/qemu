@@ -28,6 +28,7 @@
 #include "hw/arm/acorn32-boot.h"
 #include "hw/misc/acorn-iomd.h"
 #include "hw/display/vidc20.h"
+#include "hw/block/fdc.h"
 #include "system/reset.h"
 #ifdef __EMSCRIPTEN__
 void rpc_fb_start(void);
@@ -45,6 +46,8 @@ void rpc_fb_start(void);
 #define RISCPC_IOMD_BASE    0x03200000
 #define RISCPC_VIDC_BASE    0x03400000
 #define RISCPC_SERIAL_BASE  0x03010fe0
+#define RISCPC_FDC_BASE     0x03010fc0
+#define RISCPC_FDC_DMA_BASE 0x03029ffc
 #define RISCPC_IDE_CMD_BASE 0x030107c0
 #define RISCPC_IDE_CTL_BASE 0x03010fd8
 
@@ -56,6 +59,7 @@ struct RiscPCMachineState {
     ARMCPU *cpu;
     AcornIOMDState *iomd;
     bool old_param;
+    bool floppy;
     hwaddr netbsd_entry;
 };
 
@@ -103,9 +107,12 @@ static void riscpc_init(MachineState *machine)
 {
     RiscPCMachineState *rms = RISCPC_MACHINE(machine);
     DeviceState *dev, *ide, *vidc;
-
+    DriveInfo *fds[MAX_FD];
     MemoryRegion *iobus = g_new(MemoryRegion, 1);
     MemoryRegion *podule = g_new(MemoryRegion, 1);
+
+    fds[0] = drive_get(IF_FLOPPY, 0, 0);
+    fds[1] = drive_get(IF_FLOPPY, 0, 1);
 
     rms->cpu = ARM_CPU(cpu_create(machine->cpu_type));
 
@@ -149,6 +156,13 @@ static void riscpc_init(MachineState *machine)
     serial_mm_init(get_system_memory(), RISCPC_SERIAL_BASE, 2,
                    qdev_get_gpio_in(dev, ACORN_IOMD_IRQ_SERIAL),
                    1843200, serial_hd(0), DEVICE_LITTLE_ENDIAN);
+
+    if (rms->floppy) {
+        fdctrl_init_riscpc(
+            qdev_get_gpio_in(dev, ACORN_IOMD_IRQ_FLOPPY),
+            qdev_get_gpio_in(dev, ACORN_IOMD_FIQ_FLOPPY),
+            RISCPC_FDC_BASE, RISCPC_FDC_DMA_BASE, fds);
+    }
 
     /*
      * Onboard SuperIO IDE (Linux pata_platform: cmd 0x030107c0,
@@ -216,6 +230,21 @@ static void riscpc_set_old_param(Object *obj, bool value, Error **errp)
     RISCPC_MACHINE(obj)->old_param = value;
 }
 
+static bool riscpc_get_floppy(Object *obj, Error **errp)
+{
+    return RISCPC_MACHINE(obj)->floppy;
+}
+
+static void riscpc_set_floppy(Object *obj, bool value, Error **errp)
+{
+    RISCPC_MACHINE(obj)->floppy = value;
+}
+
+static void riscpc_machine_instance_init(Object *obj)
+{
+    RISCPC_MACHINE(obj)->floppy = true;
+}
+
 static void riscpc_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
@@ -238,12 +267,18 @@ static void riscpc_machine_class_init(ObjectClass *oc, const void *data)
     object_class_property_set_description(oc, "old-param",
         "Pass boot parameters as a RISC OS loader style param_struct "
         "instead of ATAGs (needed by vendor-era 2.2/2.4 kernels)");
+    object_class_property_add_bool(oc, "floppy",
+                                   riscpc_get_floppy,
+                                   riscpc_set_floppy);
+    object_class_property_set_description(oc, "floppy",
+        "Enable the onboard SuperIO floppy controller");
 }
 
 static const TypeInfo riscpc_machine_typeinfo = {
     .name = TYPE_RISCPC_MACHINE,
     .parent = TYPE_MACHINE,
     .class_init = riscpc_machine_class_init,
+    .instance_init = riscpc_machine_instance_init,
     .instance_size = sizeof(RiscPCMachineState),
     .interfaces = arm_machine_interfaces,
 };

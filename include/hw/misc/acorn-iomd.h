@@ -77,8 +77,10 @@ struct AcornIOMDState {
 #define ACORN_IOMD_IRQ_VSYNC     3  /* bank A bit 3: VIDC20 vertical sync */
 #define ACORN_IOMD_IRQ_HARDDISK  9  /* bank B bit 1: onboard IDE */
 #define ACORN_IOMD_IRQ_SERIAL   10  /* bank B bit 2: SuperIO 16550 */
+#define ACORN_IOMD_IRQ_FLOPPY   12  /* bank B bit 4: FDC command complete */
 #define ACORN_IOMD_IRQ_KBDTX    14  /* bank B bit 6 */
 #define ACORN_IOMD_IRQ_KBDRX    15  /* bank B bit 7 */
+#define ACORN_IOMD_FIQ_FLOPPY   24  /* FIQ bank bit 0: FDC data request */
 
 /* Mouse button register, read by Linux rpcmouse at IOMEM(0xe0310000) */
 #define ACORN_IOMD_MOUSE_BASE   0x03310000

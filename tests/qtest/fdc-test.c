@@ -52,6 +52,7 @@ enum {
     CMD_SEEK                = 0x0f,
     CMD_VERIFY              = 0x16,
     CMD_READ                = 0xe6,
+    CMD_DRIVE_SPECIFICATION = 0x8e,
     CMD_RELATIVE_SEEK_OUT   = 0x8f,
     CMD_RELATIVE_SEEK_IN    = 0xcf,
 };
@@ -95,6 +96,32 @@ static uint8_t floppy_recv(void)
     assert_bit_set(msr, RQM | DIO);
 
     return inb(FLOPPY_BASE + reg_fifo);
+}
+
+static void test_drive_specification(void)
+{
+    uint8_t msr;
+    int i;
+
+    floppy_send(CMD_DRIVE_SPECIFICATION);
+    floppy_send(0x00); /* drive 0, default density polarity table */
+    floppy_send(0xc0); /* terminate without a result phase */
+
+    msr = inb(FLOPPY_BASE + reg_msr);
+    assert_bit_set(msr, RQM);
+    assert_bit_clear(msr, BUSY | DIO);
+
+    floppy_send(CMD_DRIVE_SPECIFICATION);
+    floppy_send(0x00);
+    floppy_send(0x80); /* terminate and request a result phase */
+
+    for (i = 0; i < 4; i++) {
+        g_assert_cmphex(floppy_recv(), ==, 0x00);
+    }
+
+    msr = inb(FLOPPY_BASE + reg_msr);
+    assert_bit_set(msr, RQM);
+    assert_bit_clear(msr, BUSY | DIO);
 }
 
 /* pcn: Present Cylinder Number */
@@ -624,6 +651,7 @@ int main(int argc, char **argv)
     qtest_add_func("/fdc/media_change", test_media_change);
     qtest_add_func("/fdc/sense_interrupt", test_sense_interrupt);
     qtest_add_func("/fdc/relative_seek", test_relative_seek);
+    qtest_add_func("/fdc/drive_specification", test_drive_specification);
     qtest_add_func("/fdc/read_id", test_read_id);
     qtest_add_func("/fdc/verify", test_verify);
     qtest_add_func("/fdc/media_insert", test_media_insert);
