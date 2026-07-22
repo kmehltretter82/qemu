@@ -19,5 +19,6 @@ OBJECT_DECLARE_SIMPLE_TYPE(AT91PmcState, AT91_PMC)
  * defaults to the rm9200/sam9g45 encoding.
  */
 #define AT91_PMC_MCKR_RESET_SAM9X5   0x00000312
+#define AT91_PMC_PRES_SHIFT_SAM9X5   4
 
 #endif /* HW_MISC_AT91_PMC_H */

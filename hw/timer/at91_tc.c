@@ -30,6 +30,7 @@
 #include "qapi/error.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "system/memory.h"
@@ -129,6 +130,7 @@ struct AT91TcState {
 
     MemoryRegion iomem;
     qemu_irq irq;
+    Clock *mck;
     uint32_t mck_freq;
     uint32_t slck_freq;
     uint32_t counter_width;   /* 16 (rm9200/sam9g45) or 32 (sam9x5/sama5) */
@@ -138,6 +140,7 @@ struct AT91TcState {
     qemu_irq tiob_out[TC_NCH];
 
     AT91TcChan ch[TC_NCH];
+    uint64_t migration_ticks[TC_NCH];
 };
 
 /* Free-running counter modulus (0x10000 or 0x1_0000_0000) and top value
@@ -519,6 +522,45 @@ static void tc_rearm(AT91TcState *s, int n)
     timer_mod(c->timer, deadline);
 }
 
+static void tc_clock_update(void *opaque, ClockEvent event)
+{
+    AT91TcState *s = AT91_TC(opaque);
+    uint64_t ticks[TC_NCH];
+    int64_t now;
+    int n;
+
+    switch (event) {
+    case ClockPreUpdate:
+        if (!s->ch[0].timer) {
+            break;
+        }
+        now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        for (n = 0; n < TC_NCH; n++) {
+            ticks[n] = s->ch[n].clken ? tc_ticks(s, n, now) :
+                                        s->ch[n].ext_ticks;
+        }
+        for (n = 0; n < TC_NCH; n++) {
+            AT91TcChan *c = &s->ch[n];
+
+            c->ext_ticks = ticks[n];
+            c->epoch = now;
+            c->chain_origin = ticks[0];
+            c->last_event_tick = ticks[n];
+        }
+        break;
+    case ClockUpdate:
+        s->mck_freq = clock_get_hz(s->mck);
+        if (s->ch[0].timer) {
+            for (n = 0; n < TC_NCH; n++) {
+                tc_rearm(s, n);
+            }
+        }
+        break;
+    default:
+        break;
+    }
+}
+
 static void tc_compare_fire(void *opaque)
 {
     AT91TcChan *c = opaque;
@@ -872,7 +914,11 @@ static void tc_realize(DeviceState *dev, Error **errp)
     AT91TcState *s = AT91_TC(dev);
     int n;
 
-    if (s->mck_freq == 0) {
+    if (clock_has_source(s->mck)) {
+        s->mck_freq = clock_get_hz(s->mck);
+    } else if (s->mck_freq != 0) {
+        clock_set_hz(s->mck, s->mck_freq);
+    } else {
         error_setg(errp, "at91-tc: mck-frequency must be set");
         return;
     }
@@ -901,6 +947,8 @@ static void tc_dev_init(Object *obj)
     qdev_init_gpio_in_named(DEVICE(obj), tc_tclk_input, "tclk-in", TC_NCH);
     qdev_init_gpio_out_named(DEVICE(obj), s->tioa_out, "tioa-out", TC_NCH);
     qdev_init_gpio_out_named(DEVICE(obj), s->tiob_out, "tiob-out", TC_NCH);
+    s->mck = qdev_init_clock_in(DEVICE(obj), "mck", tc_clock_update, s,
+                                ClockPreUpdate | ClockUpdate);
 }
 
 static const Property tc_properties[] = {
@@ -935,11 +983,26 @@ static const VMStateDescription vmstate_at91_tc_chan = {
     }
 };
 
+static int tc_pre_save(void *opaque)
+{
+    AT91TcState *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int n;
+
+    for (n = 0; n < TC_NCH; n++) {
+        s->migration_ticks[n] = s->ch[n].clken ? tc_ticks(s, n, now) :
+                                                 s->ch[n].ext_ticks;
+    }
+    return 0;
+}
+
 static int tc_post_load(void *opaque, int version_id)
 {
     AT91TcState *s = opaque;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     int n;
+
+    s->mck_freq = clock_get_hz(s->mck);
 
     if (version_id < 2) {
         uint64_t ticks[TC_NCH];
@@ -957,6 +1020,42 @@ static int tc_post_load(void *opaque, int version_id)
             c->event_tick = c->last_event_tick;
             tc_rearm(s, n);
         }
+    } else if (version_id < 3) {
+        /*
+         * epoch is an absolute QEMU virtual-clock timestamp, while the
+         * timer deadline describes the same tick.  Reconstructing epoch from
+         * the deadline is the best available compatibility path for an old
+         * version-2 stream, which did not carry an explicit counter snapshot.
+         */
+        for (n = 0; n < TC_NCH; n++) {
+            AT91TcChan *c = &s->ch[n];
+            uint64_t rate = tc_rate(s, n);
+
+            if (c->clken && rate && timer_pending(c->timer) &&
+                c->event_tick >= c->ext_ticks) {
+                uint64_t delta = muldiv64(c->event_tick - c->ext_ticks,
+                                          NANOSECONDS_PER_SECOND, rate);
+
+                c->epoch = (int64_t)timer_expire_time_ns(c->timer) - delta;
+            }
+        }
+    } else {
+        /*
+         * Rebase each live counter snapshot onto the destination virtual
+         * clock, then derive a fresh deadline.  Migrating epoch directly is
+         * incorrect because it is an absolute timestamp in the source
+         * process's clock domain.
+         */
+        for (n = 0; n < TC_NCH; n++) {
+            AT91TcChan *c = &s->ch[n];
+
+            c->ext_ticks = s->migration_ticks[n];
+            c->epoch = now;
+            c->chain_origin = s->migration_ticks[0];
+        }
+        for (n = 0; n < TC_NCH; n++) {
+            tc_rearm(s, n);
+        }
     }
     for (n = 0; n < TC_NCH; n++) {
         qemu_set_irq(s->tioa_out[n], s->ch[n].tioa);
@@ -968,14 +1067,17 @@ static int tc_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_at91_tc = {
     .name = "at91-tc",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
+    .pre_save = tc_pre_save,
     .post_load = tc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(bmr, AT91TcState),
         VMSTATE_BOOL_ARRAY_V(tclk, AT91TcState, TC_NCH, 2),
         VMSTATE_STRUCT_ARRAY(ch, AT91TcState, TC_NCH, 1,
                              vmstate_at91_tc_chan, AT91TcChan),
+        VMSTATE_CLOCK_V(mck, AT91TcState, 3),
+        VMSTATE_UINT64_ARRAY_V(migration_ticks, AT91TcState, TC_NCH, 3),
         VMSTATE_END_OF_LIST()
     }
 };

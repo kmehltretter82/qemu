@@ -32,6 +32,7 @@
 #include "qapi/qapi-visit-common.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/boards.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/or-irq.h"
 #include "hw/arm/at91_bootrom.h"
@@ -426,6 +427,7 @@ static void sam9m10g45ek_init(MachineState *machine)
     Object *cpuobj;
     ARMCPU *cpu;
     DeviceState *dbgu, *aic, *pit, *pmc, *orgate, *piob = NULL;
+    Clock *mck;
 
     cpuobj = object_new(machine->cpu_type);
     /* Older ARMv5 cores have no EL3; guard is harmless if absent. */
@@ -481,6 +483,7 @@ static void sam9m10g45ek_init(MachineState *machine)
     pmc = qdev_new(TYPE_AT91_PMC);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(pmc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(pmc), 0, SAM9G45_PMC_BASE);
+    mck = qdev_get_clock_out(pmc, "mck");
 
     /*
      * Memory/system configuration plane.  SDRAM itself is the flat RAM
@@ -877,7 +880,7 @@ static void sam9m10g45ek_init(MachineState *machine)
 
         for (i = 0; i < ARRAY_SIZE(tcb); i++) {
             DeviceState *tc = qdev_new(TYPE_AT91_TC);
-            qdev_prop_set_uint32(tc, "mck-frequency", SAM9G45_MCK_HZ);
+            qdev_connect_clock_in(tc, "mck", mck);
             sysbus_realize_and_unref(SYS_BUS_DEVICE(tc), &error_fatal);
             sysbus_mmio_map(SYS_BUS_DEVICE(tc), 0, tcb[i]);
             sysbus_connect_irq(SYS_BUS_DEVICE(tc), 0,
@@ -888,7 +891,7 @@ static void sam9m10g45ek_init(MachineState *machine)
     /* PIT system tick -> OR gate input 1.  Clock it from the board MCK so
      * guest timekeeping matches the modelled PMC clock tree. */
     pit = qdev_new(TYPE_AT91_PIT);
-    qdev_prop_set_uint32(pit, "mck-frequency", SAM9G45_MCK_HZ);
+    qdev_connect_clock_in(pit, "mck", mck);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(pit), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(pit), 0, SAM9G45_PIT_BASE);
     sysbus_connect_irq(SYS_BUS_DEVICE(pit), 0,
