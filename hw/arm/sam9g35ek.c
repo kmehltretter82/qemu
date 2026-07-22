@@ -22,6 +22,7 @@
 #include "qapi/error.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/boards.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/or-irq.h"
 #include "hw/arm/boot.h"
@@ -163,6 +164,7 @@ static void sam9g35ek_init(MachineState *machine)
     Object *cpuobj;
     ARMCPU *cpu;
     DeviceState *aic, *pit, *pmc, *dbgu, *sys_or, *pioab_or, *piocd_or;
+    Clock *mck;
 
     cpuobj = object_new(machine->cpu_type);
     if (object_property_find(cpuobj, "has_el3")) {
@@ -211,8 +213,11 @@ static void sam9g35ek_init(MachineState *machine)
      * guest reads PRES as /1 and derives MCK = 264 MHz instead of 132 MHz,
      * running every guest timer at half speed. */
     qdev_prop_set_uint32(pmc, "mckr-reset", AT91_PMC_MCKR_RESET_SAM9X5);
+    qdev_prop_set_uint32(pmc, "pres-shift", AT91_PMC_PRES_SHIFT_SAM9X5);
+    qdev_prop_set_bit(pmc, "pres-div3", true);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(pmc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(pmc), 0, SAM9X5_PMC_BASE);
+    mck = qdev_get_clock_out(pmc, "mck");
 
     /* Memory/system configuration plane (register storage; SDRAM is flat). */
     sysbus_create_simple(TYPE_AT91_ECC, SAM9X5_ECC_BASE, NULL);
@@ -387,7 +392,7 @@ static void sam9g35ek_init(MachineState *machine)
         for (i = 0; i < ARRAY_SIZE(tcb); i++) {
             DeviceState *tc = qdev_new(TYPE_AT91_TC);
 
-            qdev_prop_set_uint32(tc, "mck-frequency", SAM9X5_MCK_HZ);
+            qdev_connect_clock_in(tc, "mck", mck);
             /* SAM9x5 TC channels are 32-bit; Linux tcb_clksrc uses a single
              * channel as a free-running 32-bit clocksource (not the 16-bit
              * two-channel chain), so the counter must wrap at 2^32. */
@@ -401,7 +406,7 @@ static void sam9g35ek_init(MachineState *machine)
 
     /* PIT system tick -> OR-gate input 1. */
     pit = qdev_new(TYPE_AT91_PIT);
-    qdev_prop_set_uint32(pit, "mck-frequency", SAM9X5_MCK_HZ);
+    qdev_connect_clock_in(pit, "mck", mck);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(pit), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(pit), 0, SAM9X5_PIT_BASE);
     sysbus_connect_irq(SYS_BUS_DEVICE(pit), 0, qdev_get_gpio_in(sys_or, 1));

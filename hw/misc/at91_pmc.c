@@ -3,14 +3,17 @@
  *
  * Models a boot-loader-configured clock tree (PLLA locked, MCK derived) with
  * all lock/ready status bits reported set, so the at91 clk driver's spin-waits
- * complete.  Rates are not re-derived on a programmatic PLL/prescaler change.
+ * complete.  PLLA and MCK changes update the exported master clock.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "qemu/osdep.h"
+#include "qemu/host-utils.h"
 #include "qemu/log.h"
+#include "qapi/error.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "system/memory.h"
@@ -44,9 +47,8 @@
      (1u << 9)  /* PCKRDY1 */ | (1u << 16) /* MOSCSELS */ | \
      (1u << 17) /* MOSCRCS */)
 
-/* CKGR_MCFR: MAINF measured in 16 slow-clock periods for a 12 MHz main clock. */
-#define PMC_MAINF_12MHZ  ((12000000u * 16u) / 32768u)   /* ~5859 */
-#define PMC_MCFR_VALUE   ((1u << 16) /* MAINRDY */ | PMC_MAINF_12MHZ)
+/* CKGR_MCFR: MAINF is measured over 16 slow-clock periods. */
+#define PMC_MCFR_MAINRDY (1u << 16)
 
 /*
  * Reset values modelling a boot-loader-configured clock tree (at91sam9g45 uses
@@ -72,6 +74,7 @@ struct AT91PmcState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
+    Clock *mck;
     uint32_t scsr;
     uint32_t pcsr;
     uint32_t uckr;
@@ -79,11 +82,62 @@ struct AT91PmcState {
     uint32_t pllar;
     uint32_t mckr;
     uint32_t mckr_reset;   /* SoC-specific MCKR encoding (see above) */
+    uint32_t main_freq;
+    uint32_t slck_freq;
+    uint32_t pres_shift;
+    bool pres_div3;
     uint32_t usb;
     uint32_t pck[2];
     uint32_t imr;
     uint32_t pllicpr;
 };
+
+static unsigned pmc_mck_rate(AT91PmcState *s)
+{
+    static const uint8_t mdiv[] = { 1, 2, 4, 3 };
+    uint64_t rate;
+    unsigned pres = (s->mckr >> s->pres_shift) & 7;
+    unsigned css = s->mckr & 3;
+    unsigned diva;
+    unsigned mula;
+
+    switch (css) {
+    case 0:
+        rate = s->slck_freq;
+        break;
+    case 1:
+        rate = s->main_freq;
+        break;
+    case 2:
+        diva = s->pllar & 0xff;
+        mula = (s->pllar >> 16) & 0x7ff;
+        rate = diva ? (uint64_t)s->main_freq * (mula + 1) / diva : 0;
+        if (s->mckr & (1u << 12)) {
+            rate /= 2;
+        }
+        break;
+    case 3:
+        /* The UTMI PLL has a fixed 480 MHz output on SAM9G45/SAM9x5. */
+        rate = 480000000;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    if (pres == 7 && s->pres_div3) {
+        rate /= 3;
+    } else {
+        rate >>= pres;
+    }
+    rate /= mdiv[(s->mckr >> 8) & 3];
+
+    return MIN(rate, (uint64_t)UINT_MAX);
+}
+
+static void pmc_update_mck(AT91PmcState *s)
+{
+    clock_update_hz(s->mck, pmc_mck_rate(s));
+}
 
 static uint64_t pmc_read(void *opaque, hwaddr offset, unsigned size)
 {
@@ -94,7 +148,10 @@ static uint64_t pmc_read(void *opaque, hwaddr offset, unsigned size)
     case PMC_PCSR:   return s->pcsr;
     case CKGR_UCKR:  return s->uckr;
     case CKGR_MOR:   return s->mor;
-    case CKGR_MCFR:  return PMC_MCFR_VALUE;
+    case CKGR_MCFR:
+        return PMC_MCFR_MAINRDY |
+               MIN(muldiv64(s->main_freq, 16, s->slck_freq),
+                   (uint64_t)0xffff);
     case CKGR_PLLAR: return s->pllar;
     case PMC_MCKR:   return s->mckr;
     case PMC_USB:    return s->usb;
@@ -123,8 +180,14 @@ static void pmc_write(void *opaque, hwaddr offset, uint64_t value,
     case PMC_PCDR:   s->pcsr &= ~val;  break;
     case CKGR_UCKR:  s->uckr = val;    break;
     case CKGR_MOR:   s->mor = val;     break;
-    case CKGR_PLLAR: s->pllar = val;   break;
-    case PMC_MCKR:   s->mckr = val;    break;
+    case CKGR_PLLAR:
+        s->pllar = val;
+        pmc_update_mck(s);
+        break;
+    case PMC_MCKR:
+        s->mckr = val;
+        pmc_update_mck(s);
+        break;
     case PMC_USB:    s->usb = val;     break;
     case PMC_PCK0:   s->pck[0] = val;  break;
     case PMC_PCK1:   s->pck[1] = val;  break;
@@ -161,6 +224,34 @@ static void pmc_reset(DeviceState *dev)
     s->pck[1] = 0;
     s->imr = 0;
     s->pllicpr = 0;
+    pmc_update_mck(s);
+}
+
+static void pmc_realize(DeviceState *dev, Error **errp)
+{
+    AT91PmcState *s = AT91_PMC(dev);
+    uint32_t mckr = s->mckr;
+    uint32_t pllar = s->pllar;
+
+    if (!s->main_freq || !s->slck_freq) {
+        error_setg(errp, "at91-pmc: oscillator frequencies must be non-zero");
+        return;
+    }
+    if (s->pres_shift > 29) {
+        error_setg(errp, "at91-pmc: invalid MCKR prescaler shift %u",
+                   s->pres_shift);
+        return;
+    }
+
+    /*
+     * Consumers can be connected after the PMC is realized.  Give the output
+     * its reset rate now; machine reset will install the register values.
+     */
+    s->mckr = s->mckr_reset;
+    s->pllar = PMC_PLLAR_RESET;
+    pmc_update_mck(s);
+    s->mckr = mckr;
+    s->pllar = pllar;
 }
 
 static void pmc_dev_init(Object *obj)
@@ -170,12 +261,22 @@ static void pmc_dev_init(Object *obj)
 
     memory_region_init_io(&s->iomem, obj, &pmc_ops, s, "at91-pmc", 0x100);
     sysbus_init_mmio(sbd, &s->iomem);
+    s->mck = qdev_init_clock_out(DEVICE(obj), "mck");
+}
+
+static int pmc_post_load(void *opaque, int version_id)
+{
+    AT91PmcState *s = opaque;
+
+    pmc_update_mck(s);
+    return 0;
 }
 
 static const VMStateDescription vmstate_at91_pmc = {
     .name = "at91-pmc",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = pmc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(scsr, AT91PmcState),
         VMSTATE_UINT32(pcsr, AT91PmcState),
@@ -196,12 +297,17 @@ static const Property pmc_properties[] = {
      * Defaults to the rm9200/sam9g45 encoding. */
     DEFINE_PROP_UINT32("mckr-reset", AT91PmcState, mckr_reset,
                        PMC_MCKR_RESET),
+    DEFINE_PROP_UINT32("main-frequency", AT91PmcState, main_freq, 12000000),
+    DEFINE_PROP_UINT32("slck-frequency", AT91PmcState, slck_freq, 32768),
+    DEFINE_PROP_UINT32("pres-shift", AT91PmcState, pres_shift, 2),
+    DEFINE_PROP_BOOL("pres-div3", AT91PmcState, pres_div3, false),
 };
 
 static void pmc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
+    dc->realize = pmc_realize;
     device_class_set_legacy_reset(dc, pmc_reset);
     device_class_set_props(dc, pmc_properties);
     dc->vmsd = &vmstate_at91_pmc;
