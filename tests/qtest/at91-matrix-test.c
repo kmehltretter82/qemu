@@ -107,6 +107,10 @@ static void test_partition_migration(void)
     qtest_quit(src);
 
     dst = qtest_initf("-machine sam9m10g45ek -S -incoming %s", uri);
+    /* QMP becomes available before a file-backed incoming load necessarily
+     * finishes; under parallel qtest load, reading TCMR immediately raced the
+     * destination and observed its reset value. */
+    wait_for_migration_complete(dst);
     g_assert_cmphex(qtest_readl(dst, MATRIX_BASE + MATRIX_TCMR), ==,
                     TCMR_ITCM_DTCM_32K);
     g_assert_cmphex(qtest_readl(dst, ITCM_AHB_BASE + 0x40), ==,

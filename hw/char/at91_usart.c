@@ -96,6 +96,7 @@
 
 /* Idle-timeout for flushing a partial PDC RX buffer (virtual time). */
 #define USART_RX_TIMEOUT_NS  (2 * SCALE_MS)
+#define USART_TX_CHUNK_SIZE  256
 
 struct AT91UsartState {
     SysBusDevice parent_obj;
@@ -117,6 +118,9 @@ struct AT91UsartState {
     bool     rx_pending;
     bool     rx_enabled;
     bool     tx_enabled;
+    uint8_t  tx_fifo;
+    bool     tx_pending;
+    guint    watch_tag;
 
     /* PDC state */
     uint32_t rpr, rcr, tpr, tcr, rnpr, rncr, tnpr, tncr;
@@ -131,7 +135,14 @@ struct AT91UsartState {
  */
 static uint32_t usart_status(AT91UsartState *s)
 {
-    uint32_t sr = US_TXRDY | US_TXEMPTY;   /* TX is instantaneous */
+    uint32_t sr = 0;
+
+    if (!s->tx_pending) {
+        sr |= US_TXRDY;
+    }
+    if (!s->tx_pending && (!s->txten || s->tcr == 0)) {
+        sr |= US_TXEMPTY;
+    }
 
     if (s->tcr == 0) {
         sr |= US_ENDTX;
@@ -159,25 +170,107 @@ static void usart_update_irq(AT91UsartState *s)
     qemu_set_irq(s->irq, (usart_status(s) & s->imr) ? 1 : 0);
 }
 
-/* Push the current (and any queued next) PDC TX buffer straight to the chardev. */
-static void usart_pdc_tx(AT91UsartState *s)
+static gboolean usart_transmit_watch(void *do_not_use, GIOCondition cond,
+                                     void *opaque);
+
+static void usart_schedule_transmit(AT91UsartState *s)
 {
+    if (s->watch_tag) {
+        return;
+    }
+
+    s->watch_tag = qemu_chr_fe_add_watch(&s->chr, G_IO_OUT | G_IO_HUP,
+                                         usart_transmit_watch, s);
+    if (!s->watch_tag) {
+        /*
+         * A disconnected backend is handled before this point.  Connected
+         * chardevs which cannot install a write watch have no useful way to
+         * report backpressure to this non-flow-controlled UART, so drain the
+         * hardware state just as the other QEMU UART models do.
+         */
+        s->tx_pending = false;
+        while (s->txten && s->tcr > 0) {
+            s->tpr += s->tcr;
+            s->tcr = 0;
+            if (s->tncr > 0) {
+                s->tpr = s->tnpr;
+                s->tcr = s->tncr;
+                s->tnpr = s->tncr = 0;
+            }
+        }
+        usart_update_irq(s);
+    }
+}
+
+/*
+ * Try to drain the one-byte THR and then the PDC transmit buffers without
+ * blocking the vCPU.  If the host chardev is full, retain all unsent guest
+ * state and resume from a G_IO_OUT watch.  The old model advertised TXRDY at
+ * all times but ignored qemu_chr_fe_write()'s short-write result, silently
+ * losing console and PDC bytes under ordinary socket backpressure.
+ */
+static void usart_transmit(AT91UsartState *s)
+{
+    uint8_t buf[USART_TX_CHUNK_SIZE];
+    int ret;
+
+    if (!qemu_chr_fe_backend_connected(&s->chr)) {
+        s->tx_pending = false;
+        while (s->txten && s->tcr > 0) {
+            s->tpr += s->tcr;
+            s->tcr = 0;
+            if (s->tncr > 0) {
+                s->tpr = s->tnpr;
+                s->tcr = s->tncr;
+                s->tnpr = s->tncr = 0;
+            }
+        }
+        usart_update_irq(s);
+        return;
+    }
+
+    if (s->tx_pending) {
+        ret = qemu_chr_fe_write(&s->chr, &s->tx_fifo, 1);
+        if (ret <= 0) {
+            usart_schedule_transmit(s);
+            return;
+        }
+        s->tx_pending = false;
+    }
+
     while (s->txten && s->tcr > 0) {
-        g_autofree uint8_t *buf = g_malloc(s->tcr);
+        size_t count = MIN((size_t)s->tcr, sizeof(buf));
 
         address_space_read(&address_space_memory, s->tpr,
-                           MEMTXATTRS_UNSPECIFIED, buf, s->tcr);
-        /* Non-blocking (see US_THR): never stall the vCPU on the chardev. */
-        qemu_chr_fe_write(&s->chr, buf, s->tcr);
-        s->tpr += s->tcr;
-        s->tcr = 0;
-        if (s->tncr > 0) {          /* chain to the queued next buffer */
+                           MEMTXATTRS_UNSPECIFIED, buf, count);
+        ret = qemu_chr_fe_write(&s->chr, buf, count);
+        if (ret > 0) {
+            s->tpr += ret;
+            s->tcr -= ret;
+        }
+        if (ret <= 0 || (size_t)ret < count) {
+            usart_schedule_transmit(s);
+            return;
+        }
+
+        if (s->tcr == 0 && s->tncr > 0) {
             s->tpr = s->tnpr;
             s->tcr = s->tncr;
             s->tnpr = s->tncr = 0;
         }
     }
+
     usart_update_irq(s);
+}
+
+static gboolean usart_transmit_watch(void *do_not_use, GIOCondition cond,
+                                     void *opaque)
+{
+    AT91UsartState *s = opaque;
+
+    s->watch_tag = 0;
+    usart_transmit(s);
+    return G_SOURCE_REMOVE;
 }
 
 static void usart_rx_timeout(void *opaque)
@@ -231,8 +324,6 @@ static void usart_write(void *opaque, hwaddr offset, uint64_t value,
                         unsigned size)
 {
     AT91UsartState *s = AT91_USART(opaque);
-    unsigned char ch;
-
     switch (offset) {
     case US_CR:
         if (value & US_CR_RXEN) {
@@ -261,22 +352,25 @@ static void usart_write(void *opaque, hwaddr offset, uint64_t value,
     case US_IER:   s->imr |= value;  usart_update_irq(s); break;
     case US_IDR:   s->imr &= ~value; usart_update_irq(s); break;
     case US_THR:
-        ch = value & 0xff;
-        trace_at91_usart_tx(ch);
-        /* Non-blocking: TX is reported as always-ready (US_TXRDY/US_TXEMPTY),
-         * so never block the vCPU on the chardev.  A blocking write_all() here
-         * busy-spins the vCPU thread whenever the backend backpressures (e.g. a
-         * pipe consumer that is not draining instantly, as with syz-manager),
-         * hanging the guest.  Drop bytes the backend cannot take immediately. */
-        qemu_chr_fe_write(&s->chr, &ch, 1);
-        usart_update_irq(s);
+        if (!s->tx_pending) {
+            s->tx_fifo = value & 0xff;
+            s->tx_pending = true;
+            trace_at91_usart_tx(s->tx_fifo);
+            usart_transmit(s);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "at91-usart: THR write while TXRDY is clear\n");
+        }
         break;
     case US_BRGR:  s->brgr = value; break;
     case US_RTOR:  s->rtor = value; break;
     case US_RPR:   s->rpr = value; break;
     case US_RCR:   s->rcr = value; usart_update_irq(s); break;
     case US_TPR:   s->tpr = value; break;
-    case US_TCR:   s->tcr = value; usart_pdc_tx(s); break;
+    case US_TCR:
+        s->tcr = value;
+        usart_transmit(s);
+        break;
     case US_RNPR:  s->rnpr = value; break;
     case US_RNCR:  s->rncr = value; usart_update_irq(s); break;
     case US_TNPR:  s->tnpr = value; break;
@@ -294,7 +388,7 @@ static void usart_write(void *opaque, hwaddr offset, uint64_t value,
         if (value & PTCR_TXTDIS) {
             s->txten = false;
         }
-        usart_pdc_tx(s);
+        usart_transmit(s);
         break;
     default:
         qemu_log_mask(LOG_UNIMP, "at91-usart: write to unimplemented "
@@ -362,9 +456,12 @@ static void usart_reset(DeviceState *dev)
 {
     AT91UsartState *s = AT91_USART(dev);
 
+    g_clear_handle_id(&s->watch_tag, g_source_remove);
     s->imr = s->mr = s->brgr = s->rtor = 0;
     s->timeout = false;
     s->rx_pending = s->rx_enabled = s->tx_enabled = false;
+    s->tx_fifo = 0;
+    s->tx_pending = false;
     s->rpr = s->rcr = s->tpr = s->tcr = 0;
     s->rnpr = s->rncr = s->tnpr = s->tncr = 0;
     s->rxten = s->txten = false;
@@ -399,10 +496,22 @@ static const Property usart_properties[] = {
     DEFINE_PROP_UINT32("chip-exid", AT91UsartState, chip_exid, 0),
 };
 
+static int usart_post_load(void *opaque, int version_id)
+{
+    AT91UsartState *s = opaque;
+
+    if (s->tx_pending || (s->txten && s->tcr > 0)) {
+        usart_transmit(s);
+    }
+    usart_update_irq(s);
+    return 0;
+}
+
 static const VMStateDescription vmstate_at91_usart = {
     .name = "at91-usart",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .post_load = usart_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(imr, AT91UsartState),
         VMSTATE_UINT32(mr, AT91UsartState),
@@ -413,6 +522,8 @@ static const VMStateDescription vmstate_at91_usart = {
         VMSTATE_BOOL(rx_pending, AT91UsartState),
         VMSTATE_BOOL(rx_enabled, AT91UsartState),
         VMSTATE_BOOL(tx_enabled, AT91UsartState),
+        VMSTATE_UINT8_V(tx_fifo, AT91UsartState, 2),
+        VMSTATE_BOOL_V(tx_pending, AT91UsartState, 2),
         VMSTATE_UINT32(rpr, AT91UsartState),
         VMSTATE_UINT32(rcr, AT91UsartState),
         VMSTATE_UINT32(tpr, AT91UsartState),

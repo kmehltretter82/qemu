@@ -177,6 +177,7 @@ static void test_active_timer_migration(void)
 
     dst = qtest_initf("-machine sam9m10g45ek -watchdog-action none "
                       "-S -incoming %s", uri);
+    wait_for_migration_complete(dst);
     g_assert_cmphex(qtest_readl(dst, G45_WDT_BASE + WDT_MR), ==, mr);
     qtest_qmp_assert_success(dst, "{ 'execute': 'cont' }");
     target_clock = 5 * WDT_TICK_NS - 1;

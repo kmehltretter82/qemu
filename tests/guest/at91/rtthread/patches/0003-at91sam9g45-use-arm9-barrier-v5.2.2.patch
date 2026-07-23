@@ -1,0 +1,27 @@
+From: QEMU AT91 test suite <qemu-devel@nongnu.org>
+Subject: [PATCH] bsp: at91sam9g45: select the ARM9 synchronization barrier
+
+Current Arm GNU toolchains require bare-metal targets to choose the concrete
+implementation of __sync_synchronize. Without a specs selection the default
+implementation is intentionally a no-op, which breaks RT-Thread atomic and
+DMA ordering on the ARM926EJ-S.
+
+Select the CP15 drain-write-buffer implementation. It emits the ARMv5-safe
+`mcr p15, 0, r0, c7, c10, 5` sequence used for pre-ARMv7 memory barriers.
+
+---
+ bsp/at91/at91sam9g45/rtconfig.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/bsp/at91/at91sam9g45/rtconfig.py b/bsp/at91/at91sam9g45/rtconfig.py
+--- a/bsp/at91/at91sam9g45/rtconfig.py
++++ b/bsp/at91/at91sam9g45/rtconfig.py
+@@ -47,6 +47,7 @@ if PLATFORM == 'gcc':
+     CFLAGS = DEVICE
+     AFLAGS = '-c'+ DEVICE + ' -x assembler-with-cpp'
+     AFLAGS += ' -Iplatform'
+     LFLAGS = DEVICE
++    LFLAGS += ' -specs=sync-cp15dmb.specs'
+     LFLAGS += ' -Wl,--gc-sections,-cref,-Map=' + MAP_FILE
+     LFLAGS += ' -T ' + LINK_FILE + '.ld'
+

@@ -151,6 +151,7 @@ static void test_g45_programmed_clock_migration(void)
     qtest_quit(src);
 
     dst = qtest_initf("-machine sam9m10g45ek -S -incoming %s", uri);
+    wait_for_migration_complete(dst);
     g_assert_cmphex(qtest_readl(dst, G45_PMC_BASE + PMC_MCKR), ==,
                     MCKR_MAINCK);
     g_assert_cmpuint(qtest_readl(dst, G45_TCB0_BASE + TC_CV), ==, 2472);
