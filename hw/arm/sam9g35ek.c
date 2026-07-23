@@ -301,6 +301,7 @@ static void sam9g35ek_init(MachineState *machine)
         for (i = 0; i < ARRAY_SIZE(pio); i++) {
             DeviceState *p = qdev_new(TYPE_AT91_PIO);
 
+            qdev_connect_clock_in(p, "mck", mck);
             sysbus_realize_and_unref(SYS_BUS_DEVICE(p), &error_fatal);
             sysbus_mmio_map(SYS_BUS_DEVICE(p), 0, pio[i].base);
             sysbus_connect_irq(SYS_BUS_DEVICE(p), 0,
