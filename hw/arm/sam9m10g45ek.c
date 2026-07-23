@@ -567,16 +567,22 @@ static void sam9m10g45ek_init(MachineState *machine)
     /* Parallel I/O controllers (GPIO).  PIOA/B/C get their own AIC source;
      * PIOD + PIOE share source 5 (via an OR gate). */
     {
-        static const struct { hwaddr base; int irq; } abc[] = {
-            { SAM9G45_PIOA_BASE, SAM9G45_IRQ_PIOA },
-            { SAM9G45_PIOB_BASE, SAM9G45_IRQ_PIOB },
-            { SAM9G45_PIOC_BASE, SAM9G45_IRQ_PIOC },
+        static const struct {
+            const char *name;
+            hwaddr base;
+            int irq;
+        } abc[] = {
+            { "pioa", SAM9G45_PIOA_BASE, SAM9G45_IRQ_PIOA },
+            { "piob", SAM9G45_PIOB_BASE, SAM9G45_IRQ_PIOB },
+            { "pioc", SAM9G45_PIOC_BASE, SAM9G45_IRQ_PIOC },
         };
         DeviceState *pio_or, *piod, *pioe, *p, *pioc = NULL;
         int i;
 
         for (i = 0; i < 3; i++) {
             p = qdev_new(TYPE_AT91_PIO);
+            object_property_add_child(OBJECT(machine), abc[i].name, OBJECT(p));
+            qdev_connect_clock_in(p, "mck", mck);
             sysbus_realize_and_unref(SYS_BUS_DEVICE(p), &error_fatal);
             sysbus_mmio_map(SYS_BUS_DEVICE(p), 0, abc[i].base);
             sysbus_connect_irq(SYS_BUS_DEVICE(p), 0,
@@ -595,12 +601,16 @@ static void sam9m10g45ek_init(MachineState *machine)
                               qdev_get_gpio_in(aic, SAM9G45_IRQ_PIODE));
 
         piod = qdev_new(TYPE_AT91_PIO);
+        object_property_add_child(OBJECT(machine), "piod", OBJECT(piod));
+        qdev_connect_clock_in(piod, "mck", mck);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(piod), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(piod), 0, SAM9G45_PIOD_BASE);
         sysbus_connect_irq(SYS_BUS_DEVICE(piod), 0,
                            qdev_get_gpio_in(pio_or, 0));
 
         pioe = qdev_new(TYPE_AT91_PIO);
+        object_property_add_child(OBJECT(machine), "pioe", OBJECT(pioe));
+        qdev_connect_clock_in(pioe, "mck", mck);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(pioe), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(pioe), 0, SAM9G45_PIOE_BASE);
         sysbus_connect_irq(SYS_BUS_DEVICE(pioe), 0,
