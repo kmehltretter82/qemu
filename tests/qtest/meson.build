@@ -244,6 +244,7 @@ qtests_arm = \
   (config_all_devices.has_key('CONFIG_SAM9G45') ? ['at91-matrix-test'] : []) + \
   (config_all_devices.has_key('CONFIG_SAM9G45') ? ['at91-pio-test'] : []) + \
   (config_all_devices.has_key('CONFIG_SAM9G45') ? ['at91-pmc-test'] : []) + \
+  (config_all_devices.has_key('CONFIG_SAM9G45') ? ['at91-ssc-test'] : []) + \
   (config_all_devices.has_key('CONFIG_SAM9G45') ? ['at91-usart-test'] : []) + \
   (config_all_devices.has_key('CONFIG_SAM9G45') ? ['at91-wdt-test'] : []) + \
   (config_all_devices.has_key('CONFIG_MPS2') ? ['sse-timer-test'] : []) + \
