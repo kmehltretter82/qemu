@@ -10,6 +10,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/main-loop.h"
 #include "hw/core/irq.h"
 #include "hw/ssi/at91_ssc.h"
 #include "migration/vmstate.h"
@@ -109,6 +110,11 @@ struct AT91SscState {
     bool overrun;
     bool endrx_event;
     bool endtx_event;
+
+    qemu_irq tx_request;
+    qemu_irq rx_request;
+    QEMUBH *tx_request_bh;
+    bool tx_request_rearm;
 };
 
 static unsigned at91_ssc_word_bytes(uint32_t fmr)
@@ -154,6 +160,38 @@ static void at91_ssc_update_irq(AT91SscState *s)
     qemu_set_irq(s->irq, (at91_ssc_status(s) & s->imr) != 0);
 }
 
+/*
+ * Hardware DMA request lines (Table 40-1 ids 5..8).  TX request follows
+ * TXRDY (always set here - transmission is synchronous) with a per-write
+ * rearm edge, and additionally waits for RHR to be drained so a loopback
+ * word cannot be overrun by an early TX grant; RX request follows RXRDY
+ * with natural edges.  Same contract as the SPI request lines.
+ */
+static void at91_ssc_update_dma_requests(AT91SscState *s)
+{
+    qemu_set_irq(s->tx_request,
+                 s->tx_enabled && !s->tx_request_rearm && !s->rx_pending);
+    qemu_set_irq(s->rx_request, s->rx_enabled && s->rx_pending);
+}
+
+static void at91_ssc_tx_request_bh(void *opaque)
+{
+    AT91SscState *s = opaque;
+
+    s->tx_request_rearm = false;
+    at91_ssc_update_dma_requests(s);
+}
+
+static void at91_ssc_rearm_tx_request(AT91SscState *s)
+{
+    if (!s->tx_enabled) {
+        return;
+    }
+    s->tx_request_rearm = true;
+    at91_ssc_update_dma_requests(s);
+    qemu_bh_schedule(s->tx_request_bh);
+}
+
 static void at91_ssc_promote_rx(AT91SscState *s)
 {
     if (!s->rcr && s->rncr) {
@@ -193,6 +231,7 @@ static void at91_ssc_receive_word(AT91SscState *s, uint32_t value)
     }
 
     trace_at91_ssc_receive(value, bytes);
+    at91_ssc_update_dma_requests(s);
     at91_ssc_update_irq(s);
 }
 
@@ -237,6 +276,11 @@ static void at91_ssc_reset(DeviceState *dev)
     s->rpr = s->rcr = s->tpr = s->tcr = 0;
     s->rnpr = s->rncr = s->tnpr = s->tncr = 0;
     s->rx_enabled = s->tx_enabled = false;
+    s->tx_request_rearm = false;
+    if (s->tx_request_bh) {
+        qemu_bh_cancel(s->tx_request_bh);
+    }
+    at91_ssc_update_dma_requests(s);
     s->rxten = s->txten = false;
     s->rx_pending = s->overrun = false;
     s->endrx_event = s->endtx_event = false;
@@ -268,6 +312,7 @@ static uint64_t at91_ssc_read(void *opaque, hwaddr offset, unsigned size)
         value = s->rhr;
         s->rx_pending = false;
         s->overrun = false;
+        at91_ssc_update_dma_requests(s);
         at91_ssc_update_irq(s);
         break;
     case SSC_RSHR:
@@ -355,7 +400,10 @@ static void at91_ssc_write(void *opaque, hwaddr offset, uint64_t value,
         }
         if (val & CR_TXDIS) {
             s->tx_enabled = false;
+            s->tx_request_rearm = false;
+            qemu_bh_cancel(s->tx_request_bh);
         }
+        at91_ssc_update_dma_requests(s);
         at91_ssc_pdc_tx(s);
         break;
     case SSC_CMR:
@@ -375,8 +423,11 @@ static void at91_ssc_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case SSC_THR:
         trace_at91_ssc_transmit(val, size);
-        if (s->tx_enabled && (s->rfmr & RFMR_LOOP)) {
-            at91_ssc_receive_word(s, val);
+        if (s->tx_enabled) {
+            if (s->rfmr & RFMR_LOOP) {
+                at91_ssc_receive_word(s, val);
+            }
+            at91_ssc_rearm_tx_request(s);
         }
         break;
     case SSC_RSHR:
@@ -468,13 +519,17 @@ static int at91_ssc_post_load(void *opaque, int version_id)
 {
     AT91SscState *s = opaque;
 
+    at91_ssc_update_dma_requests(s);
+    if (s->tx_request_rearm) {
+        qemu_bh_schedule(s->tx_request_bh);
+    }
     at91_ssc_update_irq(s);
     return 0;
 }
 
 static const VMStateDescription vmstate_at91_ssc = {
     .name = "at91-ssc",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = at91_ssc_post_load,
     .fields = (const VMStateField[]) {
@@ -505,6 +560,7 @@ static const VMStateDescription vmstate_at91_ssc = {
         VMSTATE_BOOL(overrun, AT91SscState),
         VMSTATE_BOOL(endrx_event, AT91SscState),
         VMSTATE_BOOL(endtx_event, AT91SscState),
+        VMSTATE_BOOL_V(tx_request_rearm, AT91SscState, 2),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -517,6 +573,11 @@ static void at91_ssc_init(Object *obj)
                           TYPE_AT91_SSC, SSC_IOMEM_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->tx_request,
+                             AT91_SSC_TX_DMA_REQUEST, 1);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->rx_request,
+                             AT91_SSC_RX_DMA_REQUEST, 1);
+    s->tx_request_bh = qemu_bh_new(at91_ssc_tx_request_bh, s);
 }
 
 static void at91_ssc_class_init(ObjectClass *klass, const void *data)

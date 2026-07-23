@@ -13,4 +13,7 @@
 #define TYPE_AT91_SSC "at91-ssc"
 OBJECT_DECLARE_SIMPLE_TYPE(AT91SscState, AT91_SSC)
 
+#define AT91_SSC_TX_DMA_REQUEST "tx-dma-request"
+#define AT91_SSC_RX_DMA_REQUEST "rx-dma-request"
+
 #endif /* HW_SSI_AT91_SSC_H */

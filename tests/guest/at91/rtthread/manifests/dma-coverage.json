@@ -216,10 +216,11 @@
         "directions": ["memory-to-device", "device-to-memory"],
         "fifo_addresses": {"tx": "0xfff9c024", "rx": "0xfff9c020"},
         "peripheral_width_bytes": [1, 2, 4],
-        "qemu_connection": "None; board request mask exposes only IDs 0 and 13.",
+        "qemu_connection": "AT91_SSC_TX/RX_DMA_REQUEST to at91-dmac peripheral-request[5]/[6]",
+        "qemu_behavior": "TX request follows always-ready TXRDY with a per-write rearm edge held until RHR is drained; RX request follows RXRDY naturally. The halfword-width loopback-via-dma qtest round-trips a pattern through both routes. Mainline G45 DTs declare no SSC dmas, so the Linux route is exercised only via a locally patched DT; the ASoC stream comparison remains open.",
         "rtthread_test": "d2.ssc0",
         "linux_test": "atmel-ssc/ASoC DMA stream and PIO comparison",
-        "status": "missing-expected-fail"
+        "status": "partial-expected-fail"
       },
       {
         "id": "hdmac.request7-8.ssc1",
@@ -228,10 +229,11 @@
         "directions": ["memory-to-device", "device-to-memory"],
         "fifo_addresses": {"tx": "0xfffa0024", "rx": "0xfffa0020"},
         "peripheral_width_bytes": [1, 2, 4],
-        "qemu_connection": "None; board request mask exposes only IDs 0 and 13.",
+        "qemu_connection": "AT91_SSC_TX/RX_DMA_REQUEST to at91-dmac peripheral-request[7]/[8]",
+        "qemu_behavior": "TX request follows always-ready TXRDY with a per-write rearm edge held until RHR is drained; RX request follows RXRDY naturally. The byte-width loopback-via-dma qtest round-trips a pattern through both routes. Mainline G45 DTs declare no SSC dmas, so the Linux route is exercised only via a locally patched DT; the ASoC stream comparison remains open.",
         "rtthread_test": "d2.ssc1",
         "linux_test": "atmel-ssc/ASoC DMA stream and PIO comparison",
-        "status": "missing-expected-fail"
+        "status": "partial-expected-fail"
       },
       {
         "id": "hdmac.request9-10.ac97c",
@@ -240,10 +242,10 @@
         "directions": ["memory-to-device", "device-to-memory"],
         "fifo_addresses": {"tx": "0xfffac024", "rx": "0xfffac020"},
         "peripheral_width_bytes": [2, 4],
-        "qemu_connection": "None; board request mask exposes only IDs 0 and 13.",
+        "qemu_connection": "None. The model's AC97C data path is the embedded channel-A PDC driven by the audio backend; CARHR/CATHR are register stubs, so there is no data source for an external request line. The mainline atmel-ac97c driver also uses only the PDC on this SoC.",
         "rtthread_test": "d2.ac97c",
         "linux_test": "atmel-ac97c DMA playback/capture",
-        "status": "missing-expected-fail"
+        "status": "not-applicable"
       },
       {
         "id": "hdmac.requests11-12-14-15",

@@ -622,8 +622,20 @@ static void test_hsmci_descriptor_longer_than_transaction(void)
     unlink(image_path);
 }
 
+#define DMAC_CTRLA_SRC_WIDTH_2 (1u << 24)
+#define DMAC_CTRLA_DST_WIDTH_2 (1u << 28)
 #define G45_SPI0_BASE          0xfffa4000
 #define G45_SPI1_BASE          0xfffa8000
+#define G45_SSC0_BASE          0xfff9c000
+#define G45_SSC1_BASE          0xfffa0000
+#define SSC_CR                 0x00
+#define SSC_RHR                0x20
+#define SSC_THR                0x24
+#define SSC_RFMR               0x14
+#define SSC_TFMR               0x1c
+#define SSC_CR_RXEN            (1u << 0)
+#define SSC_CR_TXEN            (1u << 8)
+#define SSC_RFMR_LOOP          (1u << 5)
 #define SPI_CR                 0x00
 #define SPI_MR                 0x04
 #define SPI_RDR                0x08
@@ -709,6 +721,93 @@ static void run_spi_dma_roundtrip(uint64_t spi_base, unsigned tx_request,
         g_assert_cmphex(got, ==, expected_tail[i - (4 - expected_words)]);
     }
     qtest_quit(qts);
+}
+
+/*
+ * SSC loopback entirely through the Table 40-1 request routes: the TX
+ * channel paces words into THR, the receiver loopback returns each word
+ * into RHR, and the RX channel drains it.  SSC0 uses ids 5/6 with the
+ * halfword widths an audio stream would use; SSC1 uses ids 7/8 with
+ * byte widths.
+ */
+static void run_ssc_dma_loopback(uint64_t ssc_base, unsigned tx_request,
+                                 unsigned rx_request, bool halfword)
+{
+    QTestState *qts = qtest_init("-machine sam9m10g45ek -S");
+    const uint64_t tx_buf = G45_SDRAM_BASE + 0x41000;
+    const uint64_t rx_buf = G45_SDRAM_BASE + 0x41100;
+    const uint64_t tx_base = G45_DMAC_BASE + DMAC_CH0_BASE +
+                             6 * DMAC_CH_STRIDE;
+    const uint64_t rx_base = G45_DMAC_BASE + DMAC_CH0_BASE +
+                             7 * DMAC_CH_STRIDE;
+    const uint32_t widths = halfword ?
+        DMAC_CTRLA_SRC_WIDTH_2 | DMAC_CTRLA_DST_WIDTH_2 : 0;
+    const uint32_t wordlen = halfword ? 15 : 7;
+    static const uint16_t pattern[4] = { 0x1234, 0xa55a, 0x0ff0, 0xc3c3 };
+    int step = halfword ? 2 : 1;
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        uint16_t v = halfword ? pattern[i] : (pattern[i] & 0xff);
+
+        if (halfword) {
+            qtest_writew(qts, tx_buf + 2 * i, v);
+            qtest_writew(qts, rx_buf + 2 * i, 0xcccc);
+        } else {
+            qtest_writeb(qts, tx_buf + i, v);
+            qtest_writeb(qts, rx_buf + i, 0xcc);
+        }
+    }
+    qtest_writel(qts, ssc_base + SSC_TFMR, wordlen);
+    qtest_writel(qts, ssc_base + SSC_RFMR, wordlen | SSC_RFMR_LOOP);
+    qtest_writel(qts, ssc_base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
+
+    qtest_writel(qts, tx_base + DMAC_SADDR, tx_buf);
+    qtest_writel(qts, tx_base + DMAC_DADDR, ssc_base + SSC_THR);
+    qtest_writel(qts, tx_base + DMAC_CTRLA, DMAC_CTRLA_BTSIZE(4) | widths);
+    qtest_writel(qts, tx_base + DMAC_CTRLB, DMAC_CTRLB_FC_MEM2PER |
+                 DMAC_CTRLB_DST_FIXED | DMAC_CTRLB_SRC_DSCR_DIS |
+                 DMAC_CTRLB_DST_DSCR_DIS);
+    qtest_writel(qts, tx_base + DMAC_CFG,
+                 dmac_cfg_dst_per(tx_request) | DMAC_CFG_DST_H2SEL);
+
+    qtest_writel(qts, rx_base + DMAC_SADDR, ssc_base + SSC_RHR);
+    qtest_writel(qts, rx_base + DMAC_DADDR, rx_buf);
+    qtest_writel(qts, rx_base + DMAC_CTRLA, DMAC_CTRLA_BTSIZE(4) | widths);
+    qtest_writel(qts, rx_base + DMAC_CTRLB, DMAC_CTRLB_FC_PER2MEM |
+                 DMAC_CTRLB_SRC_FIXED | DMAC_CTRLB_SRC_DSCR_DIS |
+                 DMAC_CTRLB_DST_DSCR_DIS);
+    qtest_writel(qts, rx_base + DMAC_CFG,
+                 dmac_cfg_src_per(rx_request) | DMAC_CFG_SRC_H2SEL);
+
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_EN, 1);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_CHER,
+                 DMAC_ENA(6) | DMAC_ENA(7));
+    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 6);
+    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 7);
+
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR) &
+                    (DMAC_BTC(6) | DMAC_BTC(7) | DMAC_ERR(6) | DMAC_ERR(7)),
+                    ==, DMAC_BTC(6) | DMAC_BTC(7));
+    for (i = 0; i < 4; i++) {
+        uint32_t want = halfword ? pattern[i] : (pattern[i] & 0xff);
+        uint32_t got = halfword ?
+            qtest_readw(qts, rx_buf + i * step) :
+            qtest_readb(qts, rx_buf + i * step);
+
+        g_assert_cmphex(got, ==, want);
+    }
+    qtest_quit(qts);
+}
+
+static void test_ssc0_loopback_via_dma(void)
+{
+    run_ssc_dma_loopback(G45_SSC0_BASE, 5, 6, true);
+}
+
+static void test_ssc1_loopback_via_dma(void)
+{
+    run_ssc_dma_loopback(G45_SSC1_BASE, 7, 8, false);
 }
 
 /* Byte widths mirror the Linux spi-atmel DMA programming exactly. */
@@ -3308,6 +3407,10 @@ int main(int argc, char **argv)
                    test_spi0_jedec_via_dma);
     qtest_add_func("/at91-dmac/g45/spi1/route-smoke",
                    test_spi1_route_smoke);
+    qtest_add_func("/at91-dmac/g45/ssc0/loopback-via-dma",
+                   test_ssc0_loopback_via_dma);
+    qtest_add_func("/at91-dmac/g45/ssc1/loopback-via-dma",
+                   test_ssc1_loopback_via_dma);
     qtest_add_func("/at91-dmac/g45/hsmci0/mismatch-residue-migration",
                    test_hsmci_mismatch_residue_migration);
     qtest_add_func("/at91-dmac/g45/hsmci0/mismatch-card-in-progress-migration",

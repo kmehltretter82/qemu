@@ -534,11 +534,13 @@ static void sam9m10g45ek_init(MachineState *machine)
     dmac = qdev_new(TYPE_AT91_DMAC);
     object_property_add_child(OBJECT(machine), "dmac", OBJECT(dmac));
     /* Modelled Table 40-1 requests: HSMCI0=0, SPI0 TX/RX=1/2, SPI1
-     * TX/RX=3/4, HSMCI1=13. */
+     * TX/RX=3/4, SSC0 TX/RX=5/6, SSC1 TX/RX=7/8, HSMCI1=13. */
     qdev_prop_set_uint64(dmac, AT91_DMAC_REQUEST_MASK,
                          (UINT64_C(1) << 0) | (UINT64_C(1) << 1) |
                          (UINT64_C(1) << 2) | (UINT64_C(1) << 3) |
-                         (UINT64_C(1) << 4) | (UINT64_C(1) << 13));
+                         (UINT64_C(1) << 4) | (UINT64_C(1) << 5) |
+                         (UINT64_C(1) << 6) | (UINT64_C(1) << 7) |
+                         (UINT64_C(1) << 8) | (UINT64_C(1) << 13));
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dmac), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(dmac), 0, SAM9G45_DMAC_BASE);
     sysbus_connect_irq(SYS_BUS_DEVICE(dmac), 0,
@@ -913,9 +915,15 @@ static void sam9m10g45ek_init(MachineState *machine)
      * and local receiver loopback; no external I2S codec is wired by default.
      */
     {
-        static const struct { hwaddr base; int irq; } ssc[] = {
-            { SAM9G45_SSC0_BASE, SAM9G45_IRQ_SSC0 },
-            { SAM9G45_SSC1_BASE, SAM9G45_IRQ_SSC1 },
+        /* Table 40-1 hardware handshake ids: SSC0 TX/RX = 5/6, SSC1 = 7/8. */
+        static const struct {
+            hwaddr base;
+            int irq;
+            int tx_request;
+            int rx_request;
+        } ssc[] = {
+            { SAM9G45_SSC0_BASE, SAM9G45_IRQ_SSC0, 5, 6 },
+            { SAM9G45_SSC1_BASE, SAM9G45_IRQ_SSC1, 7, 8 },
         };
         int i;
 
@@ -926,6 +934,12 @@ static void sam9m10g45ek_init(MachineState *machine)
             sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, ssc[i].base);
             sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
                                qdev_get_gpio_in(aic, ssc[i].irq));
+            qdev_connect_gpio_out_named(dev, AT91_SSC_TX_DMA_REQUEST, 0,
+                qdev_get_gpio_in_named(dmac, AT91_DMAC_REQUEST_GPIO,
+                                       ssc[i].tx_request));
+            qdev_connect_gpio_out_named(dev, AT91_SSC_RX_DMA_REQUEST, 0,
+                qdev_get_gpio_in_named(dmac, AT91_DMAC_REQUEST_GPIO,
+                                       ssc[i].rx_request));
         }
     }
 
