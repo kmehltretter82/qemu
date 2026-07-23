@@ -168,7 +168,8 @@ bool acorn32_kernel_p(const char *filename)
  * anything else (0xf03f064c..0xf040fc88 in the 10.1 GENERIC kernel).  Map
  * only the file-backed part and the kernel faults on its own BSS.
  */
-static bool acorn32_elf_span(const char *filename, uint32_t *span, Error **errp)
+static bool acorn32_elf_span(const char *filename, uint32_t *span,
+                             uint32_t *span_exact, Error **errp)
 {
     g_autofree Elf32_Phdr *phdr = NULL;
     Elf32_Ehdr ehdr;
@@ -212,7 +213,8 @@ static bool acorn32_elf_span(const char *filename, uint32_t *span, Error **errp)
         return false;
     }
 
-    *span = ROUND_UP(end - ACORN32_KERNEL_VA, MiB);
+    *span_exact = end - ACORN32_KERNEL_VA;
+    *span = ROUND_UP(*span_exact, MiB);
     return true;
 }
 
@@ -331,6 +333,15 @@ static void acorn32_write_bootconfig(hwaddr pa, hwaddr ram_base,
 
     bc->kernvirtualbase  = cpu_to_le32(ACORN32_KERNEL_VA);
     bc->kernphysicalbase = cpu_to_le32(kernel_pa);
+    /*
+     * The image's exact extent, not our MiB-rounded mapping span.
+     * BtNetBSD passes the real size, and initarm() derives
+     * physical_freestart (and on SA-110 the cache-clean area base)
+     * from it, so inflating it wastes RAM and shifts those
+     * allocations.  (It was once suspected of causing NetBSD 7.2's
+     * early cache-clean abort; testing disproved that - 7.2 fails
+     * identically either way - but exact remains the faithful value.)
+     */
     bc->kernsize         = cpu_to_le32(kernel_span);
 
     bc->pagesize   = cpu_to_le32(4096);
@@ -379,13 +390,14 @@ bool acorn32_load_netbsd(MachineState *machine, hwaddr ram_base,
     hwaddr stub_pa = scratch + STUB_OFF;
     hwaddr bc_pa   = scratch + BOOTCONFIG_OFF;
     hwaddr fb_pa   = scratch + FRAMEBUFFER_OFF;
-    uint32_t kernel_span;
+    uint32_t kernel_span, kernel_span_exact;
     ssize_t size;
 
     ctx.ram_base  = ram_base;
     ctx.kernel_pa = ram_base + KERNEL_OFF;
 
-    if (!acorn32_elf_span(machine->kernel_filename, &kernel_span, errp)) {
+    if (!acorn32_elf_span(machine->kernel_filename, &kernel_span,
+                          &kernel_span_exact, errp)) {
         return false;
     }
 
