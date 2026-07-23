@@ -3726,6 +3726,43 @@ static void op_addr_rr_post(DisasContext *s, arg_ldst_rr *a,
     store_reg(s, a->rn, addr);
 }
 
+/*
+ * Before Armv6, a word LDR with alignment checking disabled reads from
+ * Align(address, 4), then rotates the result right by 8 * address<1:0>.
+ * Word stores similarly ignore address<1:0>.  This is architecturally
+ * visible for MMIO as well as RAM; in particular, old Arm block-I/O code
+ * deliberately uses the rotated-load behaviour.
+ */
+static void gen_aa32_ld_i32_legacy(DisasContext *s, TCGv_i32 val,
+                                   TCGv_i32 addr, int mem_idx, MemOp mop)
+{
+    if (!ENABLE_ARCH_6 && !s->align_mem && (mop & MO_SIZE) == MO_32) {
+        TCGv_i32 aligned = tcg_temp_new_i32();
+        TCGv_i32 rotate = tcg_temp_new_i32();
+
+        tcg_gen_andi_i32(aligned, addr, ~3);
+        gen_aa32_ld_i32(s, val, aligned, mem_idx, mop);
+        tcg_gen_andi_i32(rotate, addr, 3);
+        tcg_gen_shli_i32(rotate, rotate, 3);
+        tcg_gen_rotr_i32(val, val, rotate);
+    } else {
+        gen_aa32_ld_i32(s, val, addr, mem_idx, mop);
+    }
+}
+
+static void gen_aa32_st_i32_legacy(DisasContext *s, TCGv_i32 val,
+                                   TCGv_i32 addr, int mem_idx, MemOp mop)
+{
+    if (!ENABLE_ARCH_6 && !s->align_mem && (mop & MO_SIZE) == MO_32) {
+        TCGv_i32 aligned = tcg_temp_new_i32();
+
+        tcg_gen_andi_i32(aligned, addr, ~3);
+        gen_aa32_st_i32(s, val, aligned, mem_idx, mop);
+    } else {
+        gen_aa32_st_i32(s, val, addr, mem_idx, mop);
+    }
+}
+
 static bool op_load_rr(DisasContext *s, arg_ldst_rr *a,
                        MemOp mop, int mem_idx)
 {
@@ -3735,7 +3772,7 @@ static bool op_load_rr(DisasContext *s, arg_ldst_rr *a,
     addr = op_addr_rr_pre(s, a);
 
     tmp = tcg_temp_new_i32();
-    gen_aa32_ld_i32(s, tmp, addr, mem_idx, mop);
+    gen_aa32_ld_i32_legacy(s, tmp, addr, mem_idx, mop);
     disas_set_da_iss(s, mop, issinfo);
 
     /*
@@ -3764,7 +3801,7 @@ static bool op_store_rr(DisasContext *s, arg_ldst_rr *a,
     addr = op_addr_rr_pre(s, a);
 
     tmp = load_reg(s, a->rt);
-    gen_aa32_st_i32(s, tmp, addr, mem_idx, mop);
+    gen_aa32_st_i32_legacy(s, tmp, addr, mem_idx, mop);
     disas_set_da_iss(s, mop, issinfo);
 
     op_addr_rr_post(s, a, addr);
@@ -3940,7 +3977,7 @@ static bool op_load_ri(DisasContext *s, arg_ldst_ri *a,
     addr = op_addr_ri_pre(s, a);
 
     tmp = tcg_temp_new_i32();
-    gen_aa32_ld_i32(s, tmp, addr, mem_idx, mop);
+    gen_aa32_ld_i32_legacy(s, tmp, addr, mem_idx, mop);
     disas_set_da_iss(s, mop, issinfo);
 
     /*
@@ -3969,7 +4006,7 @@ static bool op_store_ri(DisasContext *s, arg_ldst_ri *a,
     addr = op_addr_ri_pre(s, a);
 
     tmp = load_reg(s, a->rt);
-    gen_aa32_st_i32(s, tmp, addr, mem_idx, mop);
+    gen_aa32_st_i32_legacy(s, tmp, addr, mem_idx, mop);
     disas_set_da_iss(s, mop, issinfo);
 
     op_addr_ri_post(s, a, addr);
