@@ -191,8 +191,17 @@ DTOCYC scaled by DTOMUL counts MCK cycles between two data accesses, an
 access restarts the counter, and expiry raises read-to-clear DTOE with the
 data phase ended - exactly the -ETIMEDOUT the atmel-mci driver reports for
 a stuck transfer. Both mismatch boundaries and a mid-countdown timeout
-migrate exactly. The model passes the
-unrelaxed guest suite and 47 focused DMAC qtests plus 9 HSMCI qtests,
+migrate exactly. The fourth D2 increment wires the SPI0/SPI1 hardware
+request routes (Table 40-1 ids 1..4): the SPI TX request follows TDRE with
+a per-write rearm edge held until RDR is drained, RX follows RDRF, and a
+byte-width full-duplex qtest reads the board flash's JEDEC id through both
+SPI0 routes exactly as spi-atmel programs at_hdmac. Bringing that up with
+a dmas-patched DTB (mainline G45 DTs never declare SPI dmas) caught a real
+contract bug the word-width qtests missed: the SPI data registers only
+accepted 4-byte MMIO accesses, so the driver's 8-bit DMA beats faulted -
+the same 1..4-byte data-register contract the TWI needed. A 1 MiB
+/dev/mtd0 DMA read now md5-matches the host pattern. The model passes the
+unrelaxed guest suite and 49 focused DMAC qtests plus 9 HSMCI qtests,
 including migration with a byte
 held in the conversion FIFO and a queued request, with an enabled pending
 interrupt, in the middle of a PiP row, at an AUTO replay stalled boundary, and
@@ -227,12 +236,13 @@ source/destination pacing, live level sampling at CHER and on channel
 disable, HSMCI_DMA.DMAEN gating, sub-buffer channel interleave under both
 arbitration modes, descriptor-versus-transaction length mismatches with
 driver-shaped recovery and migration at those boundaries, and the DTOR
-data timeout with a migrated countdown. Still open in D2 are beat
-granularity inside a chunk, FIFO_CFG thresholds, physical card removal,
-and DMA request routes for peripherals beyond the two HSMCIs (SPI, SSC,
-AC97); D3 will exercise DBGU/USART, SSC and AC97 PDC current/next-buffer
-state machines. Later phases cover storage, rings, continuous fetch,
-cyclic streams, Linux companion tests, errors and soak.
+data timeout with a migrated countdown, and the SPI0/SPI1 request routes.
+Still open in D2 are beat granularity inside a chunk, FIFO_CFG
+thresholds, physical card removal, and the SSC/AC97 routes (qtest-only:
+mainline DTs declare no SSC dmas and the ac97c driver uses the modelled
+embedded PDC); D3 will exercise DBGU/USART, SSC and AC97 PDC
+current/next-buffer state machines. Later phases cover storage, rings,
+continuous fetch, cyclic streams, Linux companion tests, errors and soak.
 
 Run the same payload on a physical SAM9M10-G45-EK when available. A QEMU pass
 is not evidence that cache maintenance or ordering is correct on non-coherent

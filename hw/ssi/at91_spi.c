@@ -19,6 +19,7 @@
  */
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/main-loop.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
@@ -68,6 +69,9 @@ struct AT91SpiState {
     MemoryRegion iomem;
     qemu_irq irq;
     qemu_irq cs_lines[SPI_NUM_CS];
+    qemu_irq tx_request;
+    qemu_irq rx_request;
+    QEMUBH *tx_request_bh;
     SSIBus *bus;
 
     uint32_t mr;
@@ -76,12 +80,51 @@ struct AT91SpiState {
     uint32_t rdr;
     uint32_t csr[SPI_NUM_CS];
     bool enabled;
+    bool tx_request_rearm;
     int active_cs;    /* currently-asserted NPCS, or -1 for none */
 };
 
 static void spi_update_irq(AT91SpiState *s)
 {
     qemu_set_irq(s->irq, !!(s->sr & s->imr));
+}
+
+/*
+ * Hardware DMA request lines (Table 40-1 ids 1..4).  TX request follows
+ * TDRE and RX request follows RDRF.  A TDR write completes the transfer
+ * synchronously here, so TDRE never visibly drops; the request is lowered
+ * and re-raised through a bottom half so the DMA controller observes one
+ * distinct handshake edge per data register access, exactly like the HSMCI.
+ * The TX request additionally waits for RDR to be drained: real hardware
+ * overlaps the next TDR load with the shifter and the RX consumer drains
+ * RDR inside that transfer window, but this model transfers instantly, so
+ * an early TX grant would overrun RDR.  Holding TX until RDRF clears
+ * serializes the full-duplex pipeline without changing CPU-driven flows.
+ */
+static void spi_update_dma_requests(AT91SpiState *s)
+{
+    qemu_set_irq(s->tx_request,
+                 s->enabled && !s->tx_request_rearm &&
+                 (s->sr & SR_TDRE) && !(s->sr & SR_RDRF));
+    qemu_set_irq(s->rx_request, s->enabled && (s->sr & SR_RDRF));
+}
+
+static void spi_tx_request_bh(void *opaque)
+{
+    AT91SpiState *s = opaque;
+
+    s->tx_request_rearm = false;
+    spi_update_dma_requests(s);
+}
+
+static void spi_rearm_tx_request(AT91SpiState *s)
+{
+    if (!s->enabled) {
+        return;
+    }
+    s->tx_request_rearm = true;
+    spi_update_dma_requests(s);
+    qemu_bh_schedule(s->tx_request_bh);
 }
 
 /* Decode the chip select currently selected by a PCS field (fixed or variable
@@ -132,6 +175,7 @@ static void spi_do_transfer(AT91SpiState *s, uint32_t tdr)
     }
     s->rdr = rx & 0xffff;
     s->sr |= SR_RDRF | SR_TDRE | SR_TXEMPTY;
+    spi_update_dma_requests(s);
     spi_update_irq(s);
 }
 
@@ -145,6 +189,11 @@ static void spi_reset(DeviceState *dev)
     s->rdr = 0;
     s->enabled = false;
     s->sr = SR_TDRE | SR_TXEMPTY;
+    s->tx_request_rearm = false;
+    if (s->tx_request_bh) {
+        qemu_bh_cancel(s->tx_request_bh);
+    }
+    spi_update_dma_requests(s);
     for (i = 0; i < SPI_NUM_CS; i++) {
         s->csr[i] = 0;
     }
@@ -165,6 +214,7 @@ static uint64_t spi_read(void *opaque, hwaddr offset, unsigned size)
     case SPI_RDR:
         r = s->rdr | (MR_PCS(s->mr) << 16);
         s->sr &= ~SR_RDRF;
+        spi_update_dma_requests(s);
         spi_update_irq(s);
         return r;
     case SPI_SR:
@@ -196,10 +246,14 @@ static void spi_write(void *opaque, hwaddr offset, uint64_t value,
         }
         if (val & CR_SPIEN) {
             s->enabled = true;
+            spi_update_dma_requests(s);
         }
         if (val & CR_SPIDIS) {
             s->enabled = false;
             spi_set_cs(s, -1);   /* disabling releases NPCS */
+            s->tx_request_rearm = false;
+            qemu_bh_cancel(s->tx_request_bh);
+            spi_update_dma_requests(s);
         }
         if (val & CR_LASTXFER) {
             /* End of chained transfer: release the current chip select. */
@@ -216,6 +270,7 @@ static void spi_write(void *opaque, hwaddr offset, uint64_t value,
     case SPI_TDR:
         if (s->enabled) {
             spi_do_transfer(s, val);
+            spi_rearm_tx_request(s);
         }
         break;
     case SPI_IER:
@@ -238,14 +293,30 @@ static const MemoryRegionOps spi_ops = {
     .read = spi_read,
     .write = spi_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid.min_access_size = 4,
+    /* The spi-atmel DMA path byte-accesses TDR/RDR (8-bit transfer
+     * widths), like the TWI driver does with its data registers. */
+    .valid.min_access_size = 1,
     .valid.max_access_size = 4,
+    .impl.min_access_size = 1,
+    .impl.max_access_size = 4,
 };
+
+static int spi_post_load(void *opaque, int version_id)
+{
+    AT91SpiState *s = opaque;
+
+    spi_update_dma_requests(s);
+    if (s->tx_request_rearm) {
+        qemu_bh_schedule(s->tx_request_bh);
+    }
+    return 0;
+}
 
 static const VMStateDescription vmstate_at91_spi = {
     .name = "at91-spi",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .post_load = spi_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(mr, AT91SpiState),
         VMSTATE_UINT32(sr, AT91SpiState),
@@ -254,6 +325,7 @@ static const VMStateDescription vmstate_at91_spi = {
         VMSTATE_UINT32_ARRAY(csr, AT91SpiState, SPI_NUM_CS),
         VMSTATE_BOOL(enabled, AT91SpiState),
         VMSTATE_INT32(active_cs, AT91SpiState),
+        VMSTATE_BOOL_V(tx_request_rearm, AT91SpiState, 2),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -267,6 +339,11 @@ static void spi_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
     qdev_init_gpio_out_named(DEVICE(obj), s->cs_lines, "cs", SPI_NUM_CS);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->tx_request,
+                             AT91_SPI_TX_DMA_REQUEST, 1);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->rx_request,
+                             AT91_SPI_RX_DMA_REQUEST, 1);
+    s->tx_request_bh = qemu_bh_new(spi_tx_request_bh, s);
     s->bus = ssi_create_bus(DEVICE(obj), "spi");
 }
 

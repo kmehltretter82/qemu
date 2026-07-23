@@ -11,4 +11,7 @@
 #define TYPE_AT91_SPI "at91-spi"
 OBJECT_DECLARE_SIMPLE_TYPE(AT91SpiState, AT91_SPI)
 
+#define AT91_SPI_TX_DMA_REQUEST "tx-dma-request"
+#define AT91_SPI_RX_DMA_REQUEST "rx-dma-request"
+
 #endif /* HW_SSI_AT91_SPI_H */

@@ -190,10 +190,11 @@
         "directions": ["memory-to-device", "device-to-memory"],
         "fifo_addresses": {"tx": "0xfffa400c", "rx": "0xfffa4008"},
         "peripheral_width_bytes": [1, 2],
-        "qemu_connection": "None; board request mask exposes only IDs 0 and 13.",
+        "qemu_connection": "AT91_SPI_TX/RX_DMA_REQUEST to at91-dmac peripheral-request[1]/[2]",
+        "qemu_behavior": "TX request follows TDRE with a per-write rearm edge and holds until RDR is drained (the instant-transfer model would otherwise overrun RDR); RX request follows RDRF naturally. Word-wide RDR reads carry the live PCS field in bits 16..19. qtest jedec-via-dma reads the board flash's JEDEC id full duplex; Linux spi-atmel with a dmas-patched DTB md5-verifies /dev/mtd0 through at_hdmac.",
         "rtthread_test": "d2.spi0",
         "linux_test": "spi-atmel DMA transfer and PIO comparison",
-        "status": "missing-expected-fail"
+        "status": "partial-expected-fail"
       },
       {
         "id": "hdmac.request3-4.spi1",
@@ -202,10 +203,11 @@
         "directions": ["memory-to-device", "device-to-memory"],
         "fifo_addresses": {"tx": "0xfffa800c", "rx": "0xfffa8008"},
         "peripheral_width_bytes": [1, 2],
-        "qemu_connection": "None; board request mask exposes only IDs 0 and 13.",
+        "qemu_connection": "AT91_SPI_TX/RX_DMA_REQUEST to at91-dmac peripheral-request[3]/[4]",
+        "qemu_behavior": "TX request follows TDRE with a per-write rearm edge and holds until RDR is drained (the instant-transfer model would otherwise overrun RDR); RX request follows RDRF naturally. Word-wide RDR reads carry the live PCS field in bits 16..19. qtest route-smoke paces both sides against the idle bus.",
         "rtthread_test": "d2.spi1",
         "linux_test": "spi-atmel DMA transfer and PIO comparison",
-        "status": "missing-expected-fail"
+        "status": "partial-expected-fail"
       },
       {
         "id": "hdmac.request5-6.ssc0",
