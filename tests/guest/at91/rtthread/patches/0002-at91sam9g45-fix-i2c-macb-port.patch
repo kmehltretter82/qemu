@@ -1,0 +1,128 @@
+From: QEMU AT91 test suite <qemu-devel@nongnu.org>
+Subject: [PATCH] bsp: at91sam9g45: fix dormant I2C and MACB ports
+
+The optional I2C and MACB sources were copied from the SAM9260 BSP but do not
+compile when their Kconfig dependencies are enabled.  Use the G45 PIO field
+names, interrupt/base constants and 64 KiB internal SRAM.  Also restore the
+uncached DDR alias expected by the MACB descriptor code and make the pin-mux
+writes effective assignments rather than comma expressions.
+
+Run the MACB link monitor as a software timer.  Its callback takes the MDIO
+semaphore, which is invalid from hard-timer interrupt context and trips the
+current RT-Thread scheduler assertion after the first one-second period.
+
+---
+ bsp/at91/at91sam9g45/drivers/at91_i2c_gpio.c |  4 ++--
+ bsp/at91/at91sam9g45/drivers/board.c         |  1 +
+ bsp/at91/at91sam9g45/drivers/macb.c          | 26 +++++++++++++-------------
+ 3 files changed, 16 insertions(+), 15 deletions(-)
+
+diff --git a/bsp/at91/at91sam9g45/drivers/at91_i2c_gpio.c b/bsp/at91/at91sam9g45/drivers/at91_i2c_gpio.c
+--- a/bsp/at91/at91sam9g45/drivers/at91_i2c_gpio.c
++++ b/bsp/at91/at91sam9g45/drivers/at91_i2c_gpio.c
+@@ -16,9 +16,9 @@ static void at91_i2c_gpio_init()
+ {
+     AT91C_BASE_PMC->PMC_PCER  = 1 << AT91C_ID_PIOA; //enable PIOA clock
+-    AT91C_BASE_PIOA->PIO_PUER = (1 << 23);
++    AT91C_BASE_PIOA->PIO_PPUER = (1 << 23);
+     AT91C_BASE_PIOA->PIO_PER  = (1 << 23);
+     AT91C_BASE_PIOA->PIO_MDER = (1 << 23);
+-    AT91C_BASE_PIOA->PIO_PUER = (1 << 24);
++    AT91C_BASE_PIOA->PIO_PPUER = (1 << 24);
+     AT91C_BASE_PIOA->PIO_PER  = (1 << 24);
+     AT91C_BASE_PIOA->PIO_MDER = (1 << 24);
+ 
+diff --git a/bsp/at91/at91sam9g45/drivers/board.c b/bsp/at91/at91sam9g45/drivers/board.c
+--- a/bsp/at91/at91sam9g45/drivers/board.c
++++ b/bsp/at91/at91sam9g45/drivers/board.c
+@@ -59,6 +59,7 @@ static struct mem_desc at91_mem_desc[] = {  /* FIXME, hornby, to confirm MMU and
+     //{ 0x60000000,   BLOCK_END(0x60000000), 0x60000000, RW_NCNB }, /* 256M for FPGA */
+     //{ 0x70000000, 0x70000000+0x08000000-1, 0x70000000, RW_NCNB }, /* 128M for main DDR-SDRAM for print data */
+       { 0x00000000, SECTION_END(0x00000000), 0x70000000, RW_CB   }, /* isr */
+       { 0x70000000, 0x70000000+0x08000000-1, 0x70000000, RW_CB   }, /* 128M for main DDR-SDRAM for print data */
++      { 0xF0000000, 0xF0000000+0x08000000-1, 0x70000000, RW_NCNB }, /* uncached DDR alias for DMA descriptors */
+     //{ 0xFFF00000, SECTION_END(0xFFF00000), 0xFFF00000, RW_NCNB }, /* Internal Peripherals, 1MB */
+ };
+diff --git a/bsp/at91/at91sam9g45/drivers/macb.c b/bsp/at91/at91sam9g45/drivers/macb.c
+--- a/bsp/at91/at91sam9g45/drivers/macb.c
++++ b/bsp/at91/at91sam9g45/drivers/macb.c
+@@ -40,7 +40,7 @@ rt_inline unsigned long emac_virt_to_phys(unsigned long addr)
+ }
+ 
+ 
+-#define AT91SAM9260_SRAM0_VIRT_BASE (0x90000000)
++#define AT91SAM9G45_SRAM_VIRT_BASE AT91C_IRAM_MIN
+ 
+ #define MACB_TX_SRAM
+ 
+@@ -489,9 +489,9 @@ static rt_err_t rt_macb_init(rt_device_t dev)
+                   | MACB_BIT(HRESP)));
+ 
+     /* instal interrupt */
+-    rt_hw_interrupt_install(AT91SAM9260_ID_EMAC, rt_macb_isr,
++    rt_hw_interrupt_install(AT91C_ID_EMAC, rt_macb_isr,
+                             (void *)macb, "emac");
+-    rt_hw_interrupt_umask(AT91SAM9260_ID_EMAC);
++    rt_hw_interrupt_umask(AT91C_ID_EMAC);
+ 
+     rt_timer_init(&macb->timer, "link_timer",
+         macb_update_link,
+@@ -498,6 +498,6 @@ static rt_err_t rt_macb_init(rt_device_t dev)
+         (void *)macb,
+         RT_TICK_PER_SECOND,
+-        RT_TIMER_FLAG_PERIODIC);
++        RT_TIMER_FLAG_PERIODIC | RT_TIMER_FLAG_SOFT_TIMER);
+ 
+     rt_timer_start(&macb->timer);
+ 
+@@ -646,5 +646,5 @@ rt_err_t rt_macb_tx(rt_device_t dev, struct pbuf* p)
+     for (q = p; q != NULL; q = q->next)
+     {
+-        memcpy(bufptr, q->payload, q->len);
++        rt_memcpy(bufptr, q->payload, q->len);
+         bufptr += q->len;
+     }
+@@ -738,2 +738,2 @@ struct pbuf *rt_macb_rx(rt_device_t dev)
+-                memcpy((void *)p->payload, buffer, headlen);
+-                memcpy((void *)((unsigned int)p->payload + headlen),
++                rt_memcpy((void *)p->payload, buffer, headlen);
++                rt_memcpy((void *)((unsigned int)p->payload + headlen),
+@@ -745 +745 @@ struct pbuf *rt_macb_rx(rt_device_t dev)
+-                memcpy((void *)p->payload, buffer, p->len);
++                rt_memcpy((void *)p->payload, buffer, p->len);
+@@ -773,10 +773,10 @@ void macb_gpio_init()
+ {
+     /* Pins used for MII and RMII */
+-    AT91C_BASE_PIOA->PIO_PDR, (1 << 19)|(1 << 17)|(1 << 14)|(1 << 15)|(1 << 18)|(1 << 16)|(1 << 12)|(1 << 13)|(1 << 21)|(1 << 20);
+-    AT91C_BASE_PIOA->PIO_ASR, (1 << 19)|(1 << 17)|(1 << 14)|(1 << 15)|(1 << 18)|(1 << 16)|(1 << 12)|(1 << 13)|(1 << 21)|(1 << 20);
++    AT91C_BASE_PIOA->PIO_PDR = (1 << 19)|(1 << 17)|(1 << 14)|(1 << 15)|(1 << 18)|(1 << 16)|(1 << 12)|(1 << 13)|(1 << 21)|(1 << 20);
++    AT91C_BASE_PIOA->PIO_ASR = (1 << 19)|(1 << 17)|(1 << 14)|(1 << 15)|(1 << 18)|(1 << 16)|(1 << 12)|(1 << 13)|(1 << 21)|(1 << 20);
+ 
+-#ifndef GONFIG_RMII
+-    AT91C_BASE_PIOA->PIO_PDR, (1 << 22)|(1 << 23)|(1 << 24)|(1 << 25)|(1 << 26)|(1 << 27)|(1 << 28)|(1 << 29);
+-    AT91C_BASE_PIOA->PIO_ASR, (1 << 22)|(1 << 23)|(1 << 24)|(1 << 25)|(1 << 26)|(1 << 27)|(1 << 28)|(1 << 29);
++#ifndef CONFIG_RMII
++    AT91C_BASE_PIOA->PIO_PDR = (1 << 22)|(1 << 23)|(1 << 24)|(1 << 25)|(1 << 26)|(1 << 27)|(1 << 28)|(1 << 29);
++    AT91C_BASE_PIOA->PIO_ASR = (1 << 22)|(1 << 23)|(1 << 24)|(1 << 25)|(1 << 26)|(1 << 27)|(1 << 28)|(1 << 29);
+ #endif
+ }
+@@ -784,8 +784,8 @@ rt_err_t macb_initialize()
+     rt_uint32_t ncfgr;
+ 
+ #if defined(MACB_TX_SRAM)
+-    macb->tx_ring_dma = AT91SAM9260_SRAM0_BASE;
+-    macb->tx_ring = (struct macb_dma_desc *)AT91SAM9260_SRAM0_VIRT_BASE;
++    macb->tx_ring_dma = AT91C_IRAM_MIN;
++    macb->tx_ring = (struct macb_dma_desc *)AT91SAM9G45_SRAM_VIRT_BASE;
+     macb->tx_buffer = (char *) macb->tx_ring + TX_RING_BYTES;
+     macb->tx_buffer_dma = macb->tx_ring_dma + TX_RING_BYTES;
+ #else
+@@ -814,7 +814,7 @@ rt_err_t macb_initialize()
+ 
+     macb->tx_pending = DEF_TX_RING_PENDING;
+ 
+-    macb->regs = AT91SAM9260_BASE_EMAC;
++    macb->regs = (rt_uint32_t)AT91C_BASE_EMACB;
+     macb->phy_addr = 0x00;
+ 
+     /*

@@ -1,0 +1,58 @@
+From: QEMU AT91 test suite <qemu-devel@nongnu.org>
+Subject: [PATCH] bsp: at91sam9g45: expose DBGU and USART configuration
+
+The SAM9G45 serial driver is conditional on RT_USING_DBGU and
+RT_USING_UART0..3, but this BSP does not define the corresponding Kconfig
+symbols. Its default configuration nevertheless names "dbgu" as the console.
+The result is a polled early console with no registered input device: the
+shell prints a prompt but cannot receive commands.
+
+Add the missing switches and enable DBGU by default. Leave the four general
+purpose USARTs disabled in the baseline profile.
+
+---
+ bsp/at91/at91sam9g45/.config |  5 +++++
+ bsp/at91/at91sam9g45/Kconfig | 20 ++++++++++++++++++++
+ 2 files changed, 25 insertions(+)
+
+diff --git a/bsp/at91/at91sam9g45/Kconfig b/bsp/at91/at91sam9g45/Kconfig
+--- a/bsp/at91/at91sam9g45/Kconfig
++++ b/bsp/at91/at91sam9g45/Kconfig
+@@ -22,4 +22,24 @@ config SOC_AT91SAM9G45
+     select RT_USING_USER_MAIN
+     default y
+ 
++config RT_USING_DBGU
++    bool "Use DBGU serial console"
++    default y
++
++config RT_USING_UART0
++    bool "Use USART0"
++    default n
++
++config RT_USING_UART1
++    bool "Use USART1"
++    default n
++
++config RT_USING_UART2
++    bool "Use USART2"
++    default n
++
++config RT_USING_UART3
++    bool "Use USART3"
++    default n
++
+ source "$(BSP_DIR)/drivers/Kconfig"
+diff --git a/bsp/at91/at91sam9g45/.config b/bsp/at91/at91sam9g45/.config
+--- a/bsp/at91/at91sam9g45/.config
++++ b/bsp/at91/at91sam9g45/.config
+@@ -1415,6 +1415,11 @@ CONFIG_SOC_AT91SAM9G45=y
+ #
+ # Hardware Drivers Config
+ #
++CONFIG_RT_USING_DBGU=y
++# CONFIG_RT_USING_UART0 is not set
++# CONFIG_RT_USING_UART1 is not set
++# CONFIG_RT_USING_UART2 is not set
++# CONFIG_RT_USING_UART3 is not set
+ # end of Hardware Drivers Config

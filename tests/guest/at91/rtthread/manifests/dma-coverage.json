@@ -1,0 +1,501 @@
+{
+  "schema": "qemu.at91.g45.dma-coverage",
+  "schema_version": 1,
+  "updated": "2026-07-23",
+  "scope": "AT91SAM9G45 and SAM9M10-G45-EK",
+  "purpose": "Track every DMA-capable engine and route independently; a passing memory copy is not DMA completion.",
+  "sources": [
+    {
+      "id": "sam9g45-datasheet",
+      "path": ".localdir/Atmel-6438-32-bit-ARM926-Embedded-Microprocessor-SAM9G45_Datasheet.pdf",
+      "role": "silicon contract"
+    },
+    {
+      "id": "rtthread-v5.2.2-g45-bsp",
+      "path": "bsp/at91/at91sam9g45",
+      "sha256_container": "4449e87c59a7337a803625ad0f047ef8f934ad81e4c7c669adabd1289cf9813e",
+      "role": "primary executable RTOS test target; exact built-in G45 BSP with tracked fixes and test overlay"
+    },
+    {
+      "id": "rtthread-v4.1.1-header",
+      "path": "bsp/at91/at91sam9g45/platform/at91sam9g45.h",
+      "sha256_container": "c4af708ca5e30937ceaa0c5435bd363dba883dc2c5ba81362ecd112f2e862184",
+      "role": "archival vendor-derived register inventory; confirm ambiguous routes against datasheet"
+    },
+    {
+      "id": "linux-g45-dtsi",
+      "path": "arch/arm/boot/dts/microchip/at91sam9g45.dtsi",
+      "role": "mainline consumer wiring"
+    },
+    {
+      "id": "qemu-machine",
+      "path": "hw/arm/sam9m10g45ek.c",
+      "role": "current emulated wiring"
+    }
+  ],
+  "status_values": {
+    "implemented-tested": "Model path has a deterministic data and state test.",
+    "implemented-untested": "Model path exists but lacks the required oracle test.",
+    "partial-expected-fail": "Only part of the hardware contract exists; retain a named expected failure.",
+    "missing-expected-fail": "Hardware path is absent; retain a named expected failure.",
+    "inventory-pending": "Do not assign a route until the primary datasheet table is transcribed and reviewed.",
+    "not-applicable": "The named path is not present on this IP revision."
+  },
+  "central_hdmac": {
+    "base": "0xffffec00",
+    "irq": 21,
+    "channels": 8,
+    "hardware_request_ids": 16,
+    "qemu_model": "hw/dma/at91_dmac.c",
+    "qemu_summary": "Eight channels; DMAC_EN gating, reset EMPTY/CFG state, asynchronous transfers, 8/16/32-bit width conversion (including the 11b WORD alias), increment/decrement/fixed and SPIP/DPIP Picture-in-Picture addressing, suspend/resume, SREQ/CREQ/LAST software handshakes, linked-list live-state loading, selective source/destination reload, stop-on-DONE and CTRLA DONE writeback, AHB error status, and migration of partial FIFO/request/PiP/pending-IRQ state. Arbitration, replay, cyclic or malformed descriptor graphs, beat-accurate hardware pacing and general slave-flow control remain incomplete.",
+    "core_paths": [
+      {
+        "id": "hdmac.mem2mem",
+        "direction": "memory-to-memory",
+        "request_id": null,
+        "width_bytes": [1, 2, 4],
+        "burst_beats": [1, 4, 8, 16, 32, 64, 128, 256],
+        "current_qemu": "Exact width/address conversion works, but chunks are ignored and a complete buffer runs in one bottom half.",
+        "evidence": "RT-Thread d1.mem2mem passes 52,296 byte/canary checks over 24 width/address/chunk vectors; d1.channels passes 1,027 checks over all eight channels; d1.word-width-alias independently proves 11b is a four-byte transfer; focused qtests cover global enable, both WORD encodings and HSMCI routes/migration.",
+        "rtthread_test": "d1.mem2mem",
+        "linux_test": "dmatest",
+        "status": "partial-expected-fail"
+      },
+      {
+        "id": "hdmac.linked-list",
+        "direction": "all",
+        "request_id": null,
+        "descriptor_words": ["source", "destination", "control_a", "control_b", "next"],
+        "current_qemu": "Walks a five-word list up to 1024 entries, masks link interface bits, loads live channel context, honors source/destination descriptor-update-disable controls, implements stop-on-DONE and writes back zero BTSIZE plus DONE. Replay, cycles, malformed-chain policy and partial residue remain incomplete.",
+        "evidence": "RT-Thread d1.linked-list, d1.stop-on-done and d1.partial-descriptor-reload pass 540 exact byte/live-register/writeback checks; focused qtests independently verify all three contracts.",
+        "rtthread_test": "d1.linked-list, d1.stop-on-done and d1.partial-descriptor-reload",
+        "linux_test": "at_hdmac companion module",
+        "status": "partial-expected-fail"
+      },
+      {
+        "id": "hdmac.picture-in-picture",
+        "direction": "all",
+        "registers": ["SPIP", "DPIP", "CTRLB.SRC_PIP", "CTRLB.DST_PIP"],
+        "current_qemu": "Maintains independent 10-bit source and destination transfer counters and replaces the ordinary address step with the programmed 16-bit hole at each boundary. Registers and partial row counters migrate.",
+        "evidence": "RT-Thread d1.picture-in-picture passes 141 register, data, hole, guard and completion checks. Focused qtests independently prove asymmetric source/destination holes and migration after one of four software-paced transfers, when both row counters are nonzero.",
+        "rtthread_test": "d1.picture-in-picture",
+        "linux_test": "dmaengine_interleaved_template companion test",
+        "status": "implemented-tested"
+      },
+      {
+        "id": "hdmac.software-requests",
+        "registers": ["SREQ", "CREQ", "LAST"],
+        "current_qemu": "Single and chunk requests pace source and destination software handshakes, honor SCSIZE/DCSIZE, update live residue/addresses and clear accepted request/LAST bits. Peripheral-flow-controller LAST terminates the buffer. Software-paced partial FIFO/request/suspend state is migrated.",
+        "evidence": "RT-Thread d1.software-requests (27 checks), d1.software-last (13) and d1.mixed-software-requests (139) pass; qtests cover request granularity, both destination/source arrival orders, requests queued before enable, LAST and a suspended partial-width request across migration.",
+        "rtthread_test": "d1.software-requests, d1.software-last and d1.mixed-software-requests",
+        "linux_test": "register-level companion test",
+        "status": "implemented-tested"
+      },
+      {
+        "id": "hdmac.error-path",
+        "events": ["source bus error", "destination bus error", "descriptor fetch error"],
+        "current_qemu": "Address-space read/write and descriptor fetch/writeback failures stop the channel, preserve partial live state and set the channel ERR bit. Read-only destination, alignment/peripheral abort, descriptor-writeback failure and all residue permutations remain to test.",
+        "evidence": "RT-Thread d1.bus-error passes 140 checks for an unmapped source, exact halt state, no false BTC/data write and channel reuse. Focused qtests additionally prove descriptor-fetch and destination errors plus retained source-byte residue.",
+        "rtthread_test": "d1.bus-error",
+        "linux_test": "register-level companion test",
+        "status": "partial-expected-fail"
+      },
+      {
+        "id": "hdmac.suspend-resume",
+        "registers": ["CHER.SUSP", "CHDR.RES", "CHSR.SUSP", "CHSR.EMPTY"],
+        "current_qemu": "Suspension freezes an enabled channel before transfer, RES restores it, disable discards FIFO state, and the state migrates.",
+        "evidence": "RT-Thread d1.suspend-resume passes 10 state/data checks; qtests cover enable-plus-suspend and a suspended partial FIFO with queued CREQ across migration.",
+        "rtthread_test": "d1.suspend-resume",
+        "linux_test": "register-level companion test",
+        "status": "implemented-tested"
+      },
+      {
+        "id": "hdmac.interrupt-state",
+        "registers": ["EBCIER", "EBCIDR", "EBCIMR", "EBCISR"],
+        "current_qemu": "BTC/CBTC/ERR status is masked into the level IRQ; late enable and disable take effect immediately, EBCISR read clears status, and post-load reconstructs a pending output level.",
+        "evidence": "RT-Thread d1.irq and d1.irq-mask pass 143 checks; focused qtests prove late enable/disable/read-clear and a pending enabled IRQ across migration.",
+        "rtthread_test": "d1.irq and d1.irq-mask",
+        "linux_test": "at_hdmac completion/error interrupt companion test",
+        "status": "implemented-tested"
+      }
+    ],
+    "request_routes": [
+      {
+        "id": "hdmac.request0.hsmci0",
+        "peripheral": "HSMCI0",
+        "request_id": 0,
+        "directions": ["device-to-memory", "memory-to-device"],
+        "fifo_addresses": ["0xfff80030", "0xfff80034"],
+        "peripheral_width_bytes": 4,
+        "flow_controller": "DMA controller",
+        "linux_binding": "<&dma 1 AT91_DMA_CFG_PER_ID(0)>",
+        "qemu_connection": "AT91_HSMCI_DMA_REQUEST to at91-dmac peripheral-request[0]",
+        "qemu_behavior": "One level gates an entire descriptor; not one request per beat.",
+        "rtthread_test": "d4.hsmci0",
+        "linux_test": "atmel-mci read/write plus media hash",
+        "status": "partial-expected-fail"
+      },
+      {
+        "id": "hdmac.request13.hsmci1",
+        "peripheral": "HSMCI1",
+        "request_id": 13,
+        "directions": ["device-to-memory", "memory-to-device"],
+        "fifo_addresses": ["0xfffd0030", "0xfffd0034"],
+        "peripheral_width_bytes": 4,
+        "flow_controller": "DMA controller",
+        "linux_binding": "<&dma 1 AT91_DMA_CFG_PER_ID(13)>",
+        "qemu_connection": "AT91_HSMCI_DMA_REQUEST to at91-dmac peripheral-request[13]",
+        "qemu_behavior": "One level gates an entire descriptor; not one request per beat.",
+        "rtthread_test": "d4.hsmci1",
+        "linux_test": "atmel-mci read/write plus media hash",
+        "status": "partial-expected-fail"
+      },
+      {
+        "id": "hdmac.nand-memory-service",
+        "peripheral": "NAND CS3 aperture",
+        "request_id": null,
+        "directions": ["device-window-to-memory", "memory-to-device-window"],
+        "fifo_addresses": ["0x40000000-0x407fffff"],
+        "flow_controller": "software/memory transaction",
+        "linux_binding": "atmel NAND driver requests DMA_MEMCPY rather than a G45 hardware-request line",
+        "qemu_connection": "No request GPIO; address-space reads/writes reach at91_nand and TYPE_NAND.",
+        "rtthread_test": "d4.nand",
+        "linux_test": "nandtest, UBI/UBIFS hashes, PIO-versus-DMA comparison",
+        "status": "implemented-untested"
+      },
+      {
+        "id": "hdmac.request1-2.spi0",
+        "peripheral": "SPI0",
+        "request_ids": {"tx": 1, "rx": 2},
+        "directions": ["memory-to-device", "device-to-memory"],
+        "fifo_addresses": {"tx": "0xfffa400c", "rx": "0xfffa4008"},
+        "peripheral_width_bytes": [1, 2],
+        "qemu_connection": "None; board request mask exposes only IDs 0 and 13.",
+        "rtthread_test": "d2.spi0",
+        "linux_test": "spi-atmel DMA transfer and PIO comparison",
+        "status": "missing-expected-fail"
+      },
+      {
+        "id": "hdmac.request3-4.spi1",
+        "peripheral": "SPI1",
+        "request_ids": {"tx": 3, "rx": 4},
+        "directions": ["memory-to-device", "device-to-memory"],
+        "fifo_addresses": {"tx": "0xfffa800c", "rx": "0xfffa8008"},
+        "peripheral_width_bytes": [1, 2],
+        "qemu_connection": "None; board request mask exposes only IDs 0 and 13.",
+        "rtthread_test": "d2.spi1",
+        "linux_test": "spi-atmel DMA transfer and PIO comparison",
+        "status": "missing-expected-fail"
+      },
+      {
+        "id": "hdmac.request5-6.ssc0",
+        "peripheral": "SSC0",
+        "request_ids": {"tx": 5, "rx": 6},
+        "directions": ["memory-to-device", "device-to-memory"],
+        "fifo_addresses": {"tx": "0xfff9c024", "rx": "0xfff9c020"},
+        "peripheral_width_bytes": [1, 2, 4],
+        "qemu_connection": "None; board request mask exposes only IDs 0 and 13.",
+        "rtthread_test": "d2.ssc0",
+        "linux_test": "atmel-ssc/ASoC DMA stream and PIO comparison",
+        "status": "missing-expected-fail"
+      },
+      {
+        "id": "hdmac.request7-8.ssc1",
+        "peripheral": "SSC1",
+        "request_ids": {"tx": 7, "rx": 8},
+        "directions": ["memory-to-device", "device-to-memory"],
+        "fifo_addresses": {"tx": "0xfffa0024", "rx": "0xfffa0020"},
+        "peripheral_width_bytes": [1, 2, 4],
+        "qemu_connection": "None; board request mask exposes only IDs 0 and 13.",
+        "rtthread_test": "d2.ssc1",
+        "linux_test": "atmel-ssc/ASoC DMA stream and PIO comparison",
+        "status": "missing-expected-fail"
+      },
+      {
+        "id": "hdmac.request9-10.ac97c",
+        "peripheral": "AC97C channel A",
+        "request_ids": {"tx": 9, "rx": 10},
+        "directions": ["memory-to-device", "device-to-memory"],
+        "fifo_addresses": {"tx": "0xfffac024", "rx": "0xfffac020"},
+        "peripheral_width_bytes": [2, 4],
+        "qemu_connection": "None; board request mask exposes only IDs 0 and 13.",
+        "rtthread_test": "d2.ac97c",
+        "linux_test": "atmel-ac97c DMA playback/capture",
+        "status": "missing-expected-fail"
+      },
+      {
+        "id": "hdmac.requests11-12-14-15",
+        "request_ids": [11, 12, 14, 15],
+        "peripheral": null,
+        "datasheet_contract": "Unassigned in SAM9G45 Table 40-1.",
+        "qemu_connection": "None",
+        "status": "not-applicable"
+      }
+    ]
+  },
+  "pdc_engines": [
+    {
+      "id": "pdc.dbgu",
+      "peripheral": "DBGU",
+      "base": "0xffffef00",
+      "directions": ["rx", "tx"],
+      "qemu_model": "hw/char/at91_usart.c",
+      "current_qemu": "Current/next PDC buffers, level status, nonblocking backpressure retry and migration of pending THR/PDC output are modeled.",
+      "evidence": "at91-usart qtests cover one character, 65,535-byte PDC backpressure without loss and mid-backpressure migration.",
+      "rtthread_test": "d3.dbgu",
+      "linux_test": "atmel_serial PDC console and binary stream",
+      "status": "implemented-tested"
+    },
+    {
+      "id": "pdc.usart0-3",
+      "peripherals": ["USART0", "USART1", "USART2", "USART3"],
+      "bases": ["0xfff8c100", "0xfff90100", "0xfff94100", "0xfff98100"],
+      "directions": ["rx", "tx"],
+      "qemu_model": "hw/char/at91_usart.c",
+      "current_qemu": "Current/next buffers, level ENDRX/RXBUFF/ENDTX/TXBUFE and RX timeout are modeled; tiny cyclic and migration handoff tests remain.",
+      "rtthread_test": "d3.usart",
+      "linux_test": "atmel_serial PDC binary/cyclic stream",
+      "status": "implemented-untested"
+    },
+    {
+      "id": "pdc.ssc0-1",
+      "peripherals": ["SSC0", "SSC1"],
+      "bases": ["0xfff9c100", "0xfffa0100"],
+      "directions": ["rx", "tx"],
+      "qemu_model": "hw/ssi/at91_ssc.c",
+      "rtthread_test": "d3.ssc",
+      "linux_test": "atmel-ssc/ASoC deterministic samples",
+      "status": "implemented-untested"
+    },
+    {
+      "id": "pdc.ac97c",
+      "peripheral": "AC97C",
+      "base": "0xfffac100",
+      "directions": ["rx", "tx"],
+      "qemu_model": "hw/audio/at91_ac97.c",
+      "rtthread_test": "d3.ac97",
+      "linux_test": "atmel-ac97c deterministic playback/capture",
+      "status": "implemented-untested"
+    },
+    {
+      "id": "pdc.spi0-1",
+      "peripherals": ["SPI0", "SPI1"],
+      "bases": ["0xfffa4100", "0xfffa8100"],
+      "directions": ["rx", "tx"],
+      "qemu_model": "hw/ssi/at91_spi.c",
+      "current_qemu": "Model reports version 0x212 and intentionally offers PIO only; PDC offsets are absent.",
+      "rtthread_test": "d3.spi",
+      "linux_test": "spi-atmel PDC transfer with loopback or deterministic flash",
+      "status": "missing-expected-fail"
+    },
+    {
+      "id": "pdc.tsadcc",
+      "peripheral": "TSADCC",
+      "base": "0xfffb0100",
+      "directions": ["rx"],
+      "qemu_model": "hw/adc/at91_tsadcc.c",
+      "current_qemu": "Only PDC-idle status bits needed by Linux are synthesized; pointer/counter transfers are absent.",
+      "rtthread_test": "d3.tsadcc",
+      "linux_test": "at91_adc buffered conversion",
+      "status": "missing-expected-fail"
+    },
+    {
+      "id": "pdc.twi0-1",
+      "peripherals": ["TWI0", "TWI1"],
+      "bases": ["0xfff84100", "0xfff88100"],
+      "directions": ["rx", "tx"],
+      "qemu_model": "hw/i2c/at91_twi.c",
+      "current_qemu": "PIO register window ends at 0x100; generated G45 header exposes embedded PDC registers, but their exact G45 support/driver contract must be confirmed against the datasheet before implementation.",
+      "rtthread_test": "d3.twi",
+      "linux_test": "i2c-at91 long-message PIO/DMA comparison",
+      "status": "inventory-pending"
+    },
+    {
+      "id": "pdc.hsmci0-1",
+      "peripheral": "HSMCI IP version 0x300",
+      "current_qemu": "Uses central HDMAC routes 0 and 13. Legacy MCI PDC structure fields are not a valid G45 HSMCI test target.",
+      "status": "not-applicable"
+    }
+  ],
+  "descriptor_and_fetch_engines": [
+    {
+      "id": "ring.macb",
+      "engine": "MACB RX/TX descriptor rings",
+      "qemu_model": "hw/net/at91_macb.c",
+      "rtthread_test": "d5.macb",
+      "linux_test": "macb packet/pcap/descriptor stress",
+      "status": "implemented-untested"
+    },
+    {
+      "id": "ring.isi",
+      "engine": "ISI preview and codec frame-buffer descriptors",
+      "qemu_model": "hw/misc/at91_isi.c",
+      "rtthread_test": "d5.isi",
+      "linux_test": "atmel-isi deterministic frame capture",
+      "status": "implemented-untested"
+    },
+    {
+      "id": "ring.udphs",
+      "engine": "UDPHS endpoint DMA channels 1-6",
+      "qemu_model": "hw/usb/at91_udphs.c",
+      "rtthread_test": "d5.udphs",
+      "linux_test": "atmel_usba_udc gadget loopback",
+      "status": "implemented-untested"
+    },
+    {
+      "id": "fetch.lcdc",
+      "engine": "LCDC framebuffer scanout",
+      "qemu_model": "hw/display/at91_lcdc.c",
+      "current_qemu": "Reads DMABADDR1 for host redraw; next-frame, pacing, underrun and EOF semantics are incomplete.",
+      "rtthread_test": "d5.lcdc",
+      "linux_test": "framebuffer patterns plus QMP screendump hash",
+      "status": "partial-expected-fail"
+    },
+    {
+      "id": "schedule.ohci-ehci",
+      "engine": "Generic OHCI/EHCI host-controller schedules",
+      "qemu_models": ["hw/usb/hcd-ohci.c", "hw/usb/hcd-ehci.c"],
+      "rtthread_test": "d5.usb-host",
+      "linux_test": "generic QEMU USB qtests plus storage/interrupt migration stress",
+      "status": "implemented-untested"
+    }
+  ],
+  "guest_test_cases": [
+    {
+      "id": "d0.patterns",
+      "covers": ["walking-one", "address", "alternating", "seeded-prng", "CRC32", "source-preservation", "destination-canaries"],
+      "state": "implemented"
+    },
+    {
+      "id": "d0.boundaries",
+      "covers": ["lengths 0 through 1024 around powers of two", "source alignments 0-3", "destination alignments 0-3", "untouched destination bytes"],
+      "state": "implemented"
+    },
+    {
+      "id": "d0.canary",
+      "covers": ["pre-guard self-test", "post-guard self-test"],
+      "state": "implemented"
+    },
+    {
+      "id": "d0.prng",
+      "covers": ["fixed xorshift32 vector", "CRC32 check vector", "same-seed reproducibility", "different-seed divergence"],
+      "state": "implemented"
+    },
+    {
+      "id": "d0.barrier",
+      "covers": ["ARM926 CP15 drain-write-buffer barrier", "ordered uncached MMIO observation"],
+      "checks": 2,
+      "state": "implemented"
+    },
+    {
+      "id": "d0.cache-alias",
+      "covers": ["cached alias", "uncached alias", "clean", "invalidate", "negative omitted maintenance"],
+      "state": "planned"
+    },
+    {
+      "id": "d0.memory-placement",
+      "covers": ["DDR boundaries", "4 KiB", "64 KiB", "1 MiB", "internal SRAM", "TCM partitions"],
+      "state": "planned"
+    },
+    {
+      "id": "d1.contract",
+      "covers": ["global enable gate", "software reset", "CHSR EMPTY reset state", "CFG reset value", "GCFG write mask"],
+      "checks": 18,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.mem2mem",
+      "covers": ["8/16/32-bit source and destination widths", "increment/decrement/fixed addresses", "all chunk encodings", "deterministic bytes", "source preservation", "destination guards"],
+      "vectors": 24,
+      "checks": 52296,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.channels",
+      "covers": ["all eight channels concurrently", "independent descriptors", "simultaneous completion status", "byte and guard isolation"],
+      "checks": 1027,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.linked-list",
+      "covers": ["four descriptors", "live register updates", "descriptor CTRLA BTSIZE clear", "DONE writeback", "final DSCR zero", "BTC and CBTC"],
+      "checks": 263,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.suspend-resume",
+      "covers": ["enable plus suspend atomic write", "CHSR ENA/SUSP/EMPTY", "no transfer while frozen", "CHDR resume", "completion data and BTC"],
+      "checks": 10,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.software-requests",
+      "covers": ["H2SEL software source", "no transfer before request", "SREQ one transaction", "CREQ four-transaction chunk", "live source/destination address", "BTSIZE residue", "request auto-clear", "BTC"],
+      "checks": 27,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.software-last",
+      "covers": ["peripheral flow controller", "SLAST readback and auto-clear", "single plus final chunk", "early five-of-eight termination", "untouched tail", "BTC"],
+      "checks": 13,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.word-width-alias",
+      "covers": ["SRC_WIDTH 11b", "DST_WIDTH 11b", "four-byte address advance", "adjacent guard word", "BTC"],
+      "checks": 70,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.bus-error",
+      "covers": ["datasheet undefined source window", "ERR without BTC", "destination unchanged", "pointer and BTSIZE residue", "channel halt and EMPTY", "same-channel recovery"],
+      "checks": 140,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.stop-on-done",
+      "covers": ["CFG SOD", "pre-set descriptor DONE", "no data or status side effect while stopped", "same descriptor executes when SOD clears", "DONE and residue writeback"],
+      "checks": 138,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.partial-descriptor-reload",
+      "covers": ["source descriptor update disable", "destination descriptor update disable", "two simultaneous two-link channels", "preserved live address", "poison buffer guards", "writeback and events"],
+      "checks": 139,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.mixed-software-requests",
+      "covers": ["peripheral-to-peripheral flow", "request queued before global and channel enable", "source-before-destination", "destination-before-source", "no early transfer", "request auto-clear and BTC"],
+      "checks": 139,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.irq",
+      "covers": ["AIC source 21", "BTC mask", "status assertion", "EBCISR clear", "IRQ deassertion"],
+      "checks": 6,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.irq-mask",
+      "covers": ["completion while DMAC interrupt disabled", "AIC masking", "late EBCIER assertion", "EBCIDR deassertion with pending status", "re-enable and EBCISR read-clear"],
+      "checks": 137,
+      "state": "implemented"
+    },
+    {
+      "id": "core.scheduler",
+      "covers": ["1 kHz PIT tick", "two worker tasks", "ten-second context-switch run", "tick continuity across machine migration"],
+      "checks": 5,
+      "state": "implemented"
+    }
+  ],
+  "completion_gates": [
+    "Exact bytes and canaries, not completion IRQ alone",
+    "All eight HDMAC channels, modes, legal widths/chunks and descriptor forms",
+    "Every primary-datasheet request route transcribed and tested",
+    "Every PDC current/next-buffer state machine",
+    "Backpressure, residue, errors, reset and concurrency",
+    "Active migration at request, beat, handoff and completion boundaries",
+    "RT-Thread and Linux on QEMU, then the same vectors on physical G45"
+  ]
+}
