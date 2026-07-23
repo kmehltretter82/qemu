@@ -173,6 +173,31 @@ static void usart_update_irq(AT91UsartState *s)
 static gboolean usart_transmit_watch(void *do_not_use, GIOCondition cond,
                                      void *opaque);
 
+/*
+ * The PDC loads the next pointer/counter into the current registers as soon
+ * as the current counter is zero on an enabled channel - including when the
+ * next counter is programmed AFTER the current buffer already emptied.
+ * Without this an RX channel refuses further input and a TX channel never
+ * restarts until some other register write kicks it.
+ */
+static void usart_promote_rx(AT91UsartState *s)
+{
+    if (s->rxten && s->rcr == 0 && s->rncr > 0) {
+        s->rpr = s->rnpr;
+        s->rcr = s->rncr;
+        s->rnpr = s->rncr = 0;
+    }
+}
+
+static void usart_promote_tx(AT91UsartState *s)
+{
+    if (s->txten && s->tcr == 0 && s->tncr > 0) {
+        s->tpr = s->tnpr;
+        s->tcr = s->tncr;
+        s->tnpr = s->tncr = 0;
+    }
+}
+
 static void usart_schedule_transmit(AT91UsartState *s)
 {
     if (s->watch_tag) {
@@ -238,6 +263,7 @@ static void usart_transmit(AT91UsartState *s)
         s->tx_pending = false;
     }
 
+    usart_promote_tx(s);
     while (s->txten && s->tcr > 0) {
         size_t count = MIN((size_t)s->tcr, sizeof(buf));
 
@@ -253,11 +279,7 @@ static void usart_transmit(AT91UsartState *s)
             return;
         }
 
-        if (s->tcr == 0 && s->tncr > 0) {
-            s->tpr = s->tnpr;
-            s->tcr = s->tncr;
-            s->tnpr = s->tncr = 0;
-        }
+        usart_promote_tx(s);
     }
 
     usart_update_irq(s);
@@ -372,12 +394,24 @@ static void usart_write(void *opaque, hwaddr offset, uint64_t value,
         usart_transmit(s);
         break;
     case US_RNPR:  s->rnpr = value; break;
-    case US_RNCR:  s->rncr = value; usart_update_irq(s); break;
+    case US_RNCR:
+        s->rncr = value;
+        usart_promote_rx(s);
+        if (s->rxten) {
+            qemu_chr_fe_accept_input(&s->chr);
+        }
+        usart_update_irq(s);
+        break;
     case US_TNPR:  s->tnpr = value; break;
-    case US_TNCR:  s->tncr = value; usart_update_irq(s); break;
+    case US_TNCR:
+        s->tncr = value;
+        usart_transmit(s);
+        break;
     case US_PTCR:
         if (value & PTCR_RXTEN) {
             s->rxten = true;
+            usart_promote_rx(s);
+            qemu_chr_fe_accept_input(&s->chr);
         }
         if (value & PTCR_RXTDIS) {
             s->rxten = false;
@@ -427,17 +461,14 @@ static void usart_receive(void *opaque, const uint8_t *buf, int size)
 
     if (s->rxten) {
         /* PDC receive: DMA the bytes into the receive buffer in guest memory. */
+        usart_promote_rx(s);
         for (i = 0; i < size && s->rcr > 0; i++) {
             trace_at91_usart_rx(buf[i]);
             address_space_write(&address_space_memory, s->rpr,
                                 MEMTXATTRS_UNSPECIFIED, &buf[i], 1);
             s->rpr++;
             s->rcr--;
-            if (s->rcr == 0 && s->rncr > 0) {   /* chain to next buffer */
-                s->rpr = s->rnpr;
-                s->rcr = s->rncr;
-                s->rnpr = s->rncr = 0;
-            }
+            usart_promote_rx(s);    /* chain to the next buffer */
         }
         /* Flush a partial buffer after a short idle, like the RX time-out. */
         timer_mod(s->rx_timeout,
