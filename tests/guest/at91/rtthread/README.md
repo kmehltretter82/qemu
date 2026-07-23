@@ -186,8 +186,13 @@ transaction length mismatches have deterministic outcomes - a short
 descriptor stops at BTSIZE with BTC while the card transaction stays in
 progress until STOP, and a long descriptor waits with exact residue after
 XFRDONE until the driver disables the channel, with byte-exact reuse
-afterward. The model passes the
-unrelaxed guest suite and 45 focused qtests,
+afterward. The third D2 increment models the HSMCI DTOR data timeout:
+DTOCYC scaled by DTOMUL counts MCK cycles between two data accesses, an
+access restarts the counter, and expiry raises read-to-clear DTOE with the
+data phase ended - exactly the -ETIMEDOUT the atmel-mci driver reports for
+a stuck transfer. Both mismatch boundaries and a mid-countdown timeout
+migrate exactly. The model passes the
+unrelaxed guest suite and 47 focused DMAC qtests plus 9 HSMCI qtests,
 including migration with a byte
 held in the conversion FIFO and a queued request, with an enabled pending
 interrupt, in the middle of a PiP row, at an AUTO replay stalled boundary, and
@@ -220,13 +225,14 @@ oracle because the DMAC datasheet does not require it to produce an AHB error
 response. D2 now covers chunk-scoped hardware handshakes with independent
 source/destination pacing, live level sampling at CHER and on channel
 disable, HSMCI_DMA.DMAEN gating, sub-buffer channel interleave under both
-arbitration modes and descriptor-versus-transaction length mismatches with
-driver-shaped recovery. Still open in D2 are beat granularity inside a
-chunk, FIFO_CFG thresholds, card removal/timeout between blocks, migration
-at mismatch boundaries, and DMA request routes for peripherals beyond the
-two HSMCIs (SPI, SSC, AC97); D3 will exercise DBGU/USART, SSC and AC97 PDC
-current/next-buffer state machines. Later phases cover storage, rings,
-continuous fetch, cyclic streams, Linux companion tests, errors and soak.
+arbitration modes, descriptor-versus-transaction length mismatches with
+driver-shaped recovery and migration at those boundaries, and the DTOR
+data timeout with a migrated countdown. Still open in D2 are beat
+granularity inside a chunk, FIFO_CFG thresholds, physical card removal,
+and DMA request routes for peripherals beyond the two HSMCIs (SPI, SSC,
+AC97); D3 will exercise DBGU/USART, SSC and AC97 PDC current/next-buffer
+state machines. Later phases cover storage, rings, continuous fetch,
+cyclic streams, Linux companion tests, errors and soak.
 
 Run the same payload on a physical SAM9M10-G45-EK when available. A QEMU pass
 is not evidence that cache maintenance or ordering is correct on non-coherent

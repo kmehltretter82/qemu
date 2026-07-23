@@ -138,6 +138,8 @@ static const DmaRoute routes[] = {
       G35_SDRAM_BASE, 0 },
 };
 
+static void wait_for_migration_complete(QTestState *qts);
+
 static void ensure_vm_running(QTestState *qts)
 {
     QDict *response = qtest_qmp(qts, "{ 'execute': 'query-status' }");
@@ -682,6 +684,167 @@ static void test_dmac_subbuffer_arbitration_round_robin(void)
 static void test_dmac_subbuffer_arbitration_fixed(void)
 {
     run_subbuffer_arbitration_case(false);
+}
+
+/*
+ * Migrate while a too-long descriptor waits with exact residue after the
+ * card's XFRDONE.  The destination must show the same residue, and the
+ * driver-shaped CHDR recovery plus channel reuse must stay byte-exact.
+ */
+static void test_hsmci_mismatch_residue_migration(void)
+{
+    g_autofree char *image_path = NULL;
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    const uint64_t lli = G45_SDRAM_BASE + 0x3b000;
+    const uint64_t dst_addr = G45_SDRAM_BASE + 0x3c800;
+    uint8_t pattern[1024];
+    QTestState *src, *dst;
+    uint32_t expected;
+    int fd;
+    int i;
+
+    image_path = hsmci_create_pattern_image(pattern, sizeof(pattern));
+    fd = g_file_open_tmp("at91-dmac-residue-migration-XXXXXX",
+                         &state_path, NULL);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+
+    src = qtest_initf("-machine sam9m10g45ek -S "
+                      "-drive if=sd,index=0,format=raw,file=%s", image_path);
+    ensure_vm_running(src);
+    hsmci_select_sd_card(src);
+    qtest_memset(src, dst_addr, 0xcc, 1024);
+    hsmci_program_read_lli(src, lli, dst_addr, 256);
+    qtest_writel(src, G45_HSMCI0_BASE + HSMCI_DMA_REG, HSMCI_DMA_DMAEN);
+    qtest_writel(src, G45_HSMCI0_BASE + HSMCI_BLKR, (512u << 16) | 1);
+    hsmci_command(src, 17 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
+                  HSMCI_CMDR_START | HSMCI_CMDR_READ, 0);
+    for (i = 0; i < 8192; i++) {
+        if ((qtest_readl(src, G45_DMAC_BASE + DMAC_CH0_BASE + DMAC_CTRLA) &
+             0xffff) == 128) {
+            break;
+        }
+        qtest_clock_step(src, 1);
+    }
+    qtest_clock_step(src, 10000);
+    g_assert_cmphex(qtest_readl(src, G45_HSMCI0_BASE + HSMCI_SR) &
+                    HSMCI_SR_XFRDONE, ==, HSMCI_SR_XFRDONE);
+
+    uri = g_strdup_printf("file:%s", state_path);
+    qtest_qmp_assert_success(src,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    wait_for_migration_complete(src);
+    qtest_quit(src);
+
+    dst = qtest_initf("-machine sam9m10g45ek -S -incoming %s "
+                      "-drive if=sd,index=0,format=raw,file=%s",
+                      uri, image_path);
+    wait_for_migration_complete(dst);
+    g_assert_cmphex(qtest_readl(dst, G45_DMAC_BASE + DMAC_CHSR) &
+                    DMAC_ENA(0), ==, DMAC_ENA(0));
+    g_assert_cmphex(qtest_readl(dst, G45_DMAC_BASE + DMAC_CH0_BASE +
+                                DMAC_CTRLA) & 0xffff, ==, 128);
+    for (i = 0; i < 512; i += 4) {
+        memcpy(&expected, &pattern[i], sizeof(expected));
+        g_assert_cmphex(qtest_readl(dst, dst_addr + i), ==, expected);
+    }
+    g_assert_cmphex(qtest_readl(dst, dst_addr + 512), ==, 0xcccccccc);
+
+    ensure_vm_running(dst);
+    qtest_writel(dst, G45_DMAC_BASE + DMAC_CHDR, DMAC_ENA(0));
+    qtest_clock_step(dst, 1);
+    qtest_memset(dst, dst_addr, 0xcc, 512);
+    hsmci_program_read_lli(dst, lli, dst_addr, 128);
+    qtest_writel(dst, G45_HSMCI0_BASE + HSMCI_BLKR, (512u << 16) | 1);
+    hsmci_command(dst, 17 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
+                  HSMCI_CMDR_START | HSMCI_CMDR_READ, 512);
+    wait_for_dmac_channel_disabled(dst, G45_DMAC_BASE, 0);
+    for (i = 0; i < 512; i += 4) {
+        memcpy(&expected, &pattern[512 + i], sizeof(expected));
+        g_assert_cmphex(qtest_readl(dst, dst_addr + i), ==, expected);
+    }
+    qtest_quit(dst);
+    unlink(state_path);
+    unlink(image_path);
+}
+
+/*
+ * Migrate after a too-short descriptor completed with BTC while the card
+ * transaction is still in progress.  The destination sees the in-progress
+ * card, STOP ends it, and a fresh transfer stays byte-exact.
+ */
+static void test_hsmci_mismatch_card_in_progress_migration(void)
+{
+    g_autofree char *image_path = NULL;
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    const uint64_t lli = G45_SDRAM_BASE + 0x3d000;
+    const uint64_t dst_addr = G45_SDRAM_BASE + 0x3e800;
+    uint8_t pattern[1024];
+    QTestState *src, *dst;
+    uint32_t expected;
+    uint32_t status;
+    int fd;
+    int i;
+
+    image_path = hsmci_create_pattern_image(pattern, sizeof(pattern));
+    fd = g_file_open_tmp("at91-dmac-inprogress-migration-XXXXXX",
+                         &state_path, NULL);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+
+    src = qtest_initf("-machine sam9m10g45ek -S "
+                      "-drive if=sd,index=0,format=raw,file=%s", image_path);
+    ensure_vm_running(src);
+    hsmci_select_sd_card(src);
+    qtest_memset(src, dst_addr, 0xcc, 512);
+    hsmci_program_read_lli(src, lli, dst_addr, 128);
+    qtest_writel(src, G45_HSMCI0_BASE + HSMCI_DMA_REG, HSMCI_DMA_DMAEN);
+    qtest_writel(src, G45_HSMCI0_BASE + HSMCI_BLKR, (512u << 16) | 8);
+    hsmci_command(src, 18 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
+                  HSMCI_CMDR_START | HSMCI_CMDR_READ | HSMCI_CMDR_MULTI, 0);
+    wait_for_dmac_channel_disabled(src, G45_DMAC_BASE, 0);
+    g_assert_cmphex(qtest_readl(src, G45_HSMCI0_BASE + HSMCI_SR) &
+                    HSMCI_SR_DTIP, ==, HSMCI_SR_DTIP);
+
+    uri = g_strdup_printf("file:%s", state_path);
+    qtest_qmp_assert_success(src,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    wait_for_migration_complete(src);
+    qtest_quit(src);
+
+    dst = qtest_initf("-machine sam9m10g45ek -S -incoming %s "
+                      "-drive if=sd,index=0,format=raw,file=%s",
+                      uri, image_path);
+    wait_for_migration_complete(dst);
+    g_assert_cmphex(qtest_readl(dst, G45_HSMCI0_BASE + HSMCI_SR) &
+                    HSMCI_SR_DTIP, ==, HSMCI_SR_DTIP);
+    for (i = 0; i < 512; i += 4) {
+        memcpy(&expected, &pattern[i], sizeof(expected));
+        g_assert_cmphex(qtest_readl(dst, dst_addr + i), ==, expected);
+    }
+
+    ensure_vm_running(dst);
+    hsmci_command(dst, 12 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_STOP, 0);
+    status = qtest_readl(dst, G45_HSMCI0_BASE + HSMCI_SR);
+    g_assert_cmphex(status & (HSMCI_SR_DTIP | HSMCI_SR_NOTBUSY |
+                              HSMCI_SR_XFRDONE), ==,
+                    HSMCI_SR_NOTBUSY | HSMCI_SR_XFRDONE);
+
+    qtest_memset(dst, dst_addr, 0xcc, 512);
+    hsmci_program_read_lli(dst, lli, dst_addr, 128);
+    qtest_writel(dst, G45_HSMCI0_BASE + HSMCI_BLKR, (512u << 16) | 1);
+    hsmci_command(dst, 17 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
+                  HSMCI_CMDR_START | HSMCI_CMDR_READ, 512);
+    wait_for_dmac_channel_disabled(dst, G45_DMAC_BASE, 0);
+    for (i = 0; i < 512; i += 4) {
+        memcpy(&expected, &pattern[512 + i], sizeof(expected));
+        g_assert_cmphex(qtest_readl(dst, dst_addr + i), ==, expected);
+    }
+    qtest_quit(dst);
+    unlink(state_path);
+    unlink(image_path);
 }
 
 static void test_hsmci_dma_block_refill_reentrancy(void)
@@ -3037,6 +3200,10 @@ int main(int argc, char **argv)
                    test_dmac_subbuffer_arbitration_round_robin);
     qtest_add_func("/at91-dmac/g45/subbuffer-arbitration-fixed",
                    test_dmac_subbuffer_arbitration_fixed);
+    qtest_add_func("/at91-dmac/g45/hsmci0/mismatch-residue-migration",
+                   test_hsmci_mismatch_residue_migration);
+    qtest_add_func("/at91-dmac/g45/hsmci0/mismatch-card-in-progress-migration",
+                   test_hsmci_mismatch_card_in_progress_migration);
     qtest_add_func("/at91-dmac/g45/hsmci0/block-refill-reentrancy",
                    test_hsmci_dma_block_refill_reentrancy);
     qtest_add_data_func("/at91-dmac/g35/hsmci0/dmac0-request-0", &routes[2],
