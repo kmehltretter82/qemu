@@ -47,6 +47,7 @@ struct FDCtrlSysBusClass {
 
     bool use_strict_io;
     bool use_riscpc_pseudo_dma;
+    bool use_riscpc_superio_config;
     bool use_82077_command_set;
     unsigned int reg_shift;
 };
@@ -62,13 +63,112 @@ struct FDCtrlSysBus {
     qemu_irq irq;
     qemu_irq dma_irq;
     unsigned int reg_shift;
+    uint8_t riscpc_config_key;
+    uint8_t riscpc_config_index;
+    uint8_t riscpc_config_mode;
+    uint8_t riscpc_config_regs[16];
 };
+
+/*
+ * The SMC FDC37C665 SuperIO shares its configuration index and data ports
+ * with floppy status registers A and B.  Two writes of 0x55 enter
+ * configuration mode and 0xaa leaves it.
+ */
+#define RISCPC_SUPERIO_INDEX_REG       0
+#define RISCPC_SUPERIO_DATA_REG        1
+#define RISCPC_SUPERIO_ENTER_KEY       0x55
+#define RISCPC_SUPERIO_EXIT_KEY        0xaa
+#define RISCPC_SUPERIO_CONFIG_REGS     16
+#define RISCPC_SUPERIO_CR0             0
+#define RISCPC_SUPERIO_CR2             2
+#define RISCPC_SUPERIO_CRD             13
+#define RISCPC_SUPERIO_CRE             14
+#define RISCPC_SUPERIO_ID_665          0x65
+
+#define RISCPC_SUPERIO_CR0_IDE_ENABLE  0x01
+#define RISCPC_SUPERIO_CR0_FDC_ENABLE  0x10
+#define RISCPC_SUPERIO_CR2_UART1_ENABLE 0x04
+
+static void fdctrl_riscpc_superio_reset(FDCtrlSysBus *sys)
+{
+    memset(sys->riscpc_config_regs, 0, sizeof(sys->riscpc_config_regs));
+    sys->riscpc_config_regs[RISCPC_SUPERIO_CR0] =
+        RISCPC_SUPERIO_CR0_IDE_ENABLE | RISCPC_SUPERIO_CR0_FDC_ENABLE;
+    sys->riscpc_config_regs[RISCPC_SUPERIO_CR2] =
+        RISCPC_SUPERIO_CR2_UART1_ENABLE;
+    sys->riscpc_config_regs[RISCPC_SUPERIO_CRD] = RISCPC_SUPERIO_ID_665;
+    sys->riscpc_config_regs[RISCPC_SUPERIO_CRE] = 1;
+    sys->riscpc_config_key = 0;
+    sys->riscpc_config_index = 0;
+    sys->riscpc_config_mode = 0;
+}
+
+static bool fdctrl_riscpc_superio_read(FDCtrlSysBus *sys, uint32_t reg,
+                                       uint32_t *value)
+{
+    FDCtrlSysBusClass *sbdc = SYSBUS_FDC_GET_CLASS(sys);
+
+    if (!sbdc->use_riscpc_superio_config || !sys->riscpc_config_mode ||
+        reg > RISCPC_SUPERIO_DATA_REG) {
+        return false;
+    }
+
+    if (reg == RISCPC_SUPERIO_DATA_REG &&
+        sys->riscpc_config_index < RISCPC_SUPERIO_CONFIG_REGS) {
+        *value = sys->riscpc_config_regs[sys->riscpc_config_index];
+    } else {
+        *value = 0xff;
+    }
+    return true;
+}
+
+static bool fdctrl_riscpc_superio_write(FDCtrlSysBus *sys, uint32_t reg,
+                                        uint32_t value)
+{
+    FDCtrlSysBusClass *sbdc = SYSBUS_FDC_GET_CLASS(sys);
+
+    if (!sbdc->use_riscpc_superio_config) {
+        return false;
+    }
+
+    if (reg == RISCPC_SUPERIO_INDEX_REG) {
+        if (sys->riscpc_config_mode) {
+            if (value == RISCPC_SUPERIO_EXIT_KEY) {
+                sys->riscpc_config_mode = 0;
+                sys->riscpc_config_key = 0;
+            } else {
+                sys->riscpc_config_index = value;
+            }
+        } else if (value == RISCPC_SUPERIO_ENTER_KEY) {
+            if (++sys->riscpc_config_key == 2) {
+                sys->riscpc_config_mode = 1;
+                sys->riscpc_config_key = 0;
+            }
+        } else {
+            sys->riscpc_config_key = 0;
+        }
+        return true;
+    }
+
+    if (!sys->riscpc_config_mode) {
+        sys->riscpc_config_key = 0;
+        return false;
+    }
+
+    /* The board's configured device map is currently read-only. */
+    return reg == RISCPC_SUPERIO_DATA_REG;
+}
 
 static uint64_t fdctrl_read_mem(void *opaque, hwaddr reg, unsigned size)
 {
     FDCtrlSysBus *sys = opaque;
+    uint32_t value;
 
-    return fdctrl_read(&sys->state, (uint32_t)(reg >> sys->reg_shift));
+    reg >>= sys->reg_shift;
+    if (fdctrl_riscpc_superio_read(sys, reg, &value)) {
+        return value;
+    }
+    return fdctrl_read(&sys->state, reg);
 }
 
 static void fdctrl_write_mem(void *opaque, hwaddr reg,
@@ -76,8 +176,10 @@ static void fdctrl_write_mem(void *opaque, hwaddr reg,
 {
     FDCtrlSysBus *sys = opaque;
 
-    fdctrl_write(&sys->state, (uint32_t)(reg >> sys->reg_shift),
-                 value);
+    reg >>= sys->reg_shift;
+    if (!fdctrl_riscpc_superio_write(sys, reg, value)) {
+        fdctrl_write(&sys->state, reg, value);
+    }
 }
 
 static const MemoryRegionOps fdctrl_mem_ops = {
@@ -99,9 +201,13 @@ static const MemoryRegionOps fdctrl_mem_strict_ops = {
 static void fdctrl_external_reset_sysbus(DeviceState *d)
 {
     FDCtrlSysBus *sys = SYSBUS_FDC(d);
+    FDCtrlSysBusClass *sbdc = SYSBUS_FDC_GET_CLASS(sys);
     FDCtrl *s = &sys->state;
 
     fdctrl_reset(s, 0);
+    if (sbdc->use_riscpc_superio_config) {
+        fdctrl_riscpc_superio_reset(sys);
+    }
 }
 
 static void fdctrl_handle_tc(void *opaque, int irq, int level)
@@ -277,6 +383,9 @@ static void sysbus_fdc_common_instance_init(Object *obj)
     } else {
         sysbus_init_irq(sbd, &fdctrl->irq);
     }
+    if (sbdc->use_riscpc_superio_config) {
+        fdctrl_riscpc_superio_reset(sys);
+    }
     qdev_init_gpio_in(dev, fdctrl_handle_tc, 1);
 }
 
@@ -288,6 +397,29 @@ static void sysbus_fdc_realize(DeviceState *dev, Error **errp)
     fdctrl_realize_common(dev, fdctrl, errp);
 }
 
+static bool vmstate_riscpc_superio_needed(void *opaque)
+{
+    FDCtrlSysBus *sys = opaque;
+    FDCtrlSysBusClass *sbdc = SYSBUS_FDC_GET_CLASS(sys);
+
+    return sbdc->use_riscpc_superio_config;
+}
+
+static const VMStateDescription vmstate_riscpc_superio = {
+    .name = "fdc/riscpc-superio",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = vmstate_riscpc_superio_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(riscpc_config_key, FDCtrlSysBus),
+        VMSTATE_UINT8(riscpc_config_index, FDCtrlSysBus),
+        VMSTATE_UINT8(riscpc_config_mode, FDCtrlSysBus),
+        VMSTATE_UINT8_ARRAY(riscpc_config_regs, FDCtrlSysBus,
+                            RISCPC_SUPERIO_CONFIG_REGS),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_sysbus_fdc = {
     .name = "fdc",
     .version_id = 2,
@@ -295,6 +427,10 @@ static const VMStateDescription vmstate_sysbus_fdc = {
     .fields = (const VMStateField[]) {
         VMSTATE_STRUCT(state, FDCtrlSysBus, 0, vmstate_fdc, FDCtrl),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_riscpc_superio,
+        NULL
     }
 };
 
@@ -351,6 +487,7 @@ static void riscpc_fdc_class_init(ObjectClass *klass, const void *data)
 
     sbdc->use_strict_io = true;
     sbdc->use_riscpc_pseudo_dma = true;
+    sbdc->use_riscpc_superio_config = true;
     /* The RiscPC SuperIO uses an SMC 82077AA-compatible FDC core. */
     sbdc->use_82077_command_set = true;
     sbdc->reg_shift = 2;
