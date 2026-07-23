@@ -25,10 +25,11 @@ from typing import Any
 PROTOCOL_VERSION = 1
 DEFAULT_SEED = 0x45D0A11C
 PROMPT_RE = re.compile(rb"msh />")
-DEFAULT_SUITES = ("d0", "d1", "core.scheduler")
+DEFAULT_SUITES = ("d0", "d1", "d2", "core.scheduler")
 EXPECTED_PASSES = {
     "d0": 5,
     "d1": 20,
+    "d2": 1,
     "core.scheduler": 1,
 }
 

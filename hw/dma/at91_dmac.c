@@ -296,6 +296,37 @@ static bool dmac_channel_uses_hardware_request(AT91DmacState *s, int n,
             dmac_channel_request_id(s, n, false) == request);
 }
 
+static bool dmac_request_armed(AT91DmacState *s, int request)
+{
+    int n;
+
+    for (n = 0; n < DMAC_N_CHANNELS; n++) {
+        if ((s->chsr & (1u << n)) && !s->ch[n].cyclic &&
+            dmac_channel_uses_hardware_request(s, n, request)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * When a channel stops - completion, error or software disable - any banked
+ * request edge whose only armed consumer it was is forgotten.  Real hardware
+ * keeps no request history for an unarmed channel; a later CHER samples the
+ * live level instead.
+ */
+static void dmac_release_unarmed_requests(AT91DmacState *s)
+{
+    uint64_t live = s->request_pending & s->request_mask;
+    int request;
+
+    for (request = 0; live; request++, live >>= 1) {
+        if ((live & 1) && !dmac_request_armed(s, request)) {
+            s->request_pending &= ~(UINT64_C(1) << request);
+        }
+    }
+}
+
 /*
  * A channel that is being armed sees the current request-line levels, not a
  * history of edges.  Convert every asserted, modelled request this channel
@@ -367,12 +398,7 @@ static void dmac_request(void *opaque, int request, int level)
      * before the peripheral has data.  A subsequent CHER samples the live
      * level instead.
      */
-    for (n = 0; n < DMAC_N_CHANNELS; n++) {
-        if ((s->chsr & (1u << n)) && !s->ch[n].cyclic &&
-            dmac_channel_uses_hardware_request(s, n, request)) {
-            armed = true;
-        }
-    }
+    armed = dmac_request_armed(s, request);
     if (!armed) {
         return;
     }
@@ -549,6 +575,7 @@ static void dmac_finish_channel(AT91DmacState *s, int n, bool chained)
     s->ch[n].cyclic = false;
     s->ch[n].replay_started = false;
     dmac_clear_software_channel(s, n);
+    dmac_release_unarmed_requests(s);
     trace_at91_dmac_complete(n);
     dmac_update_irq(s);
 }
@@ -800,6 +827,25 @@ static void dmac_run_channel(AT91DmacState *s, int n)
         if (destination_paced) {
             destination_limit = c->dst_request_remaining;
         }
+
+        /*
+         * Sub-buffer arbitration: while another runnable channel is
+         * pending, an unpaced side moves at most one SCSIZE/DCSIZE chunk
+         * per grant and the BH loop re-arbitrates between grants, so
+         * concurrent channels interleave per GCFG.ARB_CFG.  An uncontended
+         * channel keeps the fast whole-buffer path.
+         */
+        if ((s->pending & ~s->idle_pending) & ~channel_bit) {
+            if (!source_paced) {
+                source_limit =
+                    dmac_chunk_beats(DMAC_CTRLA_SCSIZE(c->ctrla));
+            }
+            if (!destination_paced) {
+                destination_limit =
+                    dmac_chunk_beats(DMAC_CTRLA_DCSIZE(c->ctrla));
+            }
+        }
+
         if (s->chsr & (channel_bit << 8)) {
             source_limit = 0;
         }
@@ -942,7 +988,9 @@ static int dmac_pick_channel(AT91DmacState *s, uint32_t pending)
 static void dmac_bh(void *opaque)
 {
     AT91DmacState *s = opaque;
-    uint32_t pending;
+    uint32_t idle_at_entry;
+    uint32_t runnable;
+    int spin_guard = 0;
 
     /*
      * A peripheral MMIO access can synchronously poll its block backend.  That
@@ -954,15 +1002,28 @@ static void dmac_bh(void *opaque)
         return;
     }
     s->bh_running = true;
-    pending = s->pending;
+    idle_at_entry = s->idle_pending;
 
-    s->pending &= ~pending;
-    s->idle_pending &= ~pending;
-    while (pending) {
-        int n = dmac_pick_channel(s, pending);
+    /*
+     * Grant one runnable channel at a time and re-arbitrate after every
+     * grant, so channels that yield mid-buffer interleave according to
+     * GCFG.ARB_CFG.  Idle-yielded work that was already queued when this
+     * dispatch began runs now; an idle yield made DURING this dispatch (an
+     * AUTO channel deliberately giving the vCPU time between uninterrupted
+     * buffers) waits for the tail rescheduler.  The spin guard bounds one
+     * dispatch; leftover work is rescheduled, keeping the main loop live
+     * even in unforeseen ready-without-progress states.
+     */
+    while ((runnable = s->pending &
+                       ~(s->idle_pending & ~idle_at_entry)) != 0 &&
+           ++spin_guard < 100000) {
+        int n = dmac_pick_channel(s, runnable);
+        uint32_t channel_bit = 1u << n;
 
-        pending &= ~(1u << n);
-        if (!(s->chsr & (1u << n)) || !dmac_channel_ready(s, n)) {
+        s->pending &= ~channel_bit;
+        s->idle_pending &= ~channel_bit;
+        idle_at_entry &= ~channel_bit;
+        if (!(s->chsr & channel_bit) || !dmac_channel_ready(s, n)) {
             continue;
         }
         if (s->gcfg & DMAC_GCFG_ARB_CFG) {
@@ -972,7 +1033,7 @@ static void dmac_bh(void *opaque)
     }
     s->bh_running = false;
 
-    /* A nested invocation consumed the scheduled flag but left work queued. */
+    /* Work queued by a nested dispatch, an idle yield or the spin guard. */
     if (s->pending) {
         if (s->pending & ~s->idle_pending) {
             qemu_bh_schedule(s->bh);
@@ -1254,6 +1315,7 @@ static void dmac_write(void *opaque, hwaddr offset, uint64_t value,
                 s->ch[n].cyclic = false;
                 s->ch[n].replay_started = false;
                 dmac_clear_software_channel(s, n);
+                dmac_release_unarmed_requests(s);
             } else if (val & (channel_bit << 8)) {
                 s->chsr &= ~(channel_bit << 8);
                 if (s->chsr & channel_bit) {

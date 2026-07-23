@@ -42,6 +42,7 @@
 #define HSMCI_IMR    0x4C
 #define HSMCI_DMA    0x50
 #define HSMCI_CFG    0x54
+#define HSMCI_DMA_DMAEN (1u << 8)
 #define HSMCI_WPMR   0xE4
 #define HSMCI_WPSR   0xE8
 #define HSMCI_VERSION 0xFC
@@ -197,8 +198,17 @@ static bool hsmci_has_data(AT91HsmciState *s)
 
 static void hsmci_update_dma_request(AT91HsmciState *s)
 {
+    /*
+     * DMAEN gates the whole hardware-handshake interface; the driver
+     * programs it before a DMA transfer and clears it for CPU (PIO)
+     * transfers, so a PIO transfer never toggles the request line.
+     * CHKSIZE and OFFSET are retained configuration only: card data is
+     * synchronously available here, so the chunk-availability threshold
+     * has no observable pacing effect.
+     */
     qemu_set_irq(s->dma_request,
-                 s->enabled && !s->dma_request_rearm &&
+                 s->enabled && (s->dma & HSMCI_DMA_DMAEN) &&
+                 !s->dma_request_rearm &&
                  hsmci_has_data(s) &&
                  (s->sr & (HSMCI_SR_RXRDY | HSMCI_SR_TXRDY)));
 }
@@ -213,7 +223,8 @@ static void hsmci_dma_request_bh(void *opaque)
 
 static void hsmci_rearm_dma_request(AT91HsmciState *s)
 {
-    if (!s->enabled || !hsmci_has_data(s) ||
+    if (!s->enabled || !(s->dma & HSMCI_DMA_DMAEN) ||
+        !hsmci_has_data(s) ||
         !(s->sr & (HSMCI_SR_RXRDY | HSMCI_SR_TXRDY))) {
         return;
     }
@@ -751,7 +762,10 @@ static void hsmci_write(void *opaque, hwaddr offset, uint64_t value,
     case HSMCI_TDR:  hsmci_write_data(s, val); break;
     case HSMCI_IER:  s->imr |= val; hsmci_update_irq(s); break;
     case HSMCI_IDR:  s->imr &= ~val; hsmci_update_irq(s); break;
-    case HSMCI_DMA:  s->dma = val; break;
+    case HSMCI_DMA:
+        s->dma = val;
+        hsmci_update_dma_request(s);
+        break;
     case HSMCI_CFG:  s->cfg = val; break;
     case HSMCI_WPMR:
         hsmci_write_wpmr(s, val);
