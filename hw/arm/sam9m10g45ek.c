@@ -533,8 +533,12 @@ static void sam9m10g45ek_init(MachineState *machine)
     /* DMA controller. */
     dmac = qdev_new(TYPE_AT91_DMAC);
     object_property_add_child(OBJECT(machine), "dmac", OBJECT(dmac));
+    /* Modelled Table 40-1 requests: HSMCI0=0, SPI0 TX/RX=1/2, SPI1
+     * TX/RX=3/4, HSMCI1=13. */
     qdev_prop_set_uint64(dmac, AT91_DMAC_REQUEST_MASK,
-                         (UINT64_C(1) << 0) | (UINT64_C(1) << 13));
+                         (UINT64_C(1) << 0) | (UINT64_C(1) << 1) |
+                         (UINT64_C(1) << 2) | (UINT64_C(1) << 3) |
+                         (UINT64_C(1) << 4) | (UINT64_C(1) << 13));
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dmac), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(dmac), 0, SAM9G45_DMAC_BASE);
     sysbus_connect_irq(SYS_BUS_DEVICE(dmac), 0,
@@ -857,9 +861,15 @@ static void sam9m10g45ek_init(MachineState *machine)
      * (index 0 is the NAND).  The stock DTB's flash node is atmel,at45; use a
      * jedec,spi-nor node to exercise it (mtd_dataflash won't drive an m25p80). */
     {
-        static const struct { hwaddr base; int irq; } spi[] = {
-            { SAM9G45_SPI0_BASE, SAM9G45_IRQ_SPI0 },
-            { SAM9G45_SPI1_BASE, SAM9G45_IRQ_SPI1 },
+        /* Table 40-1 hardware handshake ids: SPI0 TX/RX = 1/2, SPI1 = 3/4. */
+        static const struct {
+            hwaddr base;
+            int irq;
+            int tx_request;
+            int rx_request;
+        } spi[] = {
+            { SAM9G45_SPI0_BASE, SAM9G45_IRQ_SPI0, 1, 2 },
+            { SAM9G45_SPI1_BASE, SAM9G45_IRQ_SPI1, 3, 4 },
         };
         DeviceState *spi0 = NULL;
         int i;
@@ -870,6 +880,12 @@ static void sam9m10g45ek_init(MachineState *machine)
             sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, spi[i].base);
             sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
                                qdev_get_gpio_in(aic, spi[i].irq));
+            qdev_connect_gpio_out_named(dev, AT91_SPI_TX_DMA_REQUEST, 0,
+                qdev_get_gpio_in_named(dmac, AT91_DMAC_REQUEST_GPIO,
+                                       spi[i].tx_request));
+            qdev_connect_gpio_out_named(dev, AT91_SPI_RX_DMA_REQUEST, 0,
+                qdev_get_gpio_in_named(dmac, AT91_DMAC_REQUEST_GPIO,
+                                       spi[i].rx_request));
             if (i == 0) {
                 spi0 = dev;
             }

@@ -622,6 +622,110 @@ static void test_hsmci_descriptor_longer_than_transaction(void)
     unlink(image_path);
 }
 
+#define G45_SPI0_BASE          0xfffa4000
+#define G45_SPI1_BASE          0xfffa8000
+#define SPI_CR                 0x00
+#define SPI_MR                 0x04
+#define SPI_RDR                0x08
+#define SPI_TDR                0x0c
+#define SPI_CR_SPIEN           (1u << 0)
+#define SPI_CR_LASTXFER        (1u << 24)
+#define SPI_MR_MSTR            (1u << 0)
+#define SPI_MR_MODFDIS         (1u << 4)
+#define SPI_MR_PCS_NPCS0       (0xeu << 16)
+
+/*
+ * Drive one full-duplex SPI transaction entirely through the Table 40-1
+ * hardware request routes: a TX channel paces command bytes into TDR and
+ * an RX channel drains every produced RDR word.  Reading the board flash's
+ * JEDEC id proves data ordering end to end on SPI0 (requests 1/2); SPI1
+ * (requests 3/4) has no slave, so its read data is idle zeros.
+ */
+static void run_spi_dma_roundtrip(uint64_t spi_base, unsigned tx_request,
+                                  unsigned rx_request, bool byte_width,
+                                  const uint32_t *expected_tail,
+                                  int expected_words)
+{
+    QTestState *qts = qtest_init("-machine sam9m10g45ek -S");
+    const uint64_t tx_buf = G45_SDRAM_BASE + 0x40000;
+    const uint64_t rx_buf = G45_SDRAM_BASE + 0x40100;
+    const uint64_t tx_base = G45_DMAC_BASE + DMAC_CH0_BASE +
+                             4 * DMAC_CH_STRIDE;
+    const uint64_t rx_base = G45_DMAC_BASE + DMAC_CH0_BASE +
+                             5 * DMAC_CH_STRIDE;
+    const uint32_t widths = byte_width ? 0 :
+        DMAC_CTRLA_SRC_WIDTH_4 | DMAC_CTRLA_DST_WIDTH_4;
+    static const uint32_t command[4] = { 0x9f, 0, 0, 0 };
+    int step = byte_width ? 1 : 4;
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        if (byte_width) {
+            qtest_writeb(qts, tx_buf + i, command[i]);
+            qtest_writeb(qts, rx_buf + i, 0xcc);
+        } else {
+            qtest_writel(qts, tx_buf + 4 * i, command[i]);
+            qtest_writel(qts, rx_buf + 4 * i, 0xdeadbeef);
+        }
+    }
+    qtest_writel(qts, spi_base + SPI_MR,
+                 SPI_MR_MSTR | SPI_MR_MODFDIS | SPI_MR_PCS_NPCS0);
+    qtest_writel(qts, spi_base + SPI_CR, SPI_CR_SPIEN);
+
+    qtest_writel(qts, tx_base + DMAC_SADDR, tx_buf);
+    qtest_writel(qts, tx_base + DMAC_DADDR, spi_base + SPI_TDR);
+    qtest_writel(qts, tx_base + DMAC_CTRLA, DMAC_CTRLA_BTSIZE(4) | widths);
+    qtest_writel(qts, tx_base + DMAC_CTRLB, DMAC_CTRLB_FC_MEM2PER |
+                 DMAC_CTRLB_DST_FIXED | DMAC_CTRLB_SRC_DSCR_DIS |
+                 DMAC_CTRLB_DST_DSCR_DIS);
+    qtest_writel(qts, tx_base + DMAC_CFG,
+                 dmac_cfg_dst_per(tx_request) | DMAC_CFG_DST_H2SEL);
+
+    qtest_writel(qts, rx_base + DMAC_SADDR, spi_base + SPI_RDR);
+    qtest_writel(qts, rx_base + DMAC_DADDR, rx_buf);
+    qtest_writel(qts, rx_base + DMAC_CTRLA, DMAC_CTRLA_BTSIZE(4) | widths);
+    qtest_writel(qts, rx_base + DMAC_CTRLB, DMAC_CTRLB_FC_PER2MEM |
+                 DMAC_CTRLB_SRC_FIXED | DMAC_CTRLB_SRC_DSCR_DIS |
+                 DMAC_CTRLB_DST_DSCR_DIS);
+    qtest_writel(qts, rx_base + DMAC_CFG,
+                 dmac_cfg_src_per(rx_request) | DMAC_CFG_SRC_H2SEL);
+
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_EN, 1);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_CHER,
+                 DMAC_ENA(4) | DMAC_ENA(5));
+    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 4);
+    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 5);
+    qtest_writel(qts, spi_base + SPI_CR, SPI_CR_LASTXFER);
+
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR) &
+                    (DMAC_BTC(4) | DMAC_BTC(5) | DMAC_ERR(4) | DMAC_ERR(5)),
+                    ==, DMAC_BTC(4) | DMAC_BTC(5));
+    /* Word-wide RDR reads carry the live PCS field in bits 16..19. */
+    for (i = 4 - expected_words; i < 4; i++) {
+        uint32_t got = byte_width ?
+            qtest_readb(qts, rx_buf + i * step) :
+            (qtest_readl(qts, rx_buf + i * step) & 0xffff);
+
+        g_assert_cmphex(got, ==, expected_tail[i - (4 - expected_words)]);
+    }
+    qtest_quit(qts);
+}
+
+/* Byte widths mirror the Linux spi-atmel DMA programming exactly. */
+static void test_spi0_jedec_via_dma(void)
+{
+    static const uint32_t jedec[3] = { 0x20, 0xba, 0x16 };
+
+    run_spi_dma_roundtrip(G45_SPI0_BASE, 1, 2, true, jedec, 3);
+}
+
+static void test_spi1_route_smoke(void)
+{
+    static const uint32_t idle[4] = { 0, 0, 0, 0 };
+
+    run_spi_dma_roundtrip(G45_SPI1_BASE, 3, 4, false, idle, 4);
+}
+
 /*
  * Two concurrently pending unpaced channels write one shared fixed word.
  * Modified round-robin interleaves at chunk granularity, so the short
@@ -3200,6 +3304,10 @@ int main(int argc, char **argv)
                    test_dmac_subbuffer_arbitration_round_robin);
     qtest_add_func("/at91-dmac/g45/subbuffer-arbitration-fixed",
                    test_dmac_subbuffer_arbitration_fixed);
+    qtest_add_func("/at91-dmac/g45/spi0/jedec-via-dma",
+                   test_spi0_jedec_via_dma);
+    qtest_add_func("/at91-dmac/g45/spi1/route-smoke",
+                   test_spi1_route_smoke);
     qtest_add_func("/at91-dmac/g45/hsmci0/mismatch-residue-migration",
                    test_hsmci_mismatch_residue_migration);
     qtest_add_func("/at91-dmac/g45/hsmci0/mismatch-card-in-progress-migration",
