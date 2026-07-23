@@ -229,3 +229,4 @@ apple_gfx_iosfc_raise_irq(uint32_t vector) "vector=0x%x"
 
 # at91_lcdc.c
 at91_lcdc_mode(int w, int h, int bpp) "LCDC scanout %dx%d %dbpp"
+at91_lcdc_eof(uint32_t isr, uint32_t imr) "LCDC EOF isr=0x%08x imr=0x%08x"

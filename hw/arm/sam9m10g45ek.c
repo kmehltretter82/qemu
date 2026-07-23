@@ -517,6 +517,8 @@ static void sam9m10g45ek_init(MachineState *machine)
     /* LCD controller. */
     {
         DeviceState *lcdc = qdev_new(TYPE_AT91_LCDC);
+
+        qdev_connect_clock_in(lcdc, "mck", mck);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(lcdc), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(lcdc), 0, SAM9G45_LCDC_BASE);
         sysbus_connect_irq(SYS_BUS_DEVICE(lcdc), 0,
