@@ -192,13 +192,28 @@ static void at91_ssc_rearm_tx_request(AT91SscState *s)
     qemu_bh_schedule(s->tx_request_bh);
 }
 
+/*
+ * The PDC loads the next pointer/counter into the current registers as
+ * soon as the current counter is zero on an enabled channel - including
+ * when the next counter is programmed AFTER the current buffer emptied.
+ */
 static void at91_ssc_promote_rx(AT91SscState *s)
 {
-    if (!s->rcr && s->rncr) {
+    if (s->rxten && !s->rcr && s->rncr) {
         s->rpr = s->rnpr;
         s->rcr = s->rncr;
         s->rnpr = 0;
         s->rncr = 0;
+    }
+}
+
+static void at91_ssc_promote_tx(AT91SscState *s)
+{
+    if (s->txten && !s->tcr && s->tncr) {
+        s->tpr = s->tnpr;
+        s->tcr = s->tncr;
+        s->tnpr = 0;
+        s->tncr = 0;
     }
 }
 
@@ -239,6 +254,7 @@ static void at91_ssc_pdc_tx(AT91SscState *s)
 {
     unsigned bytes = at91_ssc_word_bytes(s->tfmr);
 
+    at91_ssc_promote_tx(s);
     while (s->txten && s->tx_enabled && s->tcr) {
         uint8_t buffer[4];
         uint32_t value;
@@ -255,12 +271,7 @@ static void at91_ssc_pdc_tx(AT91SscState *s)
 
         if (!s->tcr) {
             s->endtx_event = true;
-            if (s->tncr) {
-                s->tpr = s->tnpr;
-                s->tcr = s->tncr;
-                s->tnpr = 0;
-                s->tncr = 0;
-            }
+            at91_ssc_promote_tx(s);
         }
     }
     at91_ssc_update_irq(s);
@@ -469,6 +480,7 @@ static void at91_ssc_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case PDC_RNCR:
         s->rncr = val;
+        at91_ssc_promote_rx(s);
         at91_ssc_update_irq(s);
         break;
     case PDC_TNPR:
@@ -476,11 +488,12 @@ static void at91_ssc_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case PDC_TNCR:
         s->tncr = val;
-        at91_ssc_update_irq(s);
+        at91_ssc_pdc_tx(s);
         break;
     case PDC_PTCR:
         if (val & PDC_RXTEN) {
             s->rxten = true;
+            at91_ssc_promote_rx(s);
         }
         if (val & PDC_RXTDIS) {
             s->rxten = false;

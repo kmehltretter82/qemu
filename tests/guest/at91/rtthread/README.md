@@ -257,10 +257,20 @@ the current registers the moment the current counter is zero on an
 enabled channel, but the old model promoted only inside active transfer
 loops - an RX ring whose buffers both filled before the driver refilled
 went permanently deaf, and a late-queued TX buffer never started. With
-the earlier backpressure defect the USART total is three, and the
-campaign count is 24 local QEMU behaviors. D3 continues with the SSC
-and AC97 PDC engines; later phases cover storage, rings, continuous
-fetch, cyclic streams, Linux companion tests, errors and soak.
+the earlier backpressure defect the USART total is three. The same
+matrix applied to the SSC's embedded PDC found the identical class
+there (defects five and six of the phase): a late-queued TX next
+buffer never restarted the drained channel, and a late-programmed RX
+next buffer was not promoted into the current registers, so
+ENDRX/RCR misreported until the next word arrived. Five
+at91-ssc-test qtests now pin the SSC PDC through receiver loopback -
+ring roundtrip with chained handoffs on both sides, both late-next
+promotions, RHR fallback with overrun keeping the newest word,
+TXTDIS gating with unchanged ring state, and migration mid-ring with
+a pending next buffer. The campaign count is 26 local QEMU
+behaviors. D3 continues with an AC97 PDC determinism strategy; later
+phases cover storage, rings, continuous fetch, cyclic streams, Linux
+companion tests, errors and soak.
 
 Run the same payload on a physical SAM9M10-G45-EK when available. A QEMU pass
 is not evidence that cache maintenance or ordering is correct on non-coherent
