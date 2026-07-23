@@ -47,7 +47,7 @@
     "channels": 8,
     "hardware_request_ids": 16,
     "qemu_model": "hw/dma/at91_dmac.c",
-    "qemu_summary": "Eight channels; DMAC_EN gating, reset EMPTY/CFG state, asynchronous transfers, 8/16/32-bit width conversion (including the 11b WORD alias), increment/decrement/fixed and SPIP/DPIP Picture-in-Picture addressing, suspend/resume, SREQ/CREQ/LAST software handshakes, linked-list live-state loading, selective source/destination reload, stop-on-DONE and CTRLA DONE writeback, AHB error status, and migration of partial FIFO/request/PiP/pending-IRQ state. Arbitration, replay, cyclic or malformed descriptor graphs, beat-accurate hardware pacing and general slave-flow control remain incomplete.",
+    "qemu_summary": "Eight channels; DMAC_EN gating, reset EMPTY/CFG state, asynchronous transfers, full 16-bit BTSIZE, 8/16/32-bit width conversion (including the 11b WORD alias), increment/decrement/fixed and SPIP/DPIP Picture-in-Picture addressing, suspend/resume, SREQ/CREQ/LAST software handshakes, fixed/round-robin one-transaction arbitration with a migrated cursor, non-descriptor AUTO replay/contiguous buffers with REP reload and STALLED/KEEPON, descriptor-coupled AUTO rows 7/8 with initial BTSIZE replay, linked-list live-state loading and mutation across page boundaries, selective source/destination reload, Row-1 disabled-next termination, any-cycle graph parking, stop-on-DONE and CTRLA DONE writeback, AHB error status with partial residue plus read-only/peripheral/writeback aborts, and migration of partial FIFO/request/PiP/replay/pending-IRQ state. Hardware handshakes are chunk-scoped and level-sampled: one request edge grants one SCSIZE/DCSIZE chunk, source and destination requests pace their sides independently through the conversion FIFO, and arming a channel samples the live request level rather than banked edges (the at_hdmac-shaped acmd13-completion qtest holds the Linux SD regression). Sub-buffer source/destination arbitration, beat granularity inside a chunk, FIFO_CFG thresholds and general slave-flow control remain incomplete.",
     "core_paths": [
       {
         "id": "hdmac.mem2mem",
@@ -55,10 +55,20 @@
         "request_id": null,
         "width_bytes": [1, 2, 4],
         "burst_beats": [1, 4, 8, 16, 32, 64, 128, 256],
-        "current_qemu": "Exact width/address conversion works, but chunks are ignored and a complete buffer runs in one bottom half.",
-        "evidence": "RT-Thread d1.mem2mem passes 52,296 byte/canary checks over 24 width/address/chunk vectors; d1.channels passes 1,027 checks over all eight channels; d1.word-width-alias independently proves 11b is a four-byte transfer; focused qtests cover global enable, both WORD encodings and HSMCI routes/migration.",
-        "rtthread_test": "d1.mem2mem",
+        "current_qemu": "Exact width/address conversion, the 0xffff-transfer maximum, flat DDR boundary crossing and non-destructive increment/decrement overlap traversal work. Unsafe overlap order is unspecified. Chunks are ignored and a complete buffer runs in one bottom half.",
+        "evidence": "RT-Thread d1.mem2mem passes 52,296 byte/canary checks over 24 width/address/chunk vectors; d1.channels passes 1,027 checks over all eight channels; d1.word-width-alias independently proves 11b is a four-byte transfer; d1.boundary-overlap passes 285,040 checks over a 0xffff-word transfer crossing 4 KiB/64 KiB/1 MiB, exact DDR-end completion and two 8 KiB safe overlaps. Focused qtests independently cover those paths plus global enable, both WORD encodings and HSMCI routes/migration.",
+        "rtthread_test": "d1.mem2mem, d1.channels, d1.word-width-alias and d1.boundary-overlap",
         "linux_test": "dmatest",
+        "status": "partial-expected-fail"
+      },
+      {
+        "id": "hdmac.arbitration",
+        "direction": "all",
+        "registers": ["GCFG.ARB_CFG"],
+        "current_qemu": "Fixed mode grants the lowest pending channel. Modified round-robin mode starts after the previous granted channel and migrates that cursor. This is exact for simultaneously pending one-transaction buffers; whole buffers still run in one bottom half, so independent source/destination and burst-boundary arbitration remain incomplete.",
+        "evidence": "RT-Thread d1.arbitration passes 139 register, ordering, overwrite, event and guard checks. A focused qtest seeds channel 0, migrates, proves channel 1 then channel 0 round-robin ordering, switches to fixed priority and proves channel 0 then channel 1 ordering.",
+        "rtthread_test": "d1.arbitration",
+        "linux_test": "register-level companion test",
         "status": "partial-expected-fail"
       },
       {
@@ -66,11 +76,11 @@
         "direction": "all",
         "request_id": null,
         "descriptor_words": ["source", "destination", "control_a", "control_b", "next"],
-        "current_qemu": "Walks a five-word list up to 1024 entries, masks link interface bits, loads live channel context, honors source/destination descriptor-update-disable controls, implements stop-on-DONE and writes back zero BTSIZE plus DONE. Replay, cycles, malformed-chain policy and partial residue remain incomplete.",
-        "evidence": "RT-Thread d1.linked-list, d1.stop-on-done and d1.partial-descriptor-reload pass 540 exact byte/live-register/writeback checks; focused qtests independently verify all three contracts.",
-        "rtthread_test": "d1.linked-list, d1.stop-on-done and d1.partial-descriptor-reload",
+        "current_qemu": "Walks a five-word list up to 1024 entries, masks link interface bits, accepts descriptors straddling a page boundary, loads future descriptors from live memory, honors source/destination descriptor-update-disable controls, implements descriptor-coupled AUTO rows 7/8, terminates Row 1 without following a stale next pointer, parks any reachable cyclic graph, implements stop-on-DONE and writes back zero BTSIZE plus DONE.",
+        "evidence": "RT-Thread d1.linked-list, d1.stop-on-done, d1.partial-descriptor-reload, d1.descriptor-auto-boundary and d1.live-descriptor-update pass 850 exact byte/live-register/writeback checks. Focused qtests independently verify those contracts plus tagged cross-page links, Row-1 disabled-next termination and deterministic parking/reuse for self and non-head tail cycles.",
+        "rtthread_test": "d1.linked-list, d1.stop-on-done, d1.partial-descriptor-reload, d1.descriptor-auto-boundary and d1.live-descriptor-update",
         "linux_test": "at_hdmac companion module",
-        "status": "partial-expected-fail"
+        "status": "implemented-tested"
       },
       {
         "id": "hdmac.picture-in-picture",
@@ -83,22 +93,32 @@
         "status": "implemented-tested"
       },
       {
+        "id": "hdmac.auto-replay",
+        "direction": "all",
+        "registers": ["CTRLB.AUTO", "CFG.SRC_REP", "CFG.DST_REP", "CHSR.STALLED", "CHER.KEEPON"],
+        "current_qemu": "For non-descriptor buffers, AUTO reloads BTSIZE and optionally source/destination addresses, yields between uninterrupted buffers, stalls at an unmasked BTC boundary and resumes through KEEPON. For descriptor-coupled rows 7/8, it replays the initial BTSIZE while loading the other CTRLA fields and the table-selected source or destination address from each LLI. Replay base state and a live stalled boundary migrate.",
+        "evidence": "RT-Thread d1.auto-replay passes 141 reload, state, data, guard and event checks; d1.descriptor-auto-boundary adds 166 checks for both descriptor-coupled AUTO rows and poisoned descriptor BTSIZE/address fields. Focused qtests verify both rows and migrate the non-descriptor stalled boundary through final KEEPON completion.",
+        "rtthread_test": "d1.auto-replay and d1.descriptor-auto-boundary",
+        "linux_test": "register-level companion test",
+        "status": "implemented-tested"
+      },
+      {
         "id": "hdmac.software-requests",
         "registers": ["SREQ", "CREQ", "LAST"],
         "current_qemu": "Single and chunk requests pace source and destination software handshakes, honor SCSIZE/DCSIZE, update live residue/addresses and clear accepted request/LAST bits. Peripheral-flow-controller LAST terminates the buffer. Software-paced partial FIFO/request/suspend state is migrated.",
-        "evidence": "RT-Thread d1.software-requests (27 checks), d1.software-last (13) and d1.mixed-software-requests (139) pass; qtests cover request granularity, both destination/source arrival orders, requests queued before enable, LAST and a suspended partial-width request across migration.",
+        "evidence": "RT-Thread d1.software-requests (27 checks), d1.software-last (13) and d1.mixed-software-requests (141) pass; qtests cover request granularity, both destination/source arrival orders, requests queued before enable, LAST and a suspended partial-width request across migration.",
         "rtthread_test": "d1.software-requests, d1.software-last and d1.mixed-software-requests",
         "linux_test": "register-level companion test",
         "status": "implemented-tested"
       },
       {
         "id": "hdmac.error-path",
-        "events": ["source bus error", "destination bus error", "descriptor fetch error"],
-        "current_qemu": "Address-space read/write and descriptor fetch/writeback failures stop the channel, preserve partial live state and set the channel ERR bit. Read-only destination, alignment/peripheral abort, descriptor-writeback failure and all residue permutations remain to test.",
-        "evidence": "RT-Thread d1.bus-error passes 140 checks for an unmapped source, exact halt state, no false BTC/data write and channel reuse. Focused qtests additionally prove descriptor-fetch and destination errors plus retained source-byte residue.",
+        "events": ["source bus error", "destination bus error", "descriptor fetch error", "descriptor writeback error", "peripheral access abort"],
+        "current_qemu": "Address-space read/write and descriptor fetch/writeback failures stop the channel, preserve partial live state and set the channel ERR bit. Source and destination failures retain exact byte-level address/BTSIZE residue, a partial five-word descriptor fetch is atomic with respect to live channel state, and a completed buffer whose DONE writeback fails reports BTC plus ERR without false CBTC. Unaligned RAM is not classified as an expected error because the datasheet defines ERR through AHB read/write failures without requiring alignment aborts.",
+        "evidence": "RT-Thread d1.bus-error passes 150 checks for source and destination aborts, consumed-source-byte residue, atomic descriptor-fetch failure, no false BTC and channel reuse. Focused qtests additionally force source and destination failures after two successful bytes at DDR end, a rejected secure-pflash destination, byte reads and writes rejected by peripheral MMIO, and rejected descriptor DONE writeback; they prove exact data, address, BTSIZE and event residue without test-only model hooks.",
         "rtthread_test": "d1.bus-error",
         "linux_test": "register-level companion test",
-        "status": "partial-expected-fail"
+        "status": "implemented-tested"
       },
       {
         "id": "hdmac.suspend-resume",
@@ -130,7 +150,7 @@
         "flow_controller": "DMA controller",
         "linux_binding": "<&dma 1 AT91_DMA_CFG_PER_ID(0)>",
         "qemu_connection": "AT91_HSMCI_DMA_REQUEST to at91-dmac peripheral-request[0]",
-        "qemu_behavior": "One level gates an entire descriptor; not one request per beat.",
+        "qemu_behavior": "Per-word handshake: HSMCI drops and re-raises the request around every FIFO word, each edge grants one SCSIZE/DCSIZE chunk, and CHER samples the live level instead of banked edges. Beat granularity inside a chunk and mid-chunk deassertion are not yet modelled.",
         "rtthread_test": "d4.hsmci0",
         "linux_test": "atmel-mci read/write plus media hash",
         "status": "partial-expected-fail"
@@ -145,7 +165,7 @@
         "flow_controller": "DMA controller",
         "linux_binding": "<&dma 1 AT91_DMA_CFG_PER_ID(13)>",
         "qemu_connection": "AT91_HSMCI_DMA_REQUEST to at91-dmac peripheral-request[13]",
-        "qemu_behavior": "One level gates an entire descriptor; not one request per beat.",
+        "qemu_behavior": "Per-word handshake: HSMCI drops and re-raises the request around every FIFO word, each edge grants one SCSIZE/DCSIZE chunk, and CHER samples the live level instead of banked edges. Beat granularity inside a chunk and mid-chunk deassertion are not yet modelled.",
         "rtthread_test": "d4.hsmci1",
         "linux_test": "atmel-mci read/write plus media hash",
         "status": "partial-expected-fail"
@@ -346,9 +366,10 @@
       "id": "fetch.lcdc",
       "engine": "LCDC framebuffer scanout",
       "qemu_model": "hw/display/at91_lcdc.c",
-      "current_qemu": "Reads DMABADDR1 for host redraw; next-frame, pacing, underrun and EOF semantics are incomplete.",
+      "current_qemu": "Register-driven 1/2/4/8-bit indexed and 16/24/32-bit true-color scanout, RGB565 LUT, MCK-derived frame pacing, EOF status/IRQ and active-frame migration are implemented. Double-buffer/next-frame, dual-scan, 2D addressing, line/vsync and underrun/error semantics remain.",
       "rtthread_test": "d5.lcdc",
-      "linux_test": "framebuffer patterns plus QMP screendump hash",
+      "qtest": "at91-lcdc-test: exact indexed pixels/LUT, EOF masking/timing and active-frame migration",
+      "linux_test": "atmel_lcdfb probe plus fbcon, framebuffer patterns and QMP screendump hash",
       "status": "partial-expected-fail"
     },
     {
@@ -417,9 +438,33 @@
       "state": "implemented"
     },
     {
+      "id": "d1.arbitration",
+      "covers": ["GCFG fixed priority", "GCFG modified round-robin", "simultaneous one-transaction contention", "overlapping destination ordering", "BTC isolation", "buffer guards"],
+      "checks": 139,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.boundary-overlap",
+      "covers": ["0xffff source-transfer maximum", "4 KiB boundary", "64 KiB boundary", "1 MiB boundary", "exact 128 MiB DDR end", "safe incrementing overlap", "safe decrementing overlap", "live addresses", "BTSIZE residue", "BTC without ERR", "buffer guards"],
+      "checks": 285040,
+      "state": "implemented"
+    },
+    {
       "id": "d1.linked-list",
       "covers": ["four descriptors", "live register updates", "descriptor CTRLA BTSIZE clear", "DONE writeback", "final DSCR zero", "BTC and CBTC"],
       "checks": 263,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.descriptor-auto-boundary",
+      "covers": ["descriptor-coupled AUTO rows 7 and 8", "initial BTSIZE replay", "LLI high CTRLA controls", "poisoned descriptor address and BTSIZE fields", "tagged link across a 4 KiB page boundary", "DONE writeback", "live addresses", "BTC and CBTC", "buffer guards"],
+      "checks": 166,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.live-descriptor-update",
+      "covers": ["software-paced active descriptor", "future LLI rewritten before fetch", "live source, destination, CTRLA, CTRLB and DSCR", "first-descriptor DONE writeback", "intermediate EMPTY state", "poison isolation", "BTC and CBTC", "buffer guards"],
+      "checks": 144,
       "state": "implemented"
     },
     {
@@ -448,8 +493,8 @@
     },
     {
       "id": "d1.bus-error",
-      "covers": ["datasheet undefined source window", "ERR without BTC", "destination unchanged", "pointer and BTSIZE residue", "channel halt and EMPTY", "same-channel recovery"],
-      "checks": 140,
+      "covers": ["datasheet undefined source and destination windows", "ERR without BTC", "partial destination data", "consumed source byte", "pointer and BTSIZE residue", "atomic partial descriptor fetch", "channel halt and EMPTY", "same-channel recovery"],
+      "checks": 150,
       "state": "implemented"
     },
     {
@@ -462,6 +507,18 @@
       "id": "d1.partial-descriptor-reload",
       "covers": ["source descriptor update disable", "destination descriptor update disable", "two simultaneous two-link channels", "preserved live address", "poison buffer guards", "writeback and events"],
       "checks": 139,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.picture-in-picture",
+      "covers": ["independent source and destination row boundaries", "SPIP/DPIP holes", "poisoned contiguous addresses", "live register and completion state", "buffer guards"],
+      "checks": 141,
+      "state": "implemented"
+    },
+    {
+      "id": "d1.auto-replay",
+      "covers": ["CTRLB AUTO", "source and destination REP reload", "BTC-boundary STALLED", "register reload", "KEEPON", "AUTO clear for final buffer", "BTC and CBTC", "buffer guards"],
+      "checks": 141,
       "state": "implemented"
     },
     {

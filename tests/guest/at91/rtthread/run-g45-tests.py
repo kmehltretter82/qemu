@@ -28,7 +28,7 @@ PROMPT_RE = re.compile(rb"msh />")
 DEFAULT_SUITES = ("d0", "d1", "core.scheduler")
 EXPECTED_PASSES = {
     "d0": 5,
-    "d1": 15,
+    "d1": 20,
     "core.scheduler": 1,
 }
 

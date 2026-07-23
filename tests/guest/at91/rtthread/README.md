@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 21 cases:
+The registry currently contains 26 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -118,10 +118,19 @@ The registry currently contains 21 cases:
   pre-enable and mixed-order SREQ/CREQ software pacing; peripheral-controlled
   LAST; both documented WORD encodings; source and destination
   Picture-in-Picture row-hole addressing; source/destination/descriptor bus
-  errors and recovery; BTC/CBTC, interrupt masking and AIC source 21.
+  errors and recovery; non-descriptor AUTO replay with source/destination
+  reload, BTC-boundary STALLED and KEEPON; descriptor-coupled AUTO rows 7/8
+  with replayed BTSIZE and LLI control/address selection; a cross-page LLI;
+  live mutation of a future descriptor while its predecessor is active;
+  Row-1 termination despite a poisoned nonzero next pointer; read-only
+  destination, peripheral-access and descriptor-writeback aborts;
+  fixed versus modified-round-robin one-transaction contention order; a full
+  `0xffff`-word transfer crossing 4 KiB, 64 KiB and 1 MiB boundaries; exact
+  DDR-end completion; safe forward and reverse 8 KiB overlaps; BTC/CBTC,
+  interrupt masking and AIC source 21.
 - Core: the 1 kHz scheduler runs and switches tasks for at least ten seconds.
 
-The D1 suite performs 54,564 checks. It first found three deterministic bugs in
+The D1 suite performs 340,206 checks. It first found three deterministic bugs in
 the local QEMU HDMAC model: missing CHSR EMPTY reset bits, missing global-enable
 gating, and missing linked-list DONE/writeback semantics. The adversarial
 extension found eight more: inert suspend/resume, absent SREQ/CREQ, absent LAST,
@@ -130,31 +139,76 @@ encoding, failure to reconstruct a pending IRQ after migration, ignored
 stop-on-DONE, and unconditional source/destination reload between linked
 descriptors. A ninth adversarial defect was ignored SPIP/DPIP
 Picture-in-Picture addressing: transfers silently used contiguous addresses
-instead of inserting the programmed source and destination row holes. The
-corrected model passes the unrelaxed guest suite and 24 focused
-qtests, including migration with a byte held in the conversion FIFO and a queued
-request, with an enabled pending interrupt, and in the middle of a PiP row.
-Together with the independent USART backpressure defect, this campaign has
-found 13 local-QEMU defects: 12 HDMAC and one USART. None is a released
-upstream-QEMU regression because these
-AT91 device models have not been submitted upstream.
+instead of inserting the programmed source and destination row holes. The next
+oracle exposed ignored AUTO/SRC_REP/DST_REP semantics: a completed replay
+buffer disabled the channel instead of reloading it, asserting STALLED at an
+unmasked BTC boundary, and waiting for KEEPON. A later contention oracle found
+that `GCFG.ARB_CFG` was stored but ignored: both modes always granted channels
+in ascending order. The boundary/overlap oracle did not expose another model
+defect; it defines the supported overlap policy as incrementing when the
+destination is below the source and decrementing in the reverse arrangement.
+Unsafe overlap ordering is deliberately unspecified because later beat/burst
+pacing will change transaction granularity. The descriptor adversarial oracle
+then exposed two more defects: rows 7/8 loaded the descriptor's poisoned
+BTSIZE instead of replaying the channel's initial value, and the cyclic-list
+pre-scan recognized only loops back to the head, allowing a tail cycle to
+execute 1,024 buffers before a synthetic error. The corrected model merges
+only replayed BTSIZE with LLI control fields and parks any reachable cyclic
+graph. The final adversarial pass found that Row 1 still followed a nonzero
+next pointer even though the hardware samples the Table 40-2 row at each
+buffer boundary. Row 1 now terminates from its control state, while a focused
+test poisons the normally-zero next pointer. The first D2 increment then made
+hardware handshakes chunk-scoped: one request edge grants one SCSIZE/DCSIZE
+chunk rather than permission to drain the descriptor, source and destination
+requests act independently through the conversion FIFO, and an unpaced memory
+side legitimately prefetches ahead of a paced peripheral side. Bringing that
+up exposed one more model hazard, caught by the Linux differential before it
+was ever committed: request edges were banked even while no armed channel
+listened, so the request-line toggling that every HSMCI driver-PIO transfer
+performs banked a stale grant, and the first Linux DMA transfer (the ACMD13
+SD-Status read) consumed one beat before data existed, leaving the card
+wedged mid-transfer with no XFRDONE ("mmc0: problem reading SD Status
+register", no `mmcblk0`). Edges are now visible only to armed channels and
+CHER samples the live request level; the at_hdmac-shaped
+`acmd13-completion` qtest holds the regression. The model passes the
+unrelaxed guest suite and 40 focused qtests,
+including migration with a byte
+held in the conversion FIFO and a queued request, with an enabled pending
+interrupt, in the middle of a PiP row, at an AUTO replay stalled boundary, and
+after a round-robin grant.
+Together with the independent USART backpressure defect, the DMA/RT-Thread
+phase has found 19 local-QEMU defects: 18 HDMAC and one USART. The interleaved
+PIO qtests subsequently made three previously inert behaviors executable
+(mux handoff, multi-drive resolution and the MCK glitch filter), bringing the
+whole local campaign total to 22. None is a released upstream-QEMU regression
+because these AT91 device models have not been submitted upstream.
 
 The default migration run also proves that the shell and tick continue in the
 destination and reruns `d0.prng` and `d1.mem2mem` there. The machine-readable
 inventory and incomplete paths are in `manifests/dma-coverage.json`. The latest
 complete evidence is
-`build/rtthread-g45/5.2.2/results/d0-d1-pip-migration-final/`: all 21 cases
-pass, and the restored guest advances from tick 10,105 to 10,245.
+`build/rtthread-g45/5.2.2/results/d0-d1-d2-request-sampling-final/`: all 26
+cases pass, and the restored guest advances from tick 10,153 to 10,296. This
+run uses the PIO mux/filter/open-drain, LCDC palette/EOF/timing, HSMCI
+timing/reentrancy and HDMAC AUTO/arbitration/boundary/descriptor/error
+coverage plus chunk-scoped, level-sampled hardware request pacing, so it is
+the current whole-machine migration baseline.
 
 ## Next DMA work
 
 D0 still needs cache-alias negative tests and placement across DDR, SRAM and
-TCM boundaries. D1 still needs priority/arbitration, maximum and overlapping
-transfers, malformed/circular descriptors, plus the remaining read-only,
-writeback, alignment and peripheral-abort error/residue cases. D2 will add beat-level peripheral
-request/backpressure testing; D3 will exercise DBGU/USART, SSC and AC97 PDC
-current/next-buffer state machines. Later phases cover storage, rings,
-continuous fetch, cyclic streams, Linux companion tests, errors and soak.
+TCM boundaries. D1 is complete: its final pass covers live and disabled-next
+descriptor behavior plus deterministic read-only, peripheral and writeback
+faults without test-only model hooks. Unaligned RAM is not treated as an error
+oracle because the DMAC datasheet does not require it to produce an AHB error
+response. D2 has begun: hardware handshakes are chunk-scoped with independent
+source/destination pacing and live level sampling at CHER. Still open in D2
+are beat/burst granularity inside a chunk, FIFO_CFG thresholds, mid-chunk
+backpressure/deassertion, HSMCI descriptor-versus-transaction length
+mismatches and sub-buffer arbitration; D3 will exercise DBGU/USART, SSC and
+AC97 PDC current/next-buffer state machines. Later phases cover storage,
+rings, continuous fetch, cyclic streams, Linux companion tests, errors and
+soak.
 
 Run the same payload on a physical SAM9M10-G45-EK when available. A QEMU pass
 is not evidence that cache maintenance or ordering is correct on non-coherent

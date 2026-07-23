@@ -125,16 +125,16 @@ serial_patch="${script_dir}/patches/0001-at91sam9g45-expose-serial-ports.patch"
 if [[ ${version} == "5.2.2" ]]; then
     serial_patch="${script_dir}/patches/0001-at91sam9g45-expose-serial-ports-v5.2.2.patch"
 fi
-if ! rg -q '^config RT_USING_DBGU$' "${bsp_dir}/Kconfig"; then
+if ! grep -q '^config RT_USING_DBGU$' "${bsp_dir}/Kconfig"; then
     patch -d "${source_dir}" -p1 < "${serial_patch}"
 fi
 peripheral_patch="${script_dir}/patches/0002-at91sam9g45-fix-i2c-macb-port.patch"
-if rg -q 'AT91SAM9260_ID_EMAC|PIO_PUER' \
+if grep -qE 'AT91SAM9260_ID_EMAC|PIO_PUER' \
         "${bsp_dir}/drivers/macb.c" "${bsp_dir}/drivers/at91_i2c_gpio.c"; then
     patch -d "${source_dir}" -p1 < "${peripheral_patch}"
 fi
 if [[ ${version} == "5.2.2" ]] && \
-        ! rg -q 'sync-cp15dmb\.specs' "${bsp_dir}/rtconfig.py"; then
+        ! grep -q 'sync-cp15dmb\.specs' "${bsp_dir}/rtconfig.py"; then
     patch -d "${source_dir}" -p1 < \
         "${script_dir}/patches/0003-at91sam9g45-use-arm9-barrier-v5.2.2.patch"
 fi

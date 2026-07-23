@@ -532,6 +532,7 @@ static void sam9m10g45ek_init(MachineState *machine)
 
     /* DMA controller. */
     dmac = qdev_new(TYPE_AT91_DMAC);
+    object_property_add_child(OBJECT(machine), "dmac", OBJECT(dmac));
     qdev_prop_set_uint64(dmac, AT91_DMAC_REQUEST_MASK,
                          (UINT64_C(1) << 0) | (UINT64_C(1) << 13));
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dmac), &error_fatal);
