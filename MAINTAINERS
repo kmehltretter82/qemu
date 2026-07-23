@@ -725,6 +725,16 @@ F: tests/functional/alpha/test_clipper.py
 
 ARM Machines
 ------------
+Acorn RiscPC
+M: Karl Mehltretter <kmehltretter@gmail.com>
+L: qemu-arm@nongnu.org
+S: Maintained
+F: docs/system/arm/riscpc.rst
+F: hw/arm/riscpc.c
+F: hw/misc/acorn-iomd.c
+F: include/hw/misc/acorn-iomd.h
+F: tests/functional/arm/test_riscpc.py
+
 Allwinner-a10
 M: Peter Maydell <peter.maydell@linaro.org>
 R: Strahinja Jankovic <strahinja.p.jankovic@gmail.com>
@@ -1024,6 +1034,19 @@ F: include/hw/*/bcm283*
 F: docs/system/arm/raspi.rst
 F: tests/functional/arm/test_raspi2.py
 F: tests/functional/aarch64/test_raspi*.py
+
+Rebel NetWinder
+M: Karl Mehltretter <kmehltretter@gmail.com>
+L: qemu-arm@nongnu.org
+S: Maintained
+F: docs/system/arm/netwinder.rst
+F: hw/arm/dc21285.c
+F: hw/arm/netwinder.c
+F: hw/ide/sl82c105.c
+F: hw/pci-host/dc21285-pci.c
+F: include/hw/arm/dc21285.h
+F: include/hw/pci-host/dc21285-pci.h
+F: tests/functional/arm/test_netwinder.py
 
 Real View
 M: Peter Maydell <peter.maydell@linaro.org>
