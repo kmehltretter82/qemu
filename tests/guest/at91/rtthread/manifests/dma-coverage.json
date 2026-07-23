@@ -150,7 +150,7 @@
         "flow_controller": "DMA controller",
         "linux_binding": "<&dma 1 AT91_DMA_CFG_PER_ID(0)>",
         "qemu_connection": "AT91_HSMCI_DMA_REQUEST to at91-dmac peripheral-request[0]",
-        "qemu_behavior": "Per-word handshake gated by HSMCI_DMA.DMAEN (driver-set for DMA, cleared for CPU transfers): HSMCI drops and re-raises the request around every FIFO word, each edge grants one SCSIZE/DCSIZE chunk, and CHER samples the live level instead of banked edges. CHKSIZE/OFFSET are retained configuration (data is synchronously available). Descriptor shorter/longer than the card transaction stops with BTC plus in-progress card state, or waits with exact residue for CHDR. Beat granularity inside a chunk is not yet modelled.",
+        "qemu_behavior": "Per-word handshake gated by HSMCI_DMA.DMAEN (driver-set for DMA, cleared for CPU transfers): HSMCI drops and re-raises the request around every FIFO word, each edge grants one SCSIZE/DCSIZE chunk, and CHER samples the live level instead of banked edges. CHKSIZE/OFFSET are retained configuration (data is synchronously available). Descriptor shorter/longer than the card transaction stops with BTC plus in-progress card state, or waits with exact residue for CHDR; both boundaries and the DTOR MCK-cycle data timeout (access-restarted, raising read-to-clear DTOE) migrate exactly. Beat granularity inside a chunk is not yet modelled.",
         "rtthread_test": "d4.hsmci0",
         "linux_test": "atmel-mci read/write plus media hash",
         "status": "partial-expected-fail"
@@ -165,7 +165,7 @@
         "flow_controller": "DMA controller",
         "linux_binding": "<&dma 1 AT91_DMA_CFG_PER_ID(13)>",
         "qemu_connection": "AT91_HSMCI_DMA_REQUEST to at91-dmac peripheral-request[13]",
-        "qemu_behavior": "Per-word handshake gated by HSMCI_DMA.DMAEN (driver-set for DMA, cleared for CPU transfers): HSMCI drops and re-raises the request around every FIFO word, each edge grants one SCSIZE/DCSIZE chunk, and CHER samples the live level instead of banked edges. CHKSIZE/OFFSET are retained configuration (data is synchronously available). Descriptor shorter/longer than the card transaction stops with BTC plus in-progress card state, or waits with exact residue for CHDR. Beat granularity inside a chunk is not yet modelled.",
+        "qemu_behavior": "Per-word handshake gated by HSMCI_DMA.DMAEN (driver-set for DMA, cleared for CPU transfers): HSMCI drops and re-raises the request around every FIFO word, each edge grants one SCSIZE/DCSIZE chunk, and CHER samples the live level instead of banked edges. CHKSIZE/OFFSET are retained configuration (data is synchronously available). Descriptor shorter/longer than the card transaction stops with BTC plus in-progress card state, or waits with exact residue for CHDR; both boundaries and the DTOR MCK-cycle data timeout (access-restarted, raising read-to-clear DTOE) migrate exactly. Beat granularity inside a chunk is not yet modelled.",
         "rtthread_test": "d4.hsmci1",
         "linux_test": "atmel-mci read/write plus media hash",
         "status": "partial-expected-fail"

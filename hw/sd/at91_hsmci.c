@@ -153,6 +153,7 @@ struct AT91HsmciState {
     Clock *mck;
     QEMUTimer *command_timer;
     QEMUTimer *transfer_timer;
+    QEMUTimer *timeout_timer;
     QEMUBH *dma_request_bh;
 
     uint32_t mr, dtor, sdcr, argr, blkr, cstor, dma, cfg, wpmr;
@@ -184,6 +185,11 @@ struct AT91HsmciState {
     uint32_t transfer_divider;
     int64_t command_remaining_ns;
     int64_t transfer_remaining_ns;
+
+    bool timeout_pending;
+    uint64_t timeout_cycles;
+    uint32_t timeout_mck_hz;
+    int64_t timeout_remaining_ns;
 };
 
 static void hsmci_update_irq(AT91HsmciState *s)
@@ -263,6 +269,27 @@ static uint64_t hsmci_cycles_to_ns(AT91HsmciState *s, uint64_t cycles)
                UINT64_C(1));
 }
 
+static uint64_t hsmci_mck_cycles_to_ns(AT91HsmciState *s, uint64_t cycles)
+{
+    uint32_t mck_hz = clock_get_hz(s->mck);
+
+    if (mck_hz == 0) {
+        return 0;
+    }
+    return MAX(muldiv64_round_up(cycles, NANOSECONDS_PER_SECOND, mck_hz),
+               UINT64_C(1));
+}
+
+/* DTOR: the data timeout is DTOCYC scaled by the DTOMUL multiplier. */
+static uint64_t hsmci_dtor_cycles(AT91HsmciState *s)
+{
+    static const uint64_t multiplier[8] = {
+        1, 16, 128, 256, 1024, 4096, 65536, 1048576
+    };
+
+    return (uint64_t)(s->dtor & 0xf) * multiplier[(s->dtor >> 4) & 7];
+}
+
 static uint64_t hsmci_pause_timer(QEMUTimer *timer, uint64_t cycles,
                                   uint32_t mck_hz, uint32_t divider)
 {
@@ -297,6 +324,11 @@ static void hsmci_pause_timers(AT91HsmciState *s)
                                                s->transfer_mck_hz,
                                                s->transfer_divider);
     }
+    if (s->timeout_pending) {
+        s->timeout_cycles = hsmci_pause_timer(s->timeout_timer,
+                                              s->timeout_cycles,
+                                              s->timeout_mck_hz, 1);
+    }
 }
 
 static void hsmci_schedule_command(AT91HsmciState *s, uint64_t cycles)
@@ -329,6 +361,46 @@ static void hsmci_schedule_transfer(AT91HsmciState *s, uint64_t cycles)
     }
 }
 
+static void hsmci_schedule_data_timeout(AT91HsmciState *s, uint64_t cycles)
+{
+    uint64_t delay = hsmci_mck_cycles_to_ns(s, cycles);
+
+    s->timeout_cycles = cycles;
+    s->timeout_mck_hz = clock_get_hz(s->mck);
+    if (s->enabled && delay) {
+        timer_mod(s->timeout_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + delay);
+    } else {
+        timer_del(s->timeout_timer);
+    }
+}
+
+static void hsmci_cancel_data_timeout(AT91HsmciState *s)
+{
+    s->timeout_pending = false;
+    s->timeout_cycles = 0;
+    timer_del(s->timeout_timer);
+}
+
+/*
+ * DTOR counts Master Clock cycles that the controller waits between two
+ * data accesses; the counter restarts at every access.  DTOCYC == 0 is
+ * left disabled: real drivers (Linux atmel-mci, U-Boot gen_atmel_mci)
+ * always program DTOR before a data command, and an immediate timeout
+ * would fire on any CPU-paced transfer.
+ */
+static void hsmci_arm_data_timeout(AT91HsmciState *s)
+{
+    uint64_t cycles = hsmci_dtor_cycles(s);
+
+    if (!cycles || !hsmci_has_data(s)) {
+        hsmci_cancel_data_timeout(s);
+        return;
+    }
+    s->timeout_pending = true;
+    hsmci_schedule_data_timeout(s, cycles);
+}
+
 static void hsmci_resume_timers(AT91HsmciState *s)
 {
     if (s->command_pending) {
@@ -336,6 +408,9 @@ static void hsmci_resume_timers(AT91HsmciState *s)
     }
     if (s->transfer_pending) {
         hsmci_schedule_transfer(s, s->transfer_cycles);
+    }
+    if (s->timeout_pending) {
+        hsmci_schedule_data_timeout(s, s->timeout_cycles);
     }
 }
 
@@ -356,6 +431,7 @@ static void hsmci_sync_data_len(AT91HsmciState *s)
 static void hsmci_finish_transfer(AT91HsmciState *s)
 {
     hsmci_cancel_dma_rearm(s);
+    hsmci_cancel_data_timeout(s);
     timer_del(s->transfer_timer);
     s->transfer_pending = false;
     s->transfer_cycles = 0;
@@ -376,9 +452,19 @@ static void hsmci_transfer_timer_cb(void *opaque)
     hsmci_finish_transfer(s);
 }
 
+static void hsmci_data_timeout_cb(void *opaque)
+{
+    AT91HsmciState *s = opaque;
+
+    s->timeout_pending = false;
+    s->sr |= HSMCI_SR_DTOE;
+    hsmci_finish_transfer(s);
+}
+
 static void hsmci_schedule_transfer_end(AT91HsmciState *s)
 {
     hsmci_cancel_dma_rearm(s);
+    hsmci_cancel_data_timeout(s);
     s->transfer_pending = true;
     s->sr &= ~(HSMCI_SR_RXRDY | HSMCI_SR_TXRDY);
     hsmci_update_dma_request(s);
@@ -465,6 +551,7 @@ static void hsmci_start_transfer(AT91HsmciState *s)
                HSMCI_SR_OVRE | HSMCI_SR_UNRE);
     s->sr |= HSMCI_SR_DTIP;
     s->sr |= s->reading ? HSMCI_SR_RXRDY : HSMCI_SR_TXRDY;
+    hsmci_arm_data_timeout(s);
     hsmci_update_dma_request(s);
     hsmci_update_irq(s);
 }
@@ -601,6 +688,7 @@ static uint32_t hsmci_read_data(AT91HsmciState *s)
     if (!s->infinite && s->data_remaining == 0) {
         hsmci_schedule_transfer_end(s);
     } else {
+        hsmci_arm_data_timeout(s);
         hsmci_rearm_dma_request(s);
     }
     hsmci_update_irq(s);
@@ -628,6 +716,7 @@ static void hsmci_write_data(AT91HsmciState *s, uint32_t value)
     if (!s->infinite && s->data_remaining == 0) {
         hsmci_schedule_transfer_end(s);
     } else {
+        hsmci_arm_data_timeout(s);
         hsmci_rearm_dma_request(s);
     }
     hsmci_update_irq(s);
@@ -806,6 +895,9 @@ static void hsmci_reset(DeviceState *dev)
     if (s->transfer_timer) {
         timer_del(s->transfer_timer);
     }
+    if (s->timeout_timer) {
+        timer_del(s->timeout_timer);
+    }
     hsmci_cancel_dma_rearm(s);
     s->mr = s->dtor = s->sdcr = s->argr = s->blkr = 0;
     s->cstor = s->dma = s->cfg = s->wpmr = 0;
@@ -835,6 +927,10 @@ static void hsmci_reset(DeviceState *dev)
     s->transfer_divider = 0;
     s->command_remaining_ns = -1;
     s->transfer_remaining_ns = -1;
+    s->timeout_pending = false;
+    s->timeout_cycles = 0;
+    s->timeout_mck_hz = 0;
+    s->timeout_remaining_ns = -1;
     hsmci_update_irq(s);
     hsmci_update_dma_request(s);
 }
@@ -851,6 +947,8 @@ static void hsmci_realize(DeviceState *dev, Error **errp)
                                     hsmci_command_timer_cb, s);
     s->transfer_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                      hsmci_transfer_timer_cb, s);
+    s->timeout_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                    hsmci_data_timeout_cb, s);
     s->dma_request_bh = qemu_bh_new(hsmci_dma_request_bh, s);
 }
 
@@ -881,6 +979,7 @@ static void hsmci_finalize(Object *obj)
 
     timer_free(s->command_timer);
     timer_free(s->transfer_timer);
+    timer_free(s->timeout_timer);
     qemu_bh_delete(s->dma_request_bh);
 }
 
@@ -893,6 +992,8 @@ static int hsmci_pre_save(void *opaque)
         MAX(timer_expire_time_ns(s->command_timer) - now, INT64_C(0)) : -1;
     s->transfer_remaining_ns = timer_pending(s->transfer_timer) ?
         MAX(timer_expire_time_ns(s->transfer_timer) - now, INT64_C(0)) : -1;
+    s->timeout_remaining_ns = timer_pending(s->timeout_timer) ?
+        MAX(timer_expire_time_ns(s->timeout_timer) - now, INT64_C(0)) : -1;
     return 0;
 }
 
@@ -903,6 +1004,7 @@ static int hsmci_post_load(void *opaque, int version_id)
 
     timer_del(s->command_timer);
     timer_del(s->transfer_timer);
+    timer_del(s->timeout_timer);
     qemu_bh_cancel(s->dma_request_bh);
     if (version_id < 2) {
         s->data_remaining = MAX(s->data_len, 0);
@@ -912,6 +1014,11 @@ static int hsmci_post_load(void *opaque, int version_id)
         s->infinite = false;
         s->command_remaining_ns = -1;
         s->transfer_remaining_ns = -1;
+    }
+    if (version_id < 4) {
+        s->timeout_pending = false;
+        s->timeout_cycles = 0;
+        s->timeout_remaining_ns = -1;
     }
     if (s->command_pending) {
         if (s->enabled && s->command_remaining_ns >= 0 &&
@@ -933,11 +1040,21 @@ static int hsmci_post_load(void *opaque, int version_id)
             hsmci_schedule_transfer(s, s->transfer_cycles);
         }
     }
+    if (s->timeout_pending) {
+        if (s->enabled && s->timeout_remaining_ns >= 0 &&
+            clock_get_hz(s->mck)) {
+            s->timeout_mck_hz = clock_get_hz(s->mck);
+            timer_mod(s->timeout_timer, now + s->timeout_remaining_ns);
+        } else {
+            hsmci_schedule_data_timeout(s, s->timeout_cycles);
+        }
+    }
     if (s->sdio_irq_level) {
         s->sr |= HSMCI_SR_SDIOIRQA;
     }
     s->command_remaining_ns = -1;
     s->transfer_remaining_ns = -1;
+    s->timeout_remaining_ns = -1;
 
     hsmci_update_irq(s);
     hsmci_update_dma_request(s);
@@ -949,7 +1066,7 @@ static int hsmci_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_at91_hsmci = {
     .name = "at91-hsmci",
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .pre_save = hsmci_pre_save,
     .post_load = hsmci_post_load,
@@ -985,6 +1102,9 @@ static const VMStateDescription vmstate_at91_hsmci = {
         VMSTATE_INT64_V(command_remaining_ns, AT91HsmciState, 2),
         VMSTATE_INT64_V(transfer_remaining_ns, AT91HsmciState, 2),
         VMSTATE_BOOL_V(dma_request_rearm, AT91HsmciState, 3),
+        VMSTATE_BOOL_V(timeout_pending, AT91HsmciState, 4),
+        VMSTATE_UINT64_V(timeout_cycles, AT91HsmciState, 4),
+        VMSTATE_INT64_V(timeout_remaining_ns, AT91HsmciState, 4),
         VMSTATE_END_OF_LIST()
     }
 };

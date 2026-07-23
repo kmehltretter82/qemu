@@ -279,6 +279,111 @@ static void test_active_command_migration(void)
     unlink(state_path);
 }
 
+/*
+ * DTOR counts MCK cycles between two data accesses.  DTOCYC=15/DTOMUL=0 is
+ * 15 cycles of the 132 MHz reset MCK = 114 ns (rounded up).  An access
+ * restarts the counter; expiry raises read-to-clear DTOE and ends the data
+ * phase like the driver expects before it issues its recovery STOP.
+ */
+#define DTOE_15CYC_NS         114
+
+static void test_data_timeout(void)
+{
+    QTestState *qts = qtest_init("-machine sam9m10g45ek -S");
+    uint32_t status;
+
+    qtest_qmp_assert_success(qts, "{ 'execute': 'cont' }");
+    hsmci_write(qts, HSMCI_CR, HSMCI_CR_MCIEN);
+    hsmci_write(qts, HSMCI_DTOR, 15);
+    hsmci_write(qts, HSMCI_IER, 1u << 22);
+    hsmci_write(qts, HSMCI_BLKR, (0x1234u << 16) | 3);
+    hsmci_start_norsp(qts, HSMCI_CMDR_START | HSMCI_CMDR_READ |
+                      HSMCI_CMDR_SDIO_BYTE);
+    qtest_clock_step(qts, CMD_66MHZ_NS);
+    g_assert_cmphex(hsmci_read(qts, HSMCI_SR) & HSMCI_SR_DTIP, ==,
+                    HSMCI_SR_DTIP);
+
+    /* Nobody reads RDR: DTOE exactly one timeout period after data start. */
+    qtest_clock_step(qts, DTOE_15CYC_NS - 1);
+    g_assert_cmphex(qtest_readl(qts, G45_AIC_BASE + G45_AIC_IPR) &
+                    G45_AIC_HSMCI0, ==, 0);
+    qtest_clock_step(qts, 1);
+    g_assert_cmphex(qtest_readl(qts, G45_AIC_BASE + G45_AIC_IPR) &
+                    G45_AIC_HSMCI0, ==, G45_AIC_HSMCI0);
+    status = hsmci_read(qts, HSMCI_SR);
+    g_assert_cmphex(status & (1u << 22), ==, 1u << 22);
+    g_assert_cmphex(status & HSMCI_SR_DTIP, ==, 0);
+    g_assert_cmphex(status & (HSMCI_SR_NOTBUSY | HSMCI_SR_XFRDONE), ==,
+                    HSMCI_SR_NOTBUSY | HSMCI_SR_XFRDONE);
+    g_assert_cmphex(hsmci_read(qts, HSMCI_SR) & (1u << 22), ==, 0);
+
+    /* An RDR access inside the window restarts the timeout counter. */
+    hsmci_write(qts, HSMCI_BLKR, (0x1234u << 16) | 8);
+    hsmci_start_norsp(qts, HSMCI_CMDR_START | HSMCI_CMDR_READ |
+                      HSMCI_CMDR_SDIO_BYTE);
+    qtest_clock_step(qts, CMD_66MHZ_NS);
+    qtest_clock_step(qts, DTOE_15CYC_NS - 10);
+    (void)hsmci_read(qts, HSMCI_RDR);
+    qtest_clock_step(qts, DTOE_15CYC_NS - 1);
+    g_assert_cmphex(hsmci_read(qts, HSMCI_SR) & (1u << 22), ==, 0);
+    g_assert_cmphex(hsmci_read(qts, HSMCI_SR) & HSMCI_SR_DTIP, ==,
+                    HSMCI_SR_DTIP);
+    qtest_clock_step(qts, 1);
+    status = hsmci_read(qts, HSMCI_SR);
+    g_assert_cmphex(status & (1u << 22), ==, 1u << 22);
+    g_assert_cmphex(status & HSMCI_SR_DTIP, ==, 0);
+    qtest_quit(qts);
+}
+
+/* DTOCYC=15/DTOMUL=4 is 15,360 MCK cycles = 116,364 ns at reset MCK. */
+#define DTOE_15X1024CYC_NS    116364
+
+static void test_data_timeout_migration(void)
+{
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    QTestState *src, *dst;
+    uint32_t status;
+    int fd;
+
+    fd = g_file_open_tmp("at91-hsmci-dtoe-migration-XXXXXX",
+                         &state_path, NULL);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+
+    src = qtest_init("-machine sam9m10g45ek -S");
+    qtest_qmp_assert_success(src, "{ 'execute': 'cont' }");
+    hsmci_write(src, HSMCI_CR, HSMCI_CR_MCIEN);
+    hsmci_write(src, HSMCI_DTOR, (4u << 4) | 15);
+    hsmci_write(src, HSMCI_BLKR, (0x1234u << 16) | 3);
+    hsmci_start_norsp(src, HSMCI_CMDR_START | HSMCI_CMDR_READ |
+                      HSMCI_CMDR_SDIO_BYTE);
+    qtest_clock_step(src, CMD_66MHZ_NS);
+    qtest_clock_step(src, 50000);
+    g_assert_cmphex(hsmci_read(src, HSMCI_SR) & HSMCI_SR_DTIP, ==,
+                    HSMCI_SR_DTIP);
+
+    uri = g_strdup_printf("file:%s", state_path);
+    qtest_qmp_assert_success(src,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    wait_for_migration_complete(src);
+    qtest_quit(src);
+
+    dst = qtest_initf("-machine sam9m10g45ek -S -incoming %s", uri);
+    wait_for_migration_complete(dst);
+    qtest_qmp_assert_success(dst, "{ 'execute': 'cont' }");
+    qtest_clock_step(dst, DTOE_15X1024CYC_NS - 50000 - 1);
+    status = hsmci_read(dst, HSMCI_SR);
+    g_assert_cmphex(status & ((1u << 22) | HSMCI_SR_DTIP), ==,
+                    HSMCI_SR_DTIP);
+    qtest_clock_step(dst, 1);
+    status = hsmci_read(dst, HSMCI_SR);
+    g_assert_cmphex(status & (1u << 22), ==, 1u << 22);
+    g_assert_cmphex(status & HSMCI_SR_DTIP, ==, 0);
+    qtest_quit(dst);
+    unlink(state_path);
+}
+
 static void test_mmc1_write_protect_pin(void)
 {
     g_autofree char *image_path = NULL;
@@ -311,6 +416,9 @@ int main(int argc, char **argv)
     qtest_add_func("/at91-hsmci/live-mck-change", test_live_mck_change);
     qtest_add_func("/at91-hsmci/sdio-byte-tail-status",
                    test_sdio_byte_tail_and_status);
+    qtest_add_func("/at91-hsmci/data-timeout", test_data_timeout);
+    qtest_add_func("/at91-hsmci/data-timeout-migration",
+                   test_data_timeout_migration);
     qtest_add_func("/at91-hsmci/active-command-migration",
                    test_active_command_migration);
     qtest_add_func("/at91-hsmci/mmc1-write-protect-pin",
