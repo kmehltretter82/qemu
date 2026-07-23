@@ -295,15 +295,35 @@ static void at91_ac97_codec_write(AT91AC97State *s, unsigned reg,
     }
 }
 
-static void at91_ac97_finish_tx(AT91AC97State *s)
+/*
+ * The PDC loads the next pointer/counter into the current registers as
+ * soon as the current counter is zero on an enabled channel - including
+ * when the next counter is programmed AFTER the current period completed.
+ */
+static void at91_ac97_promote_tx(AT91AC97State *s)
 {
-    trace_at91_ac97_period("playback", s->tpr);
-    if (s->tncr) {
+    if (s->txten && !s->tcr && s->tncr) {
         s->tpr = s->tnpr;
         s->tcr = s->tncr;
         s->tnpr = 0;
         s->tncr = 0;
     }
+}
+
+static void at91_ac97_promote_rx(AT91AC97State *s)
+{
+    if (s->rxten && !s->rcr && s->rncr) {
+        s->rpr = s->rnpr;
+        s->rcr = s->rncr;
+        s->rnpr = 0;
+        s->rncr = 0;
+    }
+}
+
+static void at91_ac97_finish_tx(AT91AC97State *s)
+{
+    trace_at91_ac97_period("playback", s->tpr);
+    at91_ac97_promote_tx(s);
     s->casr |= CSR_ENDTX;
     at91_ac97_update_irq(s);
 }
@@ -311,12 +331,7 @@ static void at91_ac97_finish_tx(AT91AC97State *s)
 static void at91_ac97_finish_rx(AT91AC97State *s)
 {
     trace_at91_ac97_period("capture", s->rpr);
-    if (s->rncr) {
-        s->rpr = s->rnpr;
-        s->rcr = s->rncr;
-        s->rnpr = 0;
-        s->rncr = 0;
-    }
+    at91_ac97_promote_rx(s);
     s->casr |= CSR_ENDRX;
     at91_ac97_update_irq(s);
 }
@@ -546,16 +561,19 @@ static void at91_ac97_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case PDC_RNCR:
         s->rncr = val;
+        at91_ac97_promote_rx(s);
         break;
     case PDC_TNPR:
         s->tnpr = val;
         break;
     case PDC_TNCR:
         s->tncr = val;
+        at91_ac97_promote_tx(s);
         break;
     case PDC_PTCR:
         if (val & PDC_RXTEN) {
             s->rxten = true;
+            at91_ac97_promote_rx(s);
             if (!s->voice_in) {
                 at91_ac97_open_in(s);
             }
@@ -565,6 +583,7 @@ static void at91_ac97_write(void *opaque, hwaddr offset, uint64_t value,
         }
         if (val & PDC_TXTEN) {
             s->txten = true;
+            at91_ac97_promote_tx(s);
         }
         if (val & PDC_TXTDIS) {
             s->txten = false;
