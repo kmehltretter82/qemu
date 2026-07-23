@@ -246,9 +246,21 @@ data timeout with a migrated countdown, and every applicable Table 40-1
 request route (HSMCI 0/13, SPI 1..4, SSC 5..8; AC97 9/10 is
 not-applicable to this model's PDC-based AC97C). Still open in D2 are
 beat granularity inside a chunk, FIFO_CFG thresholds and physical card
-removal; D3 will exercise DBGU/USART, SSC and AC97 PDC
-current/next-buffer state machines. Later phases cover storage, rings,
-continuous fetch, cyclic streams, Linux companion tests, errors and soak.
+removal - all register-only or hotplug-gated. D3 has begun with the
+USART PDC: nine at91-usart-test qtests now pin the current/next state
+machine (buffer handoff, ENDRX/RXBUFF/ENDTX/TXBUFE levels, the 2 ms
+partial-buffer idle flush with STTTO rearm, RXTDIS/RXTEN fallback and
+resume, and migration mid-buffer with an armed timeout). The
+"programming next after current reaches zero" row immediately found two
+more model defects: the PDC must promote RNPR/RNCR (and TNPR/TNCR) into
+the current registers the moment the current counter is zero on an
+enabled channel, but the old model promoted only inside active transfer
+loops - an RX ring whose buffers both filled before the driver refilled
+went permanently deaf, and a late-queued TX buffer never started. With
+the earlier backpressure defect the USART total is three, and the
+campaign count is 24 local QEMU behaviors. D3 continues with the SSC
+and AC97 PDC engines; later phases cover storage, rings, continuous
+fetch, cyclic streams, Linux companion tests, errors and soak.
 
 Run the same payload on a physical SAM9M10-G45-EK when available. A QEMU pass
 is not evidence that cache maintenance or ordering is correct on non-coherent
