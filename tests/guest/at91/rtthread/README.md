@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 26 cases:
+The registry currently contains 27 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -128,6 +128,11 @@ The registry currently contains 26 cases:
   `0xffff`-word transfer crossing 4 KiB, 64 KiB and 1 MiB boundaries; exact
   DDR-end completion; safe forward and reverse 8 KiB overlaps; BTC/CBTC,
   interrupt masking and AIC source 21.
+- D2: sub-buffer arbitration between two concurrently pending unpaced
+  channels writing one shared fixed word - modified round-robin interleaves
+  at chunk granularity so the long channel's tail lands last, while fixed
+  priority drains the lower channel first so the short channel's word lands
+  last, independent of the starting cursor.
 - Core: the 1 kHz scheduler runs and switches tasks for at least ten seconds.
 
 The D1 suite performs 340,206 checks. It first found three deterministic bugs in
@@ -170,8 +175,19 @@ SD-Status read) consumed one beat before data existed, leaving the card
 wedged mid-transfer with no XFRDONE ("mmc0: problem reading SD Status
 register", no `mmcblk0`). Edges are now visible only to armed channels and
 CHER samples the live request level; the at_hdmac-shaped
-`acmd13-completion` qtest holds the regression. The model passes the
-unrelaxed guest suite and 40 focused qtests,
+`acmd13-completion` qtest holds the regression. The second D2 increment
+extends this: the HSMCI honors `HSMCI_DMA.DMAEN` exactly as the driver
+programs it (set for DMA transfers, cleared for CPU transfers), so a PIO
+transfer never toggles the request line at all; a banked edge whose only
+armed consumer is disabled is forgotten; concurrently pending unpaced
+channels interleave at SCSIZE/DCSIZE chunk granularity under GCFG.ARB_CFG
+instead of running whole buffers back to back; and descriptor-versus-
+transaction length mismatches have deterministic outcomes - a short
+descriptor stops at BTSIZE with BTC while the card transaction stays in
+progress until STOP, and a long descriptor waits with exact residue after
+XFRDONE until the driver disables the channel, with byte-exact reuse
+afterward. The model passes the
+unrelaxed guest suite and 45 focused qtests,
 including migration with a byte
 held in the conversion FIFO and a queued request, with an enabled pending
 interrupt, in the middle of a PiP row, at an AUTO replay stalled boundary, and
@@ -187,12 +203,12 @@ The default migration run also proves that the shell and tick continue in the
 destination and reruns `d0.prng` and `d1.mem2mem` there. The machine-readable
 inventory and incomplete paths are in `manifests/dma-coverage.json`. The latest
 complete evidence is
-`build/rtthread-g45/5.2.2/results/d0-d1-d2-request-sampling-final/`: all 26
-cases pass, and the restored guest advances from tick 10,153 to 10,296. This
-run uses the PIO mux/filter/open-drain, LCDC palette/EOF/timing, HSMCI
-timing/reentrancy and HDMAC AUTO/arbitration/boundary/descriptor/error
-coverage plus chunk-scoped, level-sampled hardware request pacing, so it is
-the current whole-machine migration baseline.
+`build/rtthread-g45/5.2.2/results/d0-d2-subbuffer-final/`: all 27 cases pass
+(D2 adds 134 checks), and the restored guest advances from tick 10,146 to
+10,294. This run uses the PIO mux/filter/open-drain, LCDC palette/EOF/timing,
+HSMCI timing/reentrancy/DMAEN and HDMAC AUTO/arbitration/boundary/descriptor/
+error coverage plus chunk-scoped, level-sampled request pacing with
+sub-buffer interleave, so it is the current whole-machine migration baseline.
 
 ## Next DMA work
 
@@ -201,14 +217,16 @@ TCM boundaries. D1 is complete: its final pass covers live and disabled-next
 descriptor behavior plus deterministic read-only, peripheral and writeback
 faults without test-only model hooks. Unaligned RAM is not treated as an error
 oracle because the DMAC datasheet does not require it to produce an AHB error
-response. D2 has begun: hardware handshakes are chunk-scoped with independent
-source/destination pacing and live level sampling at CHER. Still open in D2
-are beat/burst granularity inside a chunk, FIFO_CFG thresholds, mid-chunk
-backpressure/deassertion, HSMCI descriptor-versus-transaction length
-mismatches and sub-buffer arbitration; D3 will exercise DBGU/USART, SSC and
-AC97 PDC current/next-buffer state machines. Later phases cover storage,
-rings, continuous fetch, cyclic streams, Linux companion tests, errors and
-soak.
+response. D2 now covers chunk-scoped hardware handshakes with independent
+source/destination pacing, live level sampling at CHER and on channel
+disable, HSMCI_DMA.DMAEN gating, sub-buffer channel interleave under both
+arbitration modes and descriptor-versus-transaction length mismatches with
+driver-shaped recovery. Still open in D2 are beat granularity inside a
+chunk, FIFO_CFG thresholds, card removal/timeout between blocks, migration
+at mismatch boundaries, and DMA request routes for peripherals beyond the
+two HSMCIs (SPI, SSC, AC97); D3 will exercise DBGU/USART, SSC and AC97 PDC
+current/next-buffer state machines. Later phases cover storage, rings,
+continuous fetch, cyclic streams, Linux companion tests, errors and soak.
 
 Run the same payload on a physical SAM9M10-G45-EK when available. A QEMU pass
 is not evidence that cache maintenance or ordering is correct on non-coherent

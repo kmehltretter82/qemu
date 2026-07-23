@@ -744,6 +744,97 @@ void g45test_d1_arbitration(struct g45test_result *result)
     g45_dma_quiesce();
 }
 
+/*
+ * D2: two concurrently pending unpaced channels write one shared fixed
+ * destination word.  Modified round-robin interleaves at chunk granularity,
+ * so the long lower channel's tail overwrites the short channel's word;
+ * fixed priority drains the lower channel completely first, so the short
+ * channel's word lands last.  The verdicts hold for any starting cursor.
+ */
+void g45test_d2_subbuffer_arbitration(struct g45test_result *result)
+{
+    const rt_uint32_t channel_mask =
+        DMAC_CHANNEL_ENABLE(0) | DMAC_CHANNEL_ENABLE(1);
+    const rt_uint32_t long_ctrla = DMAC_CTRLA_BTSIZE(4) |
+        DMAC_CTRLA_SRC_WIDTH(2) | DMAC_CTRLA_DST_WIDTH(2);
+    const rt_uint32_t short_ctrla = DMAC_CTRLA_BTSIZE(1) |
+        DMAC_CTRLA_SRC_WIDTH(2) | DMAC_CTRLA_DST_WIDTH(2);
+    const rt_uint32_t ctrlb = DMAC_CTRLB_SRC_DSCR_DISABLE |
+        DMAC_CTRLB_DST_DSCR_DISABLE |
+        DMAC_CTRLB_DST_MODE(DMAC_MODE_FIXED);
+    rt_uint32_t *long_source = (rt_uint32_t *)(dma_source.data + 1984U);
+    rt_uint32_t *short_source = (rt_uint32_t *)(dma_source.data + 2000U);
+    rt_uint32_t *shared = (rt_uint32_t *)(dma_destination.data + 1984U);
+    rt_uint32_t long_address;
+    rt_uint32_t short_address;
+    rt_uint32_t shared_address;
+    rt_uint32_t status;
+    unsigned int word;
+
+    g45_dma_enable_clock();
+    g45_dma_quiesce();
+    g45_dma_reset_buffers(result->seed ^ 0xd25a8b17U);
+    for (word = 0; word < 4; word++) {
+        long_source[word] = 0xaaaa0000U + word;
+    }
+    *short_source = 0xbbbbbbbbU;
+    *shared = 0xdeadbeefU;
+    long_address = g45_dma_physical(long_source);
+    short_address = g45_dma_physical(short_source);
+    shared_address = g45_dma_physical(shared);
+    mmu_clean_dcache((rt_uint32_t)(rt_ubase_t)&dma_source,
+                     sizeof(dma_source));
+    mmu_clean_invalidated_dcache((rt_uint32_t)(rt_ubase_t)&dma_destination,
+                                 sizeof(dma_destination));
+    __sync_synchronize();
+
+    /* Round robin: the long channel's tail must overwrite the short word. */
+    g45_dma_write(DMAC_GCFG, DMAC_GCFG_ARB_CFG);
+    g45_dma_program(0, long_address, shared_address, 0, long_ctrla,
+                    ctrlb, 0);
+    g45_dma_program(1, short_address, shared_address, 0, short_ctrla,
+                    ctrlb, 0);
+    g45_dma_write(DMAC_EN, DMAC_ENABLE);
+    (void)g45_dma_read(DMAC_EBCISR);
+    g45_dma_write(DMAC_CHER, channel_mask);
+    g45test_check(result, g45_dma_wait_channels(channel_mask), 1, 0, 0);
+    mmu_invalidate_dcache((rt_uint32_t)(rt_ubase_t)&dma_destination,
+                          sizeof(dma_destination));
+    __sync_synchronize();
+    g45test_check(result, *shared == 0xaaaa0003U,
+                  0xaaaa0003U, *shared, 1);
+    status = g45_dma_read(DMAC_EBCISR);
+    g45test_check(result, status == (DMAC_BTC(0) | DMAC_BTC(1)),
+                  DMAC_BTC(0) | DMAC_BTC(1), status, 2);
+
+    /* Fixed priority: the short higher channel's word must land last. */
+    g45_dma_write(DMAC_GCFG, 0);
+    *shared = 0xdeadbeefU;
+    mmu_clean_invalidated_dcache((rt_uint32_t)(rt_ubase_t)&dma_destination,
+                                 sizeof(dma_destination));
+    __sync_synchronize();
+    g45_dma_program(0, long_address, shared_address, 0, long_ctrla,
+                    ctrlb, 0);
+    g45_dma_program(1, short_address, shared_address, 0, short_ctrla,
+                    ctrlb, 0);
+    g45_dma_write(DMAC_CHER, channel_mask);
+    g45test_check(result, g45_dma_wait_channels(channel_mask), 1, 0, 3);
+    mmu_invalidate_dcache((rt_uint32_t)(rt_ubase_t)&dma_destination,
+                          sizeof(dma_destination));
+    __sync_synchronize();
+    g45test_check(result, *shared == 0xbbbbbbbbU,
+                  0xbbbbbbbbU, *shared, 4);
+    status = g45_dma_read(DMAC_EBCISR);
+    g45test_check(result, status == (DMAC_BTC(0) | DMAC_BTC(1)),
+                  DMAC_BTC(0) | DMAC_BTC(1), status, 5);
+
+    /* Restore the reset arbitration mode for later cases. */
+    g45_dma_write(DMAC_GCFG, DMAC_GCFG_ARB_CFG);
+    g45_dma_check_guards(result, &dma_source, 0x2f000000U);
+    g45_dma_check_guards(result, &dma_destination, 0x30000000U);
+    g45_dma_quiesce();
+}
+
 static void g45_dma_run_linear_copy(struct g45test_result *result,
                                     unsigned int channel,
                                     rt_uint32_t source,

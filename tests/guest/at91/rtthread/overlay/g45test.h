@@ -33,6 +33,7 @@ void g45test_check(struct g45test_result *result, rt_bool_t condition,
                    rt_uint32_t expected, rt_uint32_t actual,
                    rt_uint32_t offset);
 
+void g45test_d2_subbuffer_arbitration(struct g45test_result *result);
 void g45test_d1_contract(struct g45test_result *result);
 void g45test_d1_mem2mem(struct g45test_result *result);
 void g45test_d1_channels(struct g45test_result *result);

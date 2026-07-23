@@ -102,6 +102,8 @@
 #define HSMCI_TDR              0x34
 #define HSMCI_SR               0x40
 #define HSMCI_IER              0x44
+#define HSMCI_DMA_REG          0x50
+#define HSMCI_DMA_DMAEN        (1u << 8)
 #define HSMCI_SR_BLKE          (1u << 3)
 #define HSMCI_SR_NOTBUSY       (1u << 5)
 #define HSMCI_SR_XFRDONE       (1u << 27)
@@ -110,8 +112,12 @@
 #define HSMCI_CMDR_RSP_136     (2u << 6)
 #define HSMCI_CMDR_MAXLAT_64   (1u << 12)
 #define HSMCI_CMDR_START       (1u << 16)
+#define HSMCI_CMDR_STOP        (2u << 16)
 #define HSMCI_CMDR_READ        (1u << 18)
 #define HSMCI_CMDR_MULTI       (1u << 19)
+#define HSMCI_SR_DTIP          (1u << 4)
+#define DMAC_GCFG              0x00
+#define DMAC_GCFG_ARB_CFG      (1u << 4)
 
 typedef struct DmaRoute {
     const char *machine;
@@ -210,6 +216,7 @@ static void start_hsmci_read(QTestState *qts, const DmaRoute *route)
 {
     ensure_vm_running(qts);
     qtest_writel(qts, route->hsmci_base + HSMCI_CR, HSMCI_CR_MCIEN);
+    qtest_writel(qts, route->hsmci_base + HSMCI_DMA_REG, HSMCI_DMA_DMAEN);
     qtest_writel(qts, route->hsmci_base + HSMCI_BLKR,
                  (16u << 16) | 1);
     qtest_writel(qts, route->hsmci_base + HSMCI_ARGR, 0);
@@ -270,6 +277,7 @@ static void test_hsmci_tx_dma_request(void)
     qtest_writel(qts, route->hsmci_base + HSMCI_BLKR,
                  (16u << 16) | 1);
     qtest_writel(qts, route->hsmci_base + HSMCI_CR, HSMCI_CR_MCIEN);
+    qtest_writel(qts, route->hsmci_base + HSMCI_DMA_REG, HSMCI_DMA_DMAEN);
     qtest_writel(qts, route->hsmci_base + HSMCI_ARGR, 0);
     qtest_writel(qts, route->hsmci_base + HSMCI_CMDR,
                  24 | HSMCI_CMDR_START);
@@ -354,6 +362,7 @@ static void test_hsmci_acmd13_completion(void)
     qtest_writel(qts, G45_DMAC_BASE + DMAC_EN, 1);
     qtest_writel(qts, G45_DMAC_BASE + DMAC_CHER, DMAC_ENA(0));
 
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_DMA_REG, HSMCI_DMA_DMAEN);
     qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_BLKR, (64u << 16) | 1);
     hsmci_command(qts, 55 | HSMCI_CMDR_RSP_48, rca);
     hsmci_command(qts, 13 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
@@ -382,6 +391,297 @@ static void test_hsmci_acmd13_completion(void)
 
     qtest_quit(qts);
     unlink(image_path);
+}
+
+/* Create a 64 MiB sparse SD image whose first bytes hold a known pattern. */
+static char *hsmci_create_pattern_image(uint8_t *pattern, size_t size)
+{
+    g_autofree char *image_path = NULL;
+    size_t i;
+    int fd;
+
+    for (i = 0; i < size; i++) {
+        pattern[i] = (uint8_t)(i * 7 + (i >> 8) * 13 + 5);
+    }
+    fd = g_file_open_tmp("at91-dmac-sd-XXXXXX.img", &image_path, NULL);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, 64 * MiB), ==, 0);
+    g_assert_cmpint(pwrite(fd, pattern, size, 0), ==, size);
+    close(fd);
+    return g_steal_pointer(&image_path);
+}
+
+static void hsmci_program_read_lli(QTestState *qts, uint64_t lli,
+                                   uint64_t dst, uint32_t btsize_words)
+{
+    const uint32_t ctrla = DMAC_CTRLA_BTSIZE(btsize_words) |
+                           DMAC_CTRLA_SRC_WIDTH_4 |
+                           DMAC_CTRLA_DST_WIDTH_4;
+    const uint32_t ctrlb = DMAC_CTRLB_FC_PER2MEM |
+                           DMAC_CTRLB_SRC_FIXED;
+
+    qtest_writel(qts, lli + 0, G45_HSMCI0_BASE + HSMCI_RDR);
+    qtest_writel(qts, lli + 4, dst);
+    qtest_writel(qts, lli + 8, ctrla);
+    qtest_writel(qts, lli + 12, ctrlb);
+    qtest_writel(qts, lli + 16, 0);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_CH0_BASE + DMAC_DSCR, lli);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_CH0_BASE + DMAC_CFG,
+                 dmac_cfg_src_per(0) | DMAC_CFG_SRC_H2SEL);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_EN, 1);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_CHER, DMAC_ENA(0));
+}
+
+/*
+ * The driver clears DMAEN for CPU transfers and sets it for DMA transfers;
+ * without DMAEN the request line must stay silent even with data waiting.
+ */
+static void test_hsmci_dmaen_gates_request(void)
+{
+    g_autofree char *image_path = NULL;
+    const uint64_t lli = G45_SDRAM_BASE + 0x34000;
+    const uint64_t dst = G45_SDRAM_BASE + 0x35000;
+    uint8_t pattern[1024];
+    QTestState *qts;
+    uint32_t expected;
+    int i;
+
+    image_path = hsmci_create_pattern_image(pattern, sizeof(pattern));
+    qts = qtest_initf("-machine sam9m10g45ek -S "
+                      "-drive if=sd,index=0,format=raw,file=%s", image_path);
+    ensure_vm_running(qts);
+    hsmci_select_sd_card(qts);
+
+    qtest_memset(qts, dst, 0xcc, 512);
+    hsmci_program_read_lli(qts, lli, dst, 128);
+
+    /* DMAEN stays clear: the completed CMD17 read raises no request. */
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_BLKR, (512u << 16) | 1);
+    hsmci_command(qts, 17 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
+                  HSMCI_CMDR_START | HSMCI_CMDR_READ, 0);
+    qtest_clock_step(qts, 100000);
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_CHSR) &
+                    DMAC_ENA(0), ==, DMAC_ENA(0));
+    g_assert_cmphex(qtest_readl(qts, dst), ==, 0xcccccccc);
+    g_assert_cmphex(qtest_readl(qts, G45_HSMCI0_BASE + HSMCI_SR) &
+                    HSMCI_SR_DTIP, ==, HSMCI_SR_DTIP);
+
+    /* Enabling DMAEN with data waiting asserts the request and drains it. */
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_DMA_REG, HSMCI_DMA_DMAEN);
+    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 0);
+    for (i = 0; i < 512; i += 4) {
+        memcpy(&expected, &pattern[i], sizeof(expected));
+        g_assert_cmphex(qtest_readl(qts, dst + i), ==, expected);
+    }
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR) &
+                    (DMAC_BTC(0) | DMAC_ERR(0)), ==, DMAC_BTC(0));
+    qtest_quit(qts);
+    unlink(image_path);
+}
+
+/*
+ * A descriptor shorter than the card transaction: the DMAC stops at BTSIZE
+ * with BTC, memory beyond the buffer stays intact, the HSMCI is still
+ * mid-transfer, and a STOP command plus a fresh descriptor recover exactly.
+ */
+static void test_hsmci_descriptor_shorter_than_transaction(void)
+{
+    g_autofree char *image_path = NULL;
+    const uint64_t lli = G45_SDRAM_BASE + 0x36000;
+    const uint64_t dst = G45_SDRAM_BASE + 0x37000;
+    const uint64_t guard = dst + 512;
+    uint8_t pattern[1024];
+    QTestState *qts;
+    uint32_t expected;
+    uint32_t status;
+    int i;
+
+    image_path = hsmci_create_pattern_image(pattern, sizeof(pattern));
+    qts = qtest_initf("-machine sam9m10g45ek -S "
+                      "-drive if=sd,index=0,format=raw,file=%s", image_path);
+    ensure_vm_running(qts);
+    hsmci_select_sd_card(qts);
+
+    qtest_memset(qts, dst, 0xcc, 512);
+    qtest_memset(qts, guard, 0xa5, 64);
+    hsmci_program_read_lli(qts, lli, dst, 128);
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_DMA_REG, HSMCI_DMA_DMAEN);
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_BLKR, (512u << 16) | 8);
+    hsmci_command(qts, 18 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
+                  HSMCI_CMDR_START | HSMCI_CMDR_READ | HSMCI_CMDR_MULTI, 0);
+    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 0);
+
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR) &
+                    (DMAC_BTC(0) | DMAC_ERR(0)), ==, DMAC_BTC(0));
+    for (i = 0; i < 512; i += 4) {
+        memcpy(&expected, &pattern[i], sizeof(expected));
+        g_assert_cmphex(qtest_readl(qts, dst + i), ==, expected);
+    }
+    for (i = 0; i < 64; i += 4) {
+        g_assert_cmphex(qtest_readl(qts, guard + i), ==, 0xa5a5a5a5);
+    }
+
+    /* The card transaction is still in progress; STOP aborts it cleanly. */
+    status = qtest_readl(qts, G45_HSMCI0_BASE + HSMCI_SR);
+    g_assert_cmphex(status & HSMCI_SR_DTIP, ==, HSMCI_SR_DTIP);
+    hsmci_command(qts, 12 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_STOP, 0);
+    status = qtest_readl(qts, G45_HSMCI0_BASE + HSMCI_SR);
+    g_assert_cmphex(status & (HSMCI_SR_DTIP | HSMCI_SR_NOTBUSY |
+                              HSMCI_SR_XFRDONE), ==,
+                    HSMCI_SR_NOTBUSY | HSMCI_SR_XFRDONE);
+
+    /* A fresh transfer is byte-exact: no stale grant misaligned it. */
+    qtest_memset(qts, dst, 0xcc, 512);
+    hsmci_program_read_lli(qts, lli, dst, 128);
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_BLKR, (512u << 16) | 1);
+    hsmci_command(qts, 17 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
+                  HSMCI_CMDR_START | HSMCI_CMDR_READ, 512);
+    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 0);
+    for (i = 0; i < 512; i += 4) {
+        memcpy(&expected, &pattern[512 + i], sizeof(expected));
+        g_assert_cmphex(qtest_readl(qts, dst + i), ==, expected);
+    }
+    qtest_quit(qts);
+    unlink(image_path);
+}
+
+/*
+ * A descriptor longer than the card transaction: the channel legitimately
+ * waits with exact residue after XFRDONE; the driver's CHDR recovery leaves
+ * no stale request state and the reused channel transfers byte-exactly.
+ */
+static void test_hsmci_descriptor_longer_than_transaction(void)
+{
+    g_autofree char *image_path = NULL;
+    const uint64_t lli = G45_SDRAM_BASE + 0x38000;
+    const uint64_t dst = G45_SDRAM_BASE + 0x39000;
+    uint8_t pattern[1024];
+    QTestState *qts;
+    uint32_t expected;
+    int i;
+
+    image_path = hsmci_create_pattern_image(pattern, sizeof(pattern));
+    qts = qtest_initf("-machine sam9m10g45ek -S "
+                      "-drive if=sd,index=0,format=raw,file=%s", image_path);
+    ensure_vm_running(qts);
+    hsmci_select_sd_card(qts);
+
+    qtest_memset(qts, dst, 0xcc, 1024);
+    hsmci_program_read_lli(qts, lli, dst, 256);
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_DMA_REG, HSMCI_DMA_DMAEN);
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_BLKR, (512u << 16) | 1);
+    hsmci_command(qts, 17 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
+                  HSMCI_CMDR_START | HSMCI_CMDR_READ, 0);
+    for (i = 0; i < 8192; i++) {
+        if ((qtest_readl(qts, G45_DMAC_BASE + DMAC_CH0_BASE + DMAC_CTRLA) &
+             0xffff) == 128) {
+            break;
+        }
+        qtest_clock_step(qts, 1);
+    }
+    qtest_clock_step(qts, 10000);
+
+    /* The card is done; the channel waits with exact residue. */
+    g_assert_cmphex(qtest_readl(qts, G45_HSMCI0_BASE + HSMCI_SR) &
+                    (HSMCI_SR_DTIP | HSMCI_SR_XFRDONE), ==,
+                    HSMCI_SR_XFRDONE);
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_CHSR) &
+                    DMAC_ENA(0), ==, DMAC_ENA(0));
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_CH0_BASE +
+                                DMAC_CTRLA) & 0xffff, ==, 128);
+    for (i = 0; i < 512; i += 4) {
+        memcpy(&expected, &pattern[i], sizeof(expected));
+        g_assert_cmphex(qtest_readl(qts, dst + i), ==, expected);
+    }
+    for (i = 512; i < 1024; i += 4) {
+        g_assert_cmphex(qtest_readl(qts, dst + i), ==, 0xcccccccc);
+    }
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR), ==, 0);
+
+    /* Driver recovery: disable the channel, then reuse it exactly. */
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_CHDR, DMAC_ENA(0));
+    qtest_clock_step(qts, 1);
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_CHSR) &
+                    DMAC_ENA(0), ==, 0);
+
+    qtest_memset(qts, dst, 0xcc, 512);
+    hsmci_program_read_lli(qts, lli, dst, 128);
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_BLKR, (512u << 16) | 1);
+    hsmci_command(qts, 17 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
+                  HSMCI_CMDR_START | HSMCI_CMDR_READ, 512);
+    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 0);
+    for (i = 0; i < 512; i += 4) {
+        memcpy(&expected, &pattern[512 + i], sizeof(expected));
+        g_assert_cmphex(qtest_readl(qts, dst + i), ==, expected);
+    }
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR) &
+                    (DMAC_BTC(0) | DMAC_ERR(0)), ==, DMAC_BTC(0));
+    qtest_quit(qts);
+    unlink(image_path);
+}
+
+/*
+ * Two concurrently pending unpaced channels write one shared fixed word.
+ * Modified round-robin interleaves at chunk granularity, so the short
+ * channel's word is overwritten by the long channel's tail; fixed priority
+ * drains the lower channel completely first, so the short channel's word
+ * lands last.
+ */
+static void run_subbuffer_arbitration_case(bool round_robin)
+{
+    QTestState *qts = qtest_init("-machine sam9m10g45ek -S");
+    const uint64_t src_a = G45_SDRAM_BASE + 0x3a000;
+    const uint64_t src_b = G45_SDRAM_BASE + 0x3a100;
+    const uint64_t shared = G45_SDRAM_BASE + 0x3a200;
+    const uint32_t ctrlb = DMAC_CTRLB_DST_FIXED |
+                           DMAC_CTRLB_SRC_DSCR_DIS |
+                           DMAC_CTRLB_DST_DSCR_DIS;
+    const uint64_t ch2_base = G45_DMAC_BASE + DMAC_CH0_BASE +
+                              2 * DMAC_CH_STRIDE;
+    const uint64_t ch3_base = G45_DMAC_BASE + DMAC_CH0_BASE +
+                              3 * DMAC_CH_STRIDE;
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        qtest_writel(qts, src_a + 4 * i, 0xaaaa0000 + i);
+    }
+    qtest_writel(qts, src_b, 0xbbbbbbbb);
+    qtest_writel(qts, shared, 0xdeadbeef);
+
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_GCFG,
+                 round_robin ? DMAC_GCFG_ARB_CFG : 0);
+    qtest_writel(qts, ch2_base + DMAC_SADDR, src_a);
+    qtest_writel(qts, ch2_base + DMAC_DADDR, shared);
+    qtest_writel(qts, ch2_base + DMAC_CTRLA, DMAC_CTRLA_BTSIZE(4) |
+                 DMAC_CTRLA_SRC_WIDTH_4 | DMAC_CTRLA_DST_WIDTH_4);
+    qtest_writel(qts, ch2_base + DMAC_CTRLB, ctrlb);
+    qtest_writel(qts, ch3_base + DMAC_SADDR, src_b);
+    qtest_writel(qts, ch3_base + DMAC_DADDR, shared);
+    qtest_writel(qts, ch3_base + DMAC_CTRLA, DMAC_CTRLA_BTSIZE(1) |
+                 DMAC_CTRLA_SRC_WIDTH_4 | DMAC_CTRLA_DST_WIDTH_4);
+    qtest_writel(qts, ch3_base + DMAC_CTRLB, ctrlb);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_EN, 1);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_CHER,
+                 DMAC_ENA(2) | DMAC_ENA(3));
+    qtest_clock_step(qts, 1);
+
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_CHSR) &
+                    (DMAC_ENA(2) | DMAC_ENA(3)), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR), ==,
+                    DMAC_BTC(2) | DMAC_BTC(3));
+    g_assert_cmphex(qtest_readl(qts, shared), ==,
+                    round_robin ? 0xaaaa0003 : 0xbbbbbbbb);
+    qtest_quit(qts);
+}
+
+static void test_dmac_subbuffer_arbitration_round_robin(void)
+{
+    run_subbuffer_arbitration_case(true);
+}
+
+static void test_dmac_subbuffer_arbitration_fixed(void)
+{
+    run_subbuffer_arbitration_case(false);
 }
 
 static void test_hsmci_dma_block_refill_reentrancy(void)
@@ -434,6 +734,7 @@ static void test_hsmci_dma_block_refill_reentrancy(void)
     qtest_writel(qts, G45_DMAC_BASE + DMAC_EN, 1);
     qtest_writel(qts, G45_DMAC_BASE + DMAC_CHER, DMAC_ENA(0));
 
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_DMA_REG, HSMCI_DMA_DMAEN);
     qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_BLKR,
                  (512u << 16) | 8);
     hsmci_command(qts, 18 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
@@ -2726,6 +3027,16 @@ int main(int argc, char **argv)
                    test_hsmci_tx_dma_request);
     qtest_add_func("/at91-dmac/g45/hsmci0/acmd13-completion",
                    test_hsmci_acmd13_completion);
+    qtest_add_func("/at91-dmac/g45/hsmci0/dmaen-gates-request",
+                   test_hsmci_dmaen_gates_request);
+    qtest_add_func("/at91-dmac/g45/hsmci0/descriptor-shorter-than-transaction",
+                   test_hsmci_descriptor_shorter_than_transaction);
+    qtest_add_func("/at91-dmac/g45/hsmci0/descriptor-longer-than-transaction",
+                   test_hsmci_descriptor_longer_than_transaction);
+    qtest_add_func("/at91-dmac/g45/subbuffer-arbitration-round-robin",
+                   test_dmac_subbuffer_arbitration_round_robin);
+    qtest_add_func("/at91-dmac/g45/subbuffer-arbitration-fixed",
+                   test_dmac_subbuffer_arbitration_fixed);
     qtest_add_func("/at91-dmac/g45/hsmci0/block-refill-reentrancy",
                    test_hsmci_dma_block_refill_reentrancy);
     qtest_add_data_func("/at91-dmac/g35/hsmci0/dmac0-request-0", &routes[2],

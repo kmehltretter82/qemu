@@ -473,6 +473,8 @@ static const struct g45test_case g45test_cases[] = {
       g45test_d1_mixed_software_requests },
     { "d1.irq", "d1", "D1", g45test_d1_irq },
     { "d1.irq-mask", "d1", "D1", g45test_d1_irq_mask },
+    { "d2.subbuffer-arbitration", "d2", "D2",
+      g45test_d2_subbuffer_arbitration },
     { "core.scheduler", "core", "CORE", g45test_core_scheduler },
 };
 
