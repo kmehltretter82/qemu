@@ -238,6 +238,7 @@ qtests_stm32l4x5 = \
    'stm32l4x5_usart-test']
 
 qtests_arm = \
+  (config_all_devices.has_key('CONFIG_SAM9G45') ? ['at91-ac97-test'] : []) + \
   (config_all_devices.has_key('CONFIG_SAM9G45') ? ['at91-dmac-test'] : []) + \
   (config_all_devices.has_key('CONFIG_SAM9G45') ? ['at91-hsmci-test'] : []) + \
   (config_all_devices.has_key('CONFIG_SAM9G45') ? ['at91-lcdc-test'] : []) + \
