@@ -64,13 +64,11 @@
  * everything above it is free for the kernel's own page tables.  Load the
  * image anywhere else and it allocates straight over itself.
  *
- * Our own structures therefore live in the *top* megabyte, which initarm()
- * will not reach: it allocates upward from just past the kernel, and is
- * finished with all three of them (the stub before entry, the L1 table
- * once it installs its own TTBR, the bootconfig once canonicalise_
- * bootconfig() has copied it) long before allocation could get that far.
- * The top of RAM is 1 MiB aligned, so the L1 table's 16 KiB alignment
- * comes for free.
+ * Our own structures therefore live in the top four megabytes, which are
+ * excluded from the DRAM described by bootconfig.  The stub, L1 table and
+ * bootconfig are temporary, but the framebuffer remains live after initarm()
+ * and must never be handed to the VM allocator.  The top of RAM is 1 MiB
+ * aligned, so the L1 table's 16 KiB alignment comes for free.
  */
 #define KERNEL_OFF          0x00000000
 #define BOOTSCRATCH_SIZE    (4 * MiB)
@@ -313,7 +311,8 @@ static void acorn32_write_stub(hwaddr stub_pa, hwaddr l1_pa,
 }
 
 static void acorn32_write_bootconfig(hwaddr pa, hwaddr ram_base,
-                                     ram_addr_t ram_size, hwaddr kernel_pa,
+                                     ram_addr_t usable_ram_size,
+                                     hwaddr kernel_pa,
                                      uint32_t kernel_span, hwaddr fb_pa,
                                      const char *kernel_filename,
                                      const char *cmdline)
@@ -335,10 +334,10 @@ static void acorn32_write_bootconfig(hwaddr pa, hwaddr ram_base,
     bc->kernsize         = cpu_to_le32(kernel_span);
 
     bc->pagesize   = cpu_to_le32(4096);
-    bc->drampages  = cpu_to_le32(ram_size / 4096);
+    bc->drampages  = cpu_to_le32(usable_ram_size / 4096);
     bc->dramblocks = cpu_to_le32(1);
     bc->dram[0].address = cpu_to_le32(ram_base);
-    bc->dram[0].pages   = cpu_to_le32(ram_size / 4096);
+    bc->dram[0].pages   = cpu_to_le32(usable_ram_size / 4096);
     bc->dram[0].flags   = cpu_to_le32(0);   /* PHYSMEM_TYPE_GENERIC */
 
     /*
@@ -349,10 +348,10 @@ static void acorn32_write_bootconfig(hwaddr pa, hwaddr ram_base,
      * model exists.  NetBSD's console on acorn32 is vidcvideo, not the
      * serial port, so consinit() runs vidcvideo_cnattach() during boot and
      * writes into this memory; handing it display_phys == 0 faults in
-     * data_abort_entry.  Point it at a real chunk of DRAM in our scratch
-     * region.  With no VIDC20 the pixels simply go nowhere - but the
-     * kernel gets past its console attach, which is what we need to
-     * proceed.
+     * data_abort_entry.  Point it at a real chunk of DRAM in our reserved
+     * scratch region.  That region is deliberately absent from dram[]:
+     * otherwise the VM allocator eventually reuses the live framebuffer
+     * and console pixels corrupt kernel memory.
      */
     bc->vrampages  = cpu_to_le32(0);
     bc->vramblocks = cpu_to_le32(0);
@@ -417,7 +416,8 @@ bool acorn32_load_netbsd(MachineState *machine, hwaddr ram_base,
     }
 
     acorn32_build_l1(l1_pa, ram_base, ram_size, ctx.kernel_pa, kernel_span);
-    acorn32_write_bootconfig(bc_pa, ram_base, ram_size, ctx.kernel_pa,
+    acorn32_write_bootconfig(bc_pa, ram_base,
+                             ram_size - BOOTSCRATCH_SIZE, ctx.kernel_pa,
                              kernel_span, fb_pa, machine->kernel_filename,
                              machine->kernel_cmdline);
     acorn32_write_stub(stub_pa, l1_pa, bc_pa);
