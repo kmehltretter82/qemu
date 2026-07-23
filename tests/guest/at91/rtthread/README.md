@@ -200,8 +200,14 @@ a dmas-patched DTB (mainline G45 DTs never declare SPI dmas) caught a real
 contract bug the word-width qtests missed: the SPI data registers only
 accepted 4-byte MMIO accesses, so the driver's 8-bit DMA beats faulted -
 the same 1..4-byte data-register contract the TWI needed. A 1 MiB
-/dev/mtd0 DMA read now md5-matches the host pattern. The model passes the
-unrelaxed guest suite and 49 focused DMAC qtests plus 9 HSMCI qtests,
+/dev/mtd0 DMA read now md5-matches the host pattern. The fifth increment
+wires the SSC0/SSC1 routes (ids 5..8) with the same TX-rearm/RX-natural
+contract and round-trips loopback patterns through both controllers at
+halfword and byte widths; the AC97 route (ids 9/10) is documented
+not-applicable - the model's AC97C data path is its embedded PDC (as is
+the mainline driver's) and CARHR/CATHR are register stubs. The model
+passes the
+unrelaxed guest suite and 51 focused DMAC qtests plus 9 HSMCI qtests,
 including migration with a byte
 held in the conversion FIFO and a queued request, with an enabled pending
 interrupt, in the middle of a PiP row, at an AUTO replay stalled boundary, and
@@ -236,11 +242,11 @@ source/destination pacing, live level sampling at CHER and on channel
 disable, HSMCI_DMA.DMAEN gating, sub-buffer channel interleave under both
 arbitration modes, descriptor-versus-transaction length mismatches with
 driver-shaped recovery and migration at those boundaries, and the DTOR
-data timeout with a migrated countdown, and the SPI0/SPI1 request routes.
-Still open in D2 are beat granularity inside a chunk, FIFO_CFG
-thresholds, physical card removal, and the SSC/AC97 routes (qtest-only:
-mainline DTs declare no SSC dmas and the ac97c driver uses the modelled
-embedded PDC); D3 will exercise DBGU/USART, SSC and AC97 PDC
+data timeout with a migrated countdown, and every applicable Table 40-1
+request route (HSMCI 0/13, SPI 1..4, SSC 5..8; AC97 9/10 is
+not-applicable to this model's PDC-based AC97C). Still open in D2 are
+beat granularity inside a chunk, FIFO_CFG thresholds and physical card
+removal; D3 will exercise DBGU/USART, SSC and AC97 PDC
 current/next-buffer state machines. Later phases cover storage, rings,
 continuous fetch, cyclic streams, Linux companion tests, errors and soak.
 
