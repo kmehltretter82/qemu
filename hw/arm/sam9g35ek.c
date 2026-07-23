@@ -138,12 +138,15 @@ struct Sam9g35ekMachineState {
 
 /* Create an HSMCI controller, wire its IRQ to the AIC, and attach an SD card
  * from the matching -sd drive (if any). */
-static void sam9x5_create_hsmci(hwaddr base, DeviceState *aic, int irqno,
-                                int sd_unit, DeviceState *dmac)
+static void sam9x5_create_hsmci(MachineState *machine, const char *name,
+                                Clock *mck, hwaddr base, DeviceState *aic,
+                                int irqno, int sd_unit, DeviceState *dmac)
 {
     DeviceState *mci = qdev_new(TYPE_AT91_HSMCI);
     DriveInfo *di = drive_get(IF_SD, 0, sd_unit);
 
+    object_property_add_child(OBJECT(machine), name, OBJECT(mci));
+    qdev_connect_clock_in(mci, "mck", mck);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(mci), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(mci), 0, base);
     sysbus_connect_irq(SYS_BUS_DEVICE(mci), 0, qdev_get_gpio_in(aic, irqno));
@@ -354,10 +357,10 @@ static void sam9g35ek_init(MachineState *machine)
     }
 
     /* High Speed MMC interfaces (SD via -sd / -drive if=sd). */
-    sam9x5_create_hsmci(SAM9X5_HSMCI0_BASE, aic, SAM9X5_IRQ_HSMCI0, 0,
-                        dmac_dev[0]);
-    sam9x5_create_hsmci(SAM9X5_HSMCI1_BASE, aic, SAM9X5_IRQ_HSMCI1, 1,
-                        dmac_dev[1]);
+    sam9x5_create_hsmci(machine, "hsmci0", mck, SAM9X5_HSMCI0_BASE, aic,
+                        SAM9X5_IRQ_HSMCI0, 0, dmac_dev[0]);
+    sam9x5_create_hsmci(machine, "hsmci1", mck, SAM9X5_HSMCI1_BASE, aic,
+                        SAM9X5_IRQ_HSMCI1, 1, dmac_dev[1]);
 
     /* DBGU console -> OR-gate input 0.  The DBGU is a cut-down USART that also
      * exposes the SoC Chip ID registers. */

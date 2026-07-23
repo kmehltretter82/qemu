@@ -183,6 +183,7 @@
 /* mmc card-detect lines on PIOD (board DT: cd-gpios = <&pioD 10/11 ...>). */
 #define SAM9G45_MMC0_CD_PIN  10
 #define SAM9G45_MMC1_CD_PIN  11
+#define SAM9G45_MMC1_WP_PIN  29
 
 /* NAND flash sits in the EBI chip-select 3 window; its ready/busy output
  * is a PIO input (board DT: gpios = <&pioC 8 ...> in the nand node). */
@@ -403,12 +404,16 @@ static void sam9_create_ebi_devices(MachineState *machine)
 
 /* Create an HSMCI controller, wire its interrupt to the AIC, and attach an
  * SD card from the matching -sd drive (if any). */
-static void sam9_create_hsmci(hwaddr base, DeviceState *aic, int irqno,
-                              int sd_unit, DeviceState *dmac, int dma_request)
+static void sam9_create_hsmci(MachineState *machine, const char *name,
+                              Clock *mck, hwaddr base, DeviceState *aic,
+                              int irqno, int sd_unit, DeviceState *dmac,
+                              int dma_request)
 {
     DeviceState *mci = qdev_new(TYPE_AT91_HSMCI);
     DriveInfo *di = drive_get(IF_SD, 0, sd_unit);
 
+    object_property_add_child(OBJECT(machine), name, OBJECT(mci));
+    qdev_connect_clock_in(mci, "mck", mck);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(mci), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(mci), 0, base);
     sysbus_connect_irq(SYS_BUS_DEVICE(mci), 0, qdev_get_gpio_in(aic, irqno));
@@ -623,6 +628,13 @@ static void sam9m10g45ek_init(MachineState *machine)
                             drive_get(IF_SD, 0, 0) == NULL);
         pio_set_reset_input(piod, SAM9G45_MMC1_CD_PIN,
                             drive_get(IF_SD, 0, 1) == NULL);
+        /*
+         * The second socket's mechanical write-protect switch is PD29,
+         * active high.  QEMU's SD card backend currently requires writable
+         * media, so a present card drives the input low.
+         */
+        pio_set_reset_input(piod, SAM9G45_MMC1_WP_PIN,
+                            drive_get(IF_SD, 0, 1) == NULL);
 
         /* NAND flash on EBI chip select 3 (attach with -drive if=mtd,
          * format=raw; the image uses the raw page + OOB layout, 2112 bytes
@@ -661,10 +673,10 @@ static void sam9m10g45ek_init(MachineState *machine)
     }
 
     /* High Speed MMC interfaces (SD via -sd / -drive if=sd). */
-    sam9_create_hsmci(SAM9G45_HSMCI0_BASE, aic, SAM9G45_IRQ_HSMCI0, 0,
-                      dmac, 0);
-    sam9_create_hsmci(SAM9G45_HSMCI1_BASE, aic, SAM9G45_IRQ_HSMCI1, 1,
-                      dmac, 13);
+    sam9_create_hsmci(machine, "hsmci0", mck, SAM9G45_HSMCI0_BASE, aic,
+                      SAM9G45_IRQ_HSMCI0, 0, dmac, 0);
+    sam9_create_hsmci(machine, "hsmci1", mck, SAM9G45_HSMCI1_BASE, aic,
+                      SAM9G45_IRQ_HSMCI1, 1, dmac, 13);
 
     /* TWI (I2C) controllers.  Slaves attach with e.g.
      * -device at24c-eeprom,bus=i2c-bus.0,address=0x50.  The board's OV2640

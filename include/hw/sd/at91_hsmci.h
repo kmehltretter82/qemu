@@ -13,5 +13,6 @@
 OBJECT_DECLARE_SIMPLE_TYPE(AT91HsmciState, AT91_HSMCI)
 
 #define AT91_HSMCI_DMA_REQUEST "dma-request"
+#define AT91_HSMCI_SDIO_IRQ    "sdio-irq"
 
 #endif /* HW_SD_AT91_HSMCI_H */
