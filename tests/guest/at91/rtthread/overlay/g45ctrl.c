@@ -963,6 +963,62 @@ void g45test_r4_touch(struct g45test_result *result)
     g45ctrl_clock_stop();
 }
 
+#define G45_RSTC_BASE   0xfffffd00U
+#define RSTC_CR_KEY     0xa5000000U
+#define RSTC_CR_PROCRST (1U << 0)
+#define RSTC_CR_PERRST  (1U << 2)
+
+static rt_uint32_t g45ctrl_gpbr_pattern(rt_uint32_t seed, rt_uint32_t i)
+{
+    return seed ^ (0x9e3779b9U * (i + 1U));
+}
+
+/*
+ * Two-phase reset-domain proof (suites r4reset-seed / r4reset-verify,
+ * driven specially by the host runner): the seed phase parks patterns
+ * in the battery-backed GPBR and pulls the processor+peripheral reset
+ * through the RSTC; the machine reboots and the verify phase checks
+ * the patterns survived.  On silicon GPBR persists on VDDBU; in QEMU
+ * the device deliberately has no reset handler.
+ */
+void g45test_r4_reset_seed(struct g45test_result *result)
+{
+    rt_uint32_t i;
+
+    for (i = 0; i < 4U; i++) {
+        *g45_reg(G45_GPBR_BASE, 4U * i) =
+            g45ctrl_gpbr_pattern(result->seed, i);
+    }
+    for (i = 0; i < 4U; i++) {
+        g45test_check(result,
+                      *g45_reg(G45_GPBR_BASE, 4U * i) ==
+                      g45ctrl_gpbr_pattern(result->seed, i),
+                      g45ctrl_gpbr_pattern(result->seed, i),
+                      *g45_reg(G45_GPBR_BASE, 4U * i), i);
+    }
+    rt_kprintf("G45TEST RESETTING\n");
+    *g45_reg(G45_RSTC_BASE, 0) = RSTC_CR_KEY | RSTC_CR_PROCRST |
+                                 RSTC_CR_PERRST;
+    for (;;) {
+        /* reset rips control away */
+    }
+}
+
+void g45test_r4_reset_verify(struct g45test_result *result)
+{
+    rt_uint32_t i;
+
+    for (i = 0; i < 4U; i++) {
+        g45test_check(result,
+                      *g45_reg(G45_GPBR_BASE, 4U * i) ==
+                      g45ctrl_gpbr_pattern(result->seed, i),
+                      g45ctrl_gpbr_pattern(result->seed, i),
+                      *g45_reg(G45_GPBR_BASE, 4U * i), i);
+    }
+    rt_kprintf("G45TEST DATA case=r4.reset-verify gpbr0=0x%08x\n",
+               *g45_reg(G45_GPBR_BASE, 0));
+}
+
 void g45test_r4_gpbr(struct g45test_result *result)
 {
     static const rt_uint32_t patterns[4] = {

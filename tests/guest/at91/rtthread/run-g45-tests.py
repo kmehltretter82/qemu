@@ -32,6 +32,7 @@ EXPECTED_PASSES = {
     "d2": 1,
     "r4": 10,
     "r4touch": 1,
+    "r4reset-verify": 1,
     "core.scheduler": 1,
 }
 
@@ -399,6 +400,37 @@ def guest_status(vm: QemuVM) -> int:
     return tick
 
 
+def reset_gpbr_cycle(vm: QemuVM, seed: int, boot_timeout: float) -> None:
+    """Seed the battery-backed GPBR, pull the RSTC reset from inside the
+    guest, wait out the reboot and verify the registers survived.
+
+    The VM normally runs with -no-reboot so an unexpected guest reset
+    kills QEMU and fails the run; this one phase expects the reset, so
+    it temporarily allows in-process reboot via QMP set-action (the
+    verify half must see the same QEMU process - the GPBR contents live
+    in it)."""
+    assert vm.serial is not None
+    assert vm.qmp is not None
+    vm.qmp.execute("set-action", {"reboot": "reset"}, timeout=10.0)
+    start = vm.serial.mark()
+    vm.serial.send_line(f"g45test run r4reset-seed 0x{seed:08x}")
+    vm.serial.wait_regex(re.compile(rb"G45TEST RESETTING\r?\n"), start, 30.0)
+    if b"G45TEST FAIL " in bytes(vm.serial.buffer[start:]):
+        raise TestFailure("r4reset-seed failed before the reset")
+    _, end = vm.serial.wait_regex(
+        re.compile(
+            rb"G45TEST READY protocol=(\d+) tick_hz=(\d+) "
+            rb"watchdog_disabled=(\d+)\r?\n"
+        ),
+        start,
+        boot_timeout,
+    )
+    vm.serial.wait_prompt(end, 10.0)
+    vm.qmp.execute("set-action", {"reboot": "shutdown"}, timeout=10.0)
+    guest_run(vm, "r4reset-verify", seed,
+              EXPECTED_PASSES["r4reset-verify"], 60.0)
+
+
 def guest_run(vm: QemuVM, selection: str, seed: int, expected_passes: int,
               timeout: float,
               hostreq: "dict[str, Any] | None" = None) -> bytes:
@@ -549,6 +581,12 @@ def main() -> int:
         wait_for_boot(source, args.boot_timeout)
         summary["registry_count"] = guest_list(source)
         summary["initial_tick"] = guest_status(source)
+
+        if not args.suite:
+            # Reset-domain proof: reboots the guest, so it runs first and
+            # every later phase exercises the post-reset boot.
+            reset_gpbr_cycle(source, args.seed, args.boot_timeout)
+            summary["reset_cycle"] = "pass"
 
         for suite in args.suite or DEFAULT_SUITES:
             suite_timeout = 90.0 if suite in ("d1", "r4", "r4touch") else 60.0
