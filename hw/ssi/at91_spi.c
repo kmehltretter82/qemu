@@ -220,6 +220,7 @@ static uint64_t spi_read(void *opaque, hwaddr offset, unsigned size)
     case SPI_SR:
         r = s->sr | (s->enabled ? SR_SPIENS : 0);
         s->sr &= ~SR_OVRES;   /* OVRES is cleared by reading SR */
+        spi_update_irq(s);
         return r;
     case SPI_IMR:
         return s->imr;
