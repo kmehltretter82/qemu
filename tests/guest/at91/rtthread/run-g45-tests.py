@@ -30,7 +30,7 @@ EXPECTED_PASSES = {
     "d0": 5,
     "d1": 20,
     "d2": 1,
-    "r4": 7,
+    "r4": 8,
     "core.scheduler": 1,
 }
 

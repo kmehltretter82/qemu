@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 34 cases:
+The registry currently contains 35 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -149,7 +149,14 @@ The registry currently contains 34 cases:
   per-channel register independence, CUPD double-buffer steering to
   CDTY or CPRD per CMR.UPD_CDTY, period events on running channels and
   IER/IDR/IMR bookkeeping — all in board-portable shapes that poll with
-  a budget wherever silicon defers an effect to a period boundary. Cases
+  a budget wherever silicon defers an effect to a period boundary; and
+  the TSADCC ADC core: channel enable bitmaps, a software-triggered
+  sequence over two channels, the EOC/DRDY/LCDR clear cascade (CDR read
+  clears its own EOC; LCDR read clears DRDY plus the last channel's
+  EOC), per-channel and global overrun with SR read-clear, and a DRDY
+  interrupt observed pending on the dedicated (masked) AIC source.
+  Converted values are bounds-checked and recorded, never asserted —
+  they are synthetic in the model and analog on hardware. Cases
   that assert the shared system IRQ isolate it at the AIC and bound all
   waits with the free-running RTT value instead of the (frozen)
   scheduler tick.

@@ -72,6 +72,26 @@
 
 #define G45_PWM_BASE    0xfffb8000U
 #define G45_PWM_PID     19U
+#define G45_ADC_BASE    0xfffb0000U
+#define G45_ADC_PID     20U
+
+#define ADC_CR          0x00U
+#define ADC_CR_SWRST    (1U << 0)
+#define ADC_CR_START    (1U << 1)
+#define ADC_MR          0x04U
+#define ADC_CHER        0x10U
+#define ADC_CHDR        0x14U
+#define ADC_CHSR        0x18U
+#define ADC_SR          0x1cU
+#define ADC_LCDR        0x20U
+#define ADC_IER         0x24U
+#define ADC_IDR         0x28U
+#define ADC_IMR         0x2cU
+#define ADC_CDR(n)      (0x30U + 4U * (n))
+#define ADC_SR_EOC(n)   (1U << (n))
+#define ADC_SR_OVRE(n)  (1U << ((n) + 8U))
+#define ADC_SR_DRDY     (1U << 16)
+#define ADC_SR_GOVRE    (1U << 17)
 
 #define PWM_MR          0x00U
 #define PWM_ENA         0x04U
@@ -575,6 +595,105 @@ void g45test_r4_trng(struct g45test_result *result)
 
     rt_kprintf("G45TEST DATA case=r4.trng w0=0x%08x w1=0x%08x\n",
                words[0], words[1]);
+}
+
+/*
+ * ADC core of the TSADCC.  Board-portable by construction: converted
+ * values are bounds-checked and recorded, never asserted (they are
+ * synthetic in the model and analog on hardware), and everything a
+ * conversion takes time for on silicon is polled with a budget.  Touch
+ * press/move/release needs host-side input injection and stays with
+ * the harness-integrated tests.
+ */
+void g45test_r4_tsadcc(struct g45test_result *result)
+{
+    rt_uint32_t sr, cdr0, cdr1, lcdr;
+    rt_uint32_t both = ADC_SR_EOC(0) | ADC_SR_EOC(1) | ADC_SR_DRDY;
+    rt_uint32_t ovr = ADC_SR_OVRE(0) | ADC_SR_OVRE(1) | ADC_SR_GOVRE;
+
+    g45ctrl_clock_start();
+    *(volatile rt_uint32_t *)G45_PMC_PCER = 1U << G45_ADC_PID;
+
+    *g45_reg(G45_ADC_BASE, ADC_CR) = ADC_CR_SWRST;
+    g45test_check(result, *g45_reg(G45_ADC_BASE, ADC_CHSR) == 0U,
+                  0, *g45_reg(G45_ADC_BASE, ADC_CHSR), 0);
+
+    /* Channel enable bitmap. */
+    *g45_reg(G45_ADC_BASE, ADC_CHER) = 0x05U;
+    g45test_check(result, *g45_reg(G45_ADC_BASE, ADC_CHSR) == 0x05U,
+                  0x05U, *g45_reg(G45_ADC_BASE, ADC_CHSR), 1);
+    *g45_reg(G45_ADC_BASE, ADC_CHDR) = 0x04U;
+    *g45_reg(G45_ADC_BASE, ADC_CHER) = 0x02U;
+    g45test_check(result, *g45_reg(G45_ADC_BASE, ADC_CHSR) == 0x03U,
+                  0x03U, *g45_reg(G45_ADC_BASE, ADC_CHSR), 2);
+
+    g45test_check(result, (*g45_reg(G45_ADC_BASE, ADC_SR) & both) == 0U,
+                  0, *g45_reg(G45_ADC_BASE, ADC_SR) & both, 3);
+
+    /* One software-triggered sequence over ch0+ch1. */
+    *g45_reg(G45_ADC_BASE, ADC_CR) = ADC_CR_START;
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_ADC_BASE, ADC_SR), ADC_SR_DRDY,
+                               RT_TRUE, 100U),
+                  ADC_SR_DRDY, *g45_reg(G45_ADC_BASE, ADC_SR), 4);
+    sr = *g45_reg(G45_ADC_BASE, ADC_SR);
+    g45test_check(result, (sr & both) == both, both, sr & both, 5);
+
+    /* CDR read clears its EOC only. */
+    cdr0 = *g45_reg(G45_ADC_BASE, ADC_CDR(0));
+    g45test_check(result, cdr0 <= 0x3ffU, 0x3ffU, cdr0, 6);
+    sr = *g45_reg(G45_ADC_BASE, ADC_SR);
+    g45test_check(result,
+                  (sr & ADC_SR_EOC(0)) == 0U &&
+                  (sr & ADC_SR_EOC(1)) != 0U,
+                  ADC_SR_EOC(1), sr & (ADC_SR_EOC(0) | ADC_SR_EOC(1)), 7);
+
+    /* LCDR is the last converted word; reading clears DRDY + its EOC. */
+    lcdr = *g45_reg(G45_ADC_BASE, ADC_LCDR);
+    cdr1 = *g45_reg(G45_ADC_BASE, ADC_CDR(1));
+    g45test_check(result, lcdr == cdr1, cdr1, lcdr, 8);
+    sr = *g45_reg(G45_ADC_BASE, ADC_SR);
+    g45test_check(result,
+                  (sr & (ADC_SR_DRDY | ADC_SR_EOC(1))) == 0U,
+                  0, sr & (ADC_SR_DRDY | ADC_SR_EOC(1)), 9);
+
+    /* Two triggers without draining overrun both channels + globally. */
+    *g45_reg(G45_ADC_BASE, ADC_CR) = ADC_CR_START;
+    g45ctrl_wait(g45_reg(G45_ADC_BASE, ADC_SR), ADC_SR_DRDY, RT_TRUE, 100U);
+    *g45_reg(G45_ADC_BASE, ADC_CR) = ADC_CR_START;
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_ADC_BASE, ADC_SR), ADC_SR_GOVRE,
+                               RT_TRUE, 100U),
+                  ADC_SR_GOVRE, *g45_reg(G45_ADC_BASE, ADC_SR) & ovr, 10);
+    sr = *g45_reg(G45_ADC_BASE, ADC_SR);   /* read-clears overrun bits */
+    sr = *g45_reg(G45_ADC_BASE, ADC_SR);
+    g45test_check(result, (sr & ovr) == 0U, 0, sr & ovr, 11);
+    g45test_check(result, (sr & both) == both, both, sr & both, 12);
+    (void)*g45_reg(G45_ADC_BASE, ADC_CDR(0));
+    (void)*g45_reg(G45_ADC_BASE, ADC_LCDR);
+
+    /* DRDY interrupt reaches the (masked) dedicated AIC source. */
+    *g45_reg(G45_ADC_BASE, ADC_IER) = ADC_SR_DRDY;
+    g45test_check(result, *g45_reg(G45_ADC_BASE, ADC_IMR) == ADC_SR_DRDY,
+                  ADC_SR_DRDY, *g45_reg(G45_ADC_BASE, ADC_IMR), 13);
+    *g45_reg(G45_ADC_BASE, ADC_CR) = ADC_CR_START;
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_AIC_BASE, AIC_IPR),
+                               1U << G45_ADC_PID, RT_TRUE, 100U),
+                  1U << G45_ADC_PID,
+                  *g45_reg(G45_AIC_BASE, AIC_IPR) & (1U << G45_ADC_PID), 14);
+    (void)*g45_reg(G45_ADC_BASE, ADC_LCDR);
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_AIC_BASE, AIC_IPR),
+                               1U << G45_ADC_PID, RT_FALSE, 100U),
+                  0, *g45_reg(G45_AIC_BASE, AIC_IPR) & (1U << G45_ADC_PID),
+                  15);
+    *g45_reg(G45_ADC_BASE, ADC_IDR) = 0xffffffffU;
+    *g45_reg(G45_ADC_BASE, ADC_CR) = ADC_CR_SWRST;
+
+    rt_kprintf("G45TEST DATA case=r4.tsadcc cdr0=0x%03x cdr1=0x%03x\n",
+               cdr0, cdr1);
+    g45ctrl_clock_stop();
 }
 
 void g45test_r4_gpbr(struct g45test_result *result)
