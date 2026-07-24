@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 35 cases:
+The registry currently contains 36 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -156,7 +156,12 @@ The registry currently contains 35 cases:
   EOC), per-channel and global overrun with SR read-clear, and a DRDY
   interrupt observed pending on the dedicated (masked) AIC source.
   Converted values are bounds-checked and recorded, never asserted —
-  they are synthetic in the model and analog on hardware. Cases
+  they are synthetic in the model and analog on hardware. The TWI case
+  covers post-reset status, configuration round-trips, a NACKed master
+  read of reserved address 0x03 on the empty TWI1 bus with the
+  interrupt observed pending and dropping at the AIC, and mask
+  bookkeeping — its pending-line check found the model's stale-NACK
+  interrupt defect (fixed in c025cf5568). Cases
   that assert the shared system IRQ isolate it at the AIC and bound all
   waits with the free-running RTT value instead of the (frozen)
   scheduler tick.

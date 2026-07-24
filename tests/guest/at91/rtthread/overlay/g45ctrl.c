@@ -74,6 +74,26 @@
 #define G45_PWM_PID     19U
 #define G45_ADC_BASE    0xfffb0000U
 #define G45_ADC_PID     20U
+#define G45_TWI1_BASE   0xfff88000U
+#define G45_TWI1_PID    13U
+
+#define TWI_CR          0x00U
+#define TWI_CR_START    (1U << 0)
+#define TWI_CR_STOP     (1U << 1)
+#define TWI_CR_MSEN     (1U << 2)
+#define TWI_CR_SWRST    (1U << 7)
+#define TWI_MMR         0x04U
+#define TWI_MMR_MREAD   (1U << 12)
+#define TWI_IADR        0x0cU
+#define TWI_CWGR        0x10U
+#define TWI_SR          0x20U
+#define TWI_SR_TXCOMP   (1U << 0)
+#define TWI_SR_RXRDY    (1U << 1)
+#define TWI_SR_TXRDY    (1U << 2)
+#define TWI_SR_NACK     (1U << 8)
+#define TWI_IER         0x24U
+#define TWI_IDR         0x28U
+#define TWI_IMR         0x2cU
 
 #define ADC_CR          0x00U
 #define ADC_CR_SWRST    (1U << 0)
@@ -693,6 +713,80 @@ void g45test_r4_tsadcc(struct g45test_result *result)
 
     rt_kprintf("G45TEST DATA case=r4.tsadcc cdr0=0x%03x cdr1=0x%03x\n",
                cdr0, cdr1);
+    g45ctrl_clock_stop();
+}
+
+/*
+ * TWI1 control/error paths.  The bus is empty in the model and address
+ * 0x03 sits in the I2C reserved range no standard device ever ACKs, so
+ * the NACK path is board-portable.  NACK also doubles as the
+ * IRQ-pending probe on the dedicated (masked) AIC source 13.
+ */
+void g45test_r4_twi(struct g45test_result *result)
+{
+    rt_uint32_t sr;
+
+    g45ctrl_clock_start();
+    *(volatile rt_uint32_t *)G45_PMC_PCER = 1U << G45_TWI1_PID;
+
+    *g45_reg(G45_TWI1_BASE, TWI_CR) = TWI_CR_SWRST;
+    sr = *g45_reg(G45_TWI1_BASE, TWI_SR);
+    g45test_check(result,
+                  (sr & (TWI_SR_TXCOMP | TWI_SR_TXRDY)) ==
+                  (TWI_SR_TXCOMP | TWI_SR_TXRDY),
+                  TWI_SR_TXCOMP | TWI_SR_TXRDY,
+                  sr & (TWI_SR_TXCOMP | TWI_SR_TXRDY), 0);
+    g45test_check(result,
+                  (sr & (TWI_SR_RXRDY | TWI_SR_NACK)) == 0U,
+                  0, sr & (TWI_SR_RXRDY | TWI_SR_NACK), 1);
+
+    /* Configuration round-trips. */
+    *g45_reg(G45_TWI1_BASE, TWI_CWGR) = 0x00013131U;
+    g45test_check(result, *g45_reg(G45_TWI1_BASE, TWI_CWGR) == 0x00013131U,
+                  0x00013131U, *g45_reg(G45_TWI1_BASE, TWI_CWGR), 2);
+    *g45_reg(G45_TWI1_BASE, TWI_MMR) = (0x03U << 16) | TWI_MMR_MREAD;
+    g45test_check(result,
+                  *g45_reg(G45_TWI1_BASE, TWI_MMR) ==
+                  ((0x03U << 16) | TWI_MMR_MREAD),
+                  (0x03U << 16) | TWI_MMR_MREAD,
+                  *g45_reg(G45_TWI1_BASE, TWI_MMR), 3);
+
+    /* Arm the NACK interrupt, then read from the unpopulated address. */
+    *g45_reg(G45_TWI1_BASE, TWI_IER) = TWI_SR_NACK;
+    g45test_check(result, *g45_reg(G45_TWI1_BASE, TWI_IMR) == TWI_SR_NACK,
+                  TWI_SR_NACK, *g45_reg(G45_TWI1_BASE, TWI_IMR), 4);
+    *g45_reg(G45_TWI1_BASE, TWI_CR) = TWI_CR_MSEN;
+    *g45_reg(G45_TWI1_BASE, TWI_CR) = TWI_CR_START | TWI_CR_STOP;
+
+    /* The address must NACK; no data may become ready. */
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_AIC_BASE, AIC_IPR),
+                               1U << G45_TWI1_PID, RT_TRUE, 100U),
+                  1U << G45_TWI1_PID,
+                  *g45_reg(G45_AIC_BASE, AIC_IPR) & (1U << G45_TWI1_PID),
+                  5);
+    sr = *g45_reg(G45_TWI1_BASE, TWI_SR);   /* read clears NACK */
+    g45test_check(result, (sr & TWI_SR_NACK) != 0U, TWI_SR_NACK, sr, 6);
+    g45test_check(result, (sr & TWI_SR_RXRDY) == 0U,
+                  0, sr & TWI_SR_RXRDY, 7);
+    g45test_check(result,
+                  (*g45_reg(G45_TWI1_BASE, TWI_SR) & TWI_SR_NACK) == 0U,
+                  0, *g45_reg(G45_TWI1_BASE, TWI_SR) & TWI_SR_NACK, 8);
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_AIC_BASE, AIC_IPR),
+                               1U << G45_TWI1_PID, RT_FALSE, 100U),
+                  0, *g45_reg(G45_AIC_BASE, AIC_IPR) & (1U << G45_TWI1_PID),
+                  9);
+
+    /* Mask bookkeeping and teardown. */
+    *g45_reg(G45_TWI1_BASE, TWI_IER) = TWI_SR_TXRDY | TWI_SR_NACK;
+    *g45_reg(G45_TWI1_BASE, TWI_IDR) = TWI_SR_NACK;
+    g45test_check(result, *g45_reg(G45_TWI1_BASE, TWI_IMR) == TWI_SR_TXRDY,
+                  TWI_SR_TXRDY, *g45_reg(G45_TWI1_BASE, TWI_IMR), 10);
+    *g45_reg(G45_TWI1_BASE, TWI_IDR) = 0xffffffffU;
+    *g45_reg(G45_TWI1_BASE, TWI_CR) = TWI_CR_SWRST;
+
+    rt_kprintf("G45TEST DATA case=r4.twi sr_after_nack=0x%08x\n", sr);
     g45ctrl_clock_stop();
 }
 

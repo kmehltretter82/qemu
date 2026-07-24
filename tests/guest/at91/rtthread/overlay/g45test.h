@@ -61,6 +61,7 @@ void g45test_r4_rtc_alarm_irq(struct g45test_result *result);
 void g45test_r4_rtt_increment_alarm(struct g45test_result *result);
 void g45test_r4_pwm(struct g45test_result *result);
 void g45test_r4_tsadcc(struct g45test_result *result);
+void g45test_r4_twi(struct g45test_result *result);
 void g45test_r4_trng(struct g45test_result *result);
 void g45test_r4_gpbr(struct g45test_result *result);
 
