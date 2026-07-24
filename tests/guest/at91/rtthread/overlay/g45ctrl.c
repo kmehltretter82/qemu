@@ -833,6 +833,24 @@ void g45test_irq_wired_or(struct g45test_result *result)
     g45ctrl_clock_stop();
 }
 
+#define G45_TCB0_BASE   0xfff7c000U
+#define G45_TCB_PID     18U
+
+#define TC_CCR          0x00U
+#define TC_CCR_CLKEN    (1U << 0)
+#define TC_CCR_CLKDIS   (1U << 1)
+#define TC_CCR_SWTRG    (1U << 2)
+#define TC_CMR          0x04U
+#define TC_CV           0x10U
+#define TC_RC           0x1cU
+#define TC_SR           0x20U
+#define TC_SR_CPCS      (1U << 4)
+#define TC_IER          0x24U
+#define TC_IDR          0x28U
+#define TC_IMR          0x2cU
+/* TIMER_CLOCK5 | WAVE | WAVSEL=UP_RC | CPCDIS */
+#define TC_CMR_ONESHOT  (4U | (1U << 15) | (2U << 13) | (1U << 7))
+
 #define PIT_SR          0x04U
 #define PIT_PIVR        0x08U
 #define PIT_PIIR        0x0cU
@@ -904,6 +922,70 @@ void g45test_irq_pit_ack(struct g45test_result *result)
 
     rt_kprintf("G45TEST DATA case=irq.pit-ack picnt=0x%03x\n",
                PIT_PICNT(v1));
+    g45ctrl_clock_stop();
+}
+
+/*
+ * TC0 channel 0 one-shot: WAVSEL=UP_RC on the 32.768 kHz slow clock
+ * with CPCDIS, RC = 33 (~1 ms).  The RC compare must latch CPCS, stop
+ * the clock (so the clear-on-read proof is race-free by construction),
+ * reach the shared TCB AIC source, and re-fire on a fresh
+ * CLKEN+SWTRG.  XC/TIOA chaining is not asserted: the model divides
+ * by the fixed tcb_clksrc 65536 shape instead of counting real TIOA
+ * edges - recorded as a fidelity gap pending a generalized divider.
+ */
+void g45test_irq_tc_oneshot(struct g45test_result *result)
+{
+    rt_uint32_t sr, cv;
+
+    g45ctrl_clock_start();
+    *(volatile rt_uint32_t *)G45_PMC_PCER = 1U << G45_TCB_PID;
+
+    *g45_reg(G45_TCB0_BASE, TC_CCR) = TC_CCR_CLKDIS;
+    (void)*g45_reg(G45_TCB0_BASE, TC_SR);
+    *g45_reg(G45_TCB0_BASE, TC_CMR) = TC_CMR_ONESHOT;
+    *g45_reg(G45_TCB0_BASE, TC_RC) = 33U;
+    *g45_reg(G45_TCB0_BASE, TC_IER) = TC_SR_CPCS;
+    g45test_check(result,
+                  (*g45_reg(G45_TCB0_BASE, TC_IMR) & TC_SR_CPCS) != 0U,
+                  TC_SR_CPCS, *g45_reg(G45_TCB0_BASE, TC_IMR), 0);
+
+    *g45_reg(G45_TCB0_BASE, TC_CCR) = TC_CCR_CLKEN | TC_CCR_SWTRG;
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_AIC_BASE, AIC_IPR),
+                               1U << G45_TCB_PID, RT_TRUE, 100U),
+                  1U << G45_TCB_PID,
+                  *g45_reg(G45_AIC_BASE, AIC_IPR) & (1U << G45_TCB_PID), 1);
+
+    cv = *g45_reg(G45_TCB0_BASE, TC_CV);
+    g45test_check(result, cv <= 33U, 33U, cv, 2);
+
+    /* CPCDIS stopped the clock: the read-clear proof cannot re-latch. */
+    sr = *g45_reg(G45_TCB0_BASE, TC_SR);
+    g45test_check(result, (sr & TC_SR_CPCS) != 0U, TC_SR_CPCS, sr, 3);
+    g45test_check(result,
+                  (*g45_reg(G45_TCB0_BASE, TC_SR) & TC_SR_CPCS) == 0U,
+                  0, *g45_reg(G45_TCB0_BASE, TC_SR) & TC_SR_CPCS, 4);
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_AIC_BASE, AIC_IPR),
+                               1U << G45_TCB_PID, RT_FALSE, 100U),
+                  0, *g45_reg(G45_AIC_BASE, AIC_IPR) & (1U << G45_TCB_PID),
+                  5);
+
+    /* One-shot must re-fire on a fresh trigger. */
+    *g45_reg(G45_TCB0_BASE, TC_CCR) = TC_CCR_CLKEN | TC_CCR_SWTRG;
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_AIC_BASE, AIC_IPR),
+                               1U << G45_TCB_PID, RT_TRUE, 100U),
+                  1U << G45_TCB_PID,
+                  *g45_reg(G45_AIC_BASE, AIC_IPR) & (1U << G45_TCB_PID), 6);
+
+    *g45_reg(G45_TCB0_BASE, TC_IDR) = 0xffffffffU;
+    *g45_reg(G45_TCB0_BASE, TC_CCR) = TC_CCR_CLKDIS;
+    (void)*g45_reg(G45_TCB0_BASE, TC_SR);
+    *g45_reg(G45_AIC_BASE, AIC_ICCR) = 1U << G45_TCB_PID;
+
+    rt_kprintf("G45TEST DATA case=irq.tc-oneshot cv=%u\n", cv);
     g45ctrl_clock_stop();
 }
 
