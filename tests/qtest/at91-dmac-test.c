@@ -1435,6 +1435,100 @@ static void test_nand_dmac_program_erase(void)
 }
 
 /*
+ * D6 cyclic-stream row: a request-paced cyclic ring is a legal streaming
+ * shape and must RUN (the model parks only request-less cycles).  Two
+ * descriptor-coupled AUTO LLIs (Table 40-2 rows 7/8: the channel's
+ * initial BTSIZE is replayed each buffer, immune to the CTRLA
+ * writeback) form a ring whose tail points back to the head; the SSC0
+ * receiver loopback supplies the paced data through request 6.
+ */
+static void test_dmac_ssc_cyclic_rx_ring(void)
+{
+    QTestState *qts = qtest_init("-machine sam9m10g45ek -S");
+    const uint64_t lli0 = G45_SDRAM_BASE + 0x50000;
+    const uint64_t lli1 = G45_SDRAM_BASE + 0x50020;
+    const uint64_t buf0 = G45_SDRAM_BASE + 0x50100;
+    const uint64_t buf1 = G45_SDRAM_BASE + 0x50200;
+    const uint64_t channel_base = G45_DMAC_BASE + DMAC_CH0_BASE +
+                                  2 * DMAC_CH_STRIDE;
+    /* Row 7: AUTO with the source side descriptor-disabled - the fixed
+     * peripheral source and initial BTSIZE replay, per-LLI destination. */
+    const uint32_t lli_ctrlb = DMAC_CTRLB_FC_PER2MEM |
+                               DMAC_CTRLB_SRC_FIXED | DMAC_CTRLB_AUTO |
+                               DMAC_CTRLB_SRC_DSCR_DIS;
+    static const uint16_t words[6] = {
+        0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666,
+    };
+    int i;
+
+    /* SSC0 loopback, 16-bit words. */
+    qtest_writel(qts, G45_SSC0_BASE + SSC_TFMR, 15);
+    qtest_writel(qts, G45_SSC0_BASE + SSC_RFMR, 15 | SSC_RFMR_LOOP);
+    qtest_writel(qts, G45_SSC0_BASE + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
+
+    /* Ring of two 2-halfword buffers; LLI BTSIZE poisoned (replayed). */
+    qtest_writel(qts, lli0 + 0, G45_SSC0_BASE + SSC_RHR);
+    qtest_writel(qts, lli0 + 4, buf0);
+    qtest_writel(qts, lli0 + 8, DMAC_CTRLA_BTSIZE(0x7777) |
+                 DMAC_CTRLA_SRC_WIDTH_2 | DMAC_CTRLA_DST_WIDTH_2);
+    qtest_writel(qts, lli0 + 12, lli_ctrlb);
+    qtest_writel(qts, lli0 + 16, lli1);
+    qtest_writel(qts, lli1 + 0, G45_SSC0_BASE + SSC_RHR);
+    qtest_writel(qts, lli1 + 4, buf1);
+    qtest_writel(qts, lli1 + 8, DMAC_CTRLA_BTSIZE(0x7777) |
+                 DMAC_CTRLA_SRC_WIDTH_2 | DMAC_CTRLA_DST_WIDTH_2);
+    qtest_writel(qts, lli1 + 12, lli_ctrlb);
+    qtest_writel(qts, lli1 + 16, lli0);            /* tail -> head */
+    for (i = 0; i < 2; i++) {
+        qtest_writel(qts, buf0 + 4 * i, 0xdeadbeef);
+        qtest_writel(qts, buf1 + 4 * i, 0xdeadbeef);
+    }
+
+    /* Row 7 takes the source from the channel register, not the LLI. */
+    qtest_writel(qts, channel_base + DMAC_SADDR,
+                 G45_SSC0_BASE + SSC_RHR);
+    qtest_writel(qts, channel_base + DMAC_CTRLA, DMAC_CTRLA_BTSIZE(2) |
+                 DMAC_CTRLA_SRC_WIDTH_2 | DMAC_CTRLA_DST_WIDTH_2);
+    qtest_writel(qts, channel_base + DMAC_CTRLB,
+                 DMAC_CTRLB_AUTO | DMAC_CTRLB_SRC_DSCR_DIS);
+    qtest_writel(qts, channel_base + DMAC_DSCR, lli0);
+    qtest_writel(qts, channel_base + DMAC_CFG,
+                 dmac_cfg_src_per(6) | DMAC_CFG_SRC_H2SEL);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_EN, 1);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_CHER, DMAC_ENA(2));
+    qtest_clock_step(qts, 1);
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_CHSR) &
+                    DMAC_ENA(2), ==, DMAC_ENA(2));
+
+    /* Six loopback words: the third pair overwrites the first buffer. */
+    for (i = 0; i < 6; i++) {
+        qtest_writel(qts, G45_SSC0_BASE + SSC_THR, words[i]);
+        qtest_clock_step(qts, 10);
+    }
+    g_assert_cmphex(qtest_readw(qts, buf0 + 0), ==, 0x5555);
+    g_assert_cmphex(qtest_readw(qts, buf0 + 2), ==, 0x6666);
+    g_assert_cmphex(qtest_readw(qts, buf1 + 0), ==, 0x3333);
+    g_assert_cmphex(qtest_readw(qts, buf1 + 2), ==, 0x4444);
+
+    /* The ring is still live: the channel never retires. */
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_CHSR) &
+                    DMAC_ENA(2), ==, DMAC_ENA(2));
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR) &
+                    (DMAC_BTC(2) | DMAC_ERR(2)), ==, DMAC_BTC(2));
+
+    /* And it keeps streaming: two more words land in the second buffer. */
+    qtest_writel(qts, G45_SSC0_BASE + SSC_THR, 0x7777);
+    qtest_clock_step(qts, 10);
+    qtest_writel(qts, G45_SSC0_BASE + SSC_THR, 0x8888);
+    qtest_clock_step(qts, 10);
+    g_assert_cmphex(qtest_readw(qts, buf1 + 0), ==, 0x7777);
+    g_assert_cmphex(qtest_readw(qts, buf1 + 2), ==, 0x8888);
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_CHSR) &
+                    DMAC_ENA(2), ==, DMAC_ENA(2));
+    qtest_quit(qts);
+}
+
+/*
  * Migrate while a too-long descriptor waits with exact residue after the
  * card's XFRDONE.  The destination must show the same residue, and the
  * driver-shaped CHDR recovery plus channel reuse must stay byte-exact.
@@ -3970,6 +4064,8 @@ int main(int argc, char **argv)
                    test_hsmci1_dma_data_read);
     qtest_add_func("/at91-dmac/g45/nand/dmac-program-erase",
                    test_nand_dmac_program_erase);
+    qtest_add_func("/at91-dmac/g45/ssc0/cyclic-rx-ring",
+                   test_dmac_ssc_cyclic_rx_ring);
     qtest_add_func("/at91-dmac/g45/hsmci0/mismatch-residue-migration",
                    test_hsmci_mismatch_residue_migration);
     qtest_add_func("/at91-dmac/g45/hsmci0/mismatch-card-in-progress-migration",

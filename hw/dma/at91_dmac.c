@@ -296,6 +296,21 @@ static bool dmac_channel_uses_hardware_request(AT91DmacState *s, int n,
             dmac_channel_request_id(s, n, false) == request);
 }
 
+/* True when either side has a hardware handshake on a modelled request. */
+static bool dmac_channel_has_modelled_request(AT91DmacState *s, int n)
+{
+    uint32_t fc = DMAC_CTRLB_FC(dmac_channel_ctrlb(s, n));
+
+    return (dmac_source_is_peripheral(fc) &&
+            (s->ch[n].cfg & DMAC_CFG_SRC_H2SEL) &&
+            (s->request_mask &
+             (UINT64_C(1) << dmac_channel_request_id(s, n, true)))) ||
+           (dmac_destination_is_peripheral(fc) &&
+            (s->ch[n].cfg & DMAC_CFG_DST_H2SEL) &&
+            (s->request_mask &
+             (UINT64_C(1) << dmac_channel_request_id(s, n, false))));
+}
+
 static bool dmac_request_armed(AT91DmacState *s, int request)
 {
     int n;
@@ -1258,14 +1273,19 @@ static void dmac_write(void *opaque, hwaddr offset, uint64_t value,
                     s->ch[n].replay_started = false;
                 }
                 /*
-                 * A cyclic list is peripheral-paced (UART/audio RX), driven by
-                 * the device's DMA request which we do not model.  Running it
-                 * would fabricate phantom data; instead flag it and leave it
-                 * "running" - its residue reads report an idle head so the
-                 * driver sees "nothing received".
+                 * A cyclic list paced by a MODELLED hardware request is a
+                 * legal streaming ring: each grant moves one chunk, buffer
+                 * completion loops the descriptors, and the pacing bounds
+                 * the work, so it simply runs.  A cyclic list with no
+                 * modelled request (vendor-kernel UART RX - the G45 USARTs
+                 * have no Table 40-1 ids) has nothing to pace it; running
+                 * it would fabricate phantom data or spin forever, so flag
+                 * it and leave it "running" - its residue reads report an
+                 * idle head so the driver sees "nothing received".
                  */
                 if (s->ch[n].dscr != 0 &&
-                    dmac_chain_is_cyclic(s->ch[n].dscr)) {
+                    dmac_chain_is_cyclic(s->ch[n].dscr) &&
+                    !dmac_channel_has_modelled_request(s, n)) {
                     s->ch[n].cyclic = true;
                 } else {
                     s->ch[n].cyclic = false;
