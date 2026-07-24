@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 45 cases:
+The registry currently contains 46 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -201,8 +201,16 @@ The registry currently contains 45 cases:
   clear-on-read proof race-free by construction, and a fresh
   CLKEN+SWTRG re-fires — XC/TIOA chaining is deliberately unasserted
   (the model divides by the fixed tcb_clksrc 65536 shape instead of
-  counting TIOA edges). The randomized IVR/EOI-injection and
-  nested-preemption variants remain future work.
+  counting TIOA edges). The chained-channel case counts
+  XC1 = TIOA0 periods at the divider derived from channel 0's RC and
+  toggle programming (would have failed against the old hardwired
+  65536). The clock-ratio case runs the MCK/16 PIT, a slow-clock TC
+  channel and the RTT concurrently over one window and requires their
+  pairwise rate ratios to land in tolerant bands. Randomized IVR/EOI
+  injection remains future work; nested preemption is descoped at
+  guest level - the ARM926 vector_irq never saves SPSR at entry, so a
+  nested interrupt clobbers spsr_irq (BSP limitation; AIC-side nesting
+  semantics belong to qtest).
 - Core: the 1 kHz scheduler runs and switches tasks for at least ten seconds.
 
 The D1 suite performs 340,206 checks. It first found three deterministic bugs in

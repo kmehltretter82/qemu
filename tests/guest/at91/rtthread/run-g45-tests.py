@@ -33,7 +33,7 @@ EXPECTED_PASSES = {
     "d2": 1,
     "r4": 10,
     "r4touch": 1,
-    "irq": 5,
+    "irq": 6,
     "r4reset-verify": 1,
     "core.scheduler": 1,
 }
