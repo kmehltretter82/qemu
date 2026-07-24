@@ -82,19 +82,23 @@ static size_t recv_frame(int fd, uint8_t *frame, size_t max)
     return prefix;
 }
 
+static const char *macb_machine = "sam9m10g45ek";
+static uint64_t macb_base = G45_MACB_BASE;
+static uint64_t macb_sdram = G45_SDRAM_BASE;
+
 static QTestState *macb_start(int *fd)
 {
     int pair[2];
     QTestState *qts;
 
     g_assert_cmpint(socketpair(PF_UNIX, SOCK_STREAM, 0, pair), ==, 0);
-    qts = qtest_initf("-machine sam9m10g45ek "
+    qts = qtest_initf("-machine %s "
                       "-nic socket,fd=%d,model=at91-macb,"
-                      "mac=52:54:00:12:34:56 -S", pair[1]);
+                      "mac=52:54:00:12:34:56 -S", macb_machine, pair[1]);
     close(pair[1]);
     *fd = pair[0];
     qtest_qmp_assert_success(qts, "{ 'execute': 'cont' }");
-    g_assert_cmphex(qtest_readl(qts, G45_MACB_BASE + MACB_MID) & 0xffff0000,
+    g_assert_cmphex(qtest_readl(qts, macb_base + MACB_MID) & 0xffff0000,
                     !=, 0xffff0000);
     return qts;
 }
@@ -122,10 +126,10 @@ static void build_frame(uint8_t *frame, size_t length, uint8_t seed)
  */
 static void test_macb_tx_ring_persist(void)
 {
-    const uint32_t ring = G45_SDRAM_BASE + 0x150000;
-    const uint32_t buf0 = G45_SDRAM_BASE + 0x151000;
-    const uint32_t buf1 = G45_SDRAM_BASE + 0x151100;
-    const uint32_t buf2 = G45_SDRAM_BASE + 0x151200;
+    const uint32_t ring = macb_sdram + 0x150000;
+    const uint32_t buf0 = macb_sdram + 0x151000;
+    const uint32_t buf1 = macb_sdram + 0x151100;
+    const uint32_t buf2 = macb_sdram + 0x151200;
     uint8_t frame[128], wire[256];
     QTestState *qts;
     size_t got;
@@ -147,9 +151,9 @@ static void test_macb_tx_ring_persist(void)
     qtest_writel(qts, ring + 24, 0);
     qtest_writel(qts, ring + 28, TXD_USED | TXD_WRAP);
 
-    qtest_writel(qts, G45_MACB_BASE + MACB_TBQP, ring);
-    qtest_writel(qts, G45_MACB_BASE + MACB_NCR, NCR_TE);
-    qtest_writel(qts, G45_MACB_BASE + MACB_NCR, NCR_TE | NCR_TSTART);
+    qtest_writel(qts, macb_base + MACB_TBQP, ring);
+    qtest_writel(qts, macb_base + MACB_NCR, NCR_TE);
+    qtest_writel(qts, macb_base + MACB_NCR, NCR_TE | NCR_TSTART);
 
     build_frame(frame, 60, 0x11);
     got = recv_frame(fd, wire, sizeof(wire));
@@ -162,7 +166,7 @@ static void test_macb_tx_ring_persist(void)
 
     g_assert_cmphex(qtest_readl(qts, ring + 4) & TXD_USED, ==, TXD_USED);
     g_assert_cmphex(qtest_readl(qts, ring + 12) & TXD_USED, ==, TXD_USED);
-    g_assert_cmphex(qtest_readl(qts, G45_MACB_BASE + MACB_ISR) & INT_TCOMP,
+    g_assert_cmphex(qtest_readl(qts, macb_base + MACB_ISR) & INT_TCOMP,
                     ==, INT_TCOMP);
 
     /* Queue a third frame at the stop position; TSTART resumes there. */
@@ -170,7 +174,7 @@ static void test_macb_tx_ring_persist(void)
     qtest_bufwrite(qts, buf2, frame, 72);
     qtest_writel(qts, ring + 16, buf2);
     qtest_writel(qts, ring + 20, 72 | TXD_LAST);
-    qtest_writel(qts, G45_MACB_BASE + MACB_NCR, NCR_TE | NCR_TSTART);
+    qtest_writel(qts, macb_base + MACB_NCR, NCR_TE | NCR_TSTART);
     got = recv_frame(fd, wire, sizeof(wire));
     g_assert_cmpuint(got, ==, 72);
     g_assert_cmpmem(wire, got, frame, 72);
@@ -192,7 +196,7 @@ static void macb_setup_rx_ring(QTestState *qts, uint32_t ring,
         qtest_writel(qts, ring + 8 * i + 4, 0);
         qtest_memset(qts, bufs + RX_BUF_SIZE * i, 0xcc, RX_BUF_SIZE);
     }
-    qtest_writel(qts, G45_MACB_BASE + MACB_RBQP, ring);
+    qtest_writel(qts, macb_base + MACB_RBQP, ring);
 }
 
 /* Poll until the descriptor's USED bit appears (delivery is async). */
@@ -222,8 +226,8 @@ static uint32_t wait_rx_used(QTestState *qts, uint32_t desc)
  */
 static void test_macb_rx_wrap_rbof_refill(void)
 {
-    const uint32_t ring = G45_SDRAM_BASE + 0x152000;
-    const uint32_t bufs = G45_SDRAM_BASE + 0x153000;
+    const uint32_t ring = macb_sdram + 0x152000;
+    const uint32_t bufs = macb_sdram + 0x153000;
     uint8_t frame[64], readback[64];
     QTestState *qts;
     uint32_t status;
@@ -233,9 +237,9 @@ static void test_macb_rx_wrap_rbof_refill(void)
 
     qts = macb_start(&fd);
     macb_setup_rx_ring(qts, ring, bufs);
-    qtest_writel(qts, G45_MACB_BASE + MACB_NCFGR,
+    qtest_writel(qts, macb_base + MACB_NCFGR,
                  NCFGR_CAF | NCFGR_RBOF_2);
-    qtest_writel(qts, G45_MACB_BASE + MACB_NCR, NCR_RE);
+    qtest_writel(qts, macb_base + MACB_NCR, NCR_RE);
 
     /* Wrap coverage: eighteen frames, freeing after each delivery. */
     for (i = 0; i < RX_RING_DESCS + 2; i++) {
@@ -254,10 +258,10 @@ static void test_macb_rx_wrap_rbof_refill(void)
         qtest_writel(qts, desc,
                      qtest_readl(qts, desc) & ~(uint32_t)RXD_USED);
         qtest_writel(qts, desc + 4, 0);
-        qtest_writel(qts, G45_MACB_BASE + MACB_IER, INT_RCOMP);
+        qtest_writel(qts, macb_base + MACB_IER, INT_RCOMP);
         position = (position + 1) % RX_RING_DESCS;
     }
-    g_assert_cmphex(qtest_readl(qts, G45_MACB_BASE + MACB_RSR) & RSR_REC,
+    g_assert_cmphex(qtest_readl(qts, macb_base + MACB_RSR) & RSR_REC,
                     ==, RSR_REC);
 
     /*
@@ -285,7 +289,7 @@ static void test_macb_rx_wrap_rbof_refill(void)
         qtest_writel(qts, ring + 8 * i, addr & ~(uint32_t)RXD_USED);
         qtest_writel(qts, ring + 8 * i + 4, 0);
     }
-    qtest_writel(qts, G45_MACB_BASE + MACB_IER, INT_RCOMP);
+    qtest_writel(qts, macb_base + MACB_IER, INT_RCOMP);
     position = (position + 5) % RX_RING_DESCS;
     status = wait_rx_used(qts, ring + 8 * position);
     g_assert_cmphex(status & (RXD_SOF | RXD_EOF), ==, RXD_SOF | RXD_EOF);
@@ -303,8 +307,8 @@ static void test_macb_rx_wrap_rbof_refill(void)
  */
 static void test_macb_rx_multibuffer_frame(void)
 {
-    const uint32_t ring = G45_SDRAM_BASE + 0x154000;
-    const uint32_t bufs = G45_SDRAM_BASE + 0x155000;
+    const uint32_t ring = macb_sdram + 0x154000;
+    const uint32_t bufs = macb_sdram + 0x155000;
     uint8_t frame[300], readback[300];
     QTestState *qts;
     uint32_t status;
@@ -312,9 +316,9 @@ static void test_macb_rx_multibuffer_frame(void)
 
     qts = macb_start(&fd);
     macb_setup_rx_ring(qts, ring, bufs);
-    qtest_writel(qts, G45_MACB_BASE + MACB_NCFGR,
+    qtest_writel(qts, macb_base + MACB_NCFGR,
                  NCFGR_CAF | NCFGR_RBOF_2);
-    qtest_writel(qts, G45_MACB_BASE + MACB_NCR, NCR_RE);
+    qtest_writel(qts, macb_base + MACB_NCR, NCR_RE);
 
     build_frame(frame, sizeof(frame), 0x77);
     send_frame(fd, frame, sizeof(frame));
@@ -349,8 +353,8 @@ static void test_macb_rx_multibuffer_frame(void)
  */
 static void test_macb_rx_oversize_preflight_drop(void)
 {
-    const uint32_t ring = G45_SDRAM_BASE + 0x156000;
-    const uint32_t bufs = G45_SDRAM_BASE + 0x157000;
+    const uint32_t ring = macb_sdram + 0x156000;
+    const uint32_t bufs = macb_sdram + 0x157000;
     uint8_t frame[1600], readback[64];
     QTestState *qts;
     uint32_t status;
@@ -368,14 +372,14 @@ static void test_macb_rx_oversize_preflight_drop(void)
         qtest_writel(qts, ring + 8 * i,
                      qtest_readl(qts, ring + 8 * i) | RXD_USED);
     }
-    qtest_writel(qts, G45_MACB_BASE + MACB_NCFGR, NCFGR_CAF);
-    qtest_writel(qts, G45_MACB_BASE + MACB_NCR, NCR_RE);
+    qtest_writel(qts, macb_base + MACB_NCFGR, NCFGR_CAF);
+    qtest_writel(qts, macb_base + MACB_NCR, NCR_RE);
 
     /* Needs 13 buffers; only 12 are free: dropped whole with BNA. */
     build_frame(frame, sizeof(frame), 0x99);
     send_frame(fd, frame, sizeof(frame));
     g_usleep(100000);
-    g_assert_cmphex(qtest_readl(qts, G45_MACB_BASE + MACB_RSR) & RSR_BNA,
+    g_assert_cmphex(qtest_readl(qts, macb_base + MACB_RSR) & RSR_BNA,
                     ==, RSR_BNA);
     for (i = 0; i < RX_RING_DESCS - 4; i++) {
         g_assert_cmphex(qtest_readl(qts, ring + 8 * i) & RXD_USED, ==, 0);
@@ -415,8 +419,8 @@ static void wait_for_migration_complete(QTestState *qts)
 /* Migrate mid-ring: the write position and ring state must continue. */
 static void test_macb_rx_ring_migration(void)
 {
-    const uint32_t ring = G45_SDRAM_BASE + 0x158000;
-    const uint32_t bufs = G45_SDRAM_BASE + 0x159000;
+    const uint32_t ring = macb_sdram + 0x158000;
+    const uint32_t bufs = macb_sdram + 0x159000;
     g_autofree char *state_path = NULL;
     g_autofree char *uri = NULL;
     g_autofree char *dst_args = NULL;
@@ -434,9 +438,9 @@ static void test_macb_rx_ring_migration(void)
 
     sqts = macb_start(&sfd);
     macb_setup_rx_ring(sqts, ring, bufs);
-    qtest_writel(sqts, G45_MACB_BASE + MACB_NCFGR,
+    qtest_writel(sqts, macb_base + MACB_NCFGR,
                  NCFGR_CAF | NCFGR_RBOF_2);
-    qtest_writel(sqts, G45_MACB_BASE + MACB_NCR, NCR_RE);
+    qtest_writel(sqts, macb_base + MACB_NCR, NCR_RE);
     for (i = 0; i < 3; i++) {
         build_frame(frame, 60, (uint8_t)i);
         send_frame(sfd, frame, 60);
@@ -480,11 +484,25 @@ static void test_macb_rx_ring_migration(void)
     unlink(state_path);
 }
 
+/* The same TX ring persistence contract on the SAM9x5 board. */
+static void test_g35_tx_ring_persist(void)
+{
+    macb_machine = "sam9g35ek";
+    macb_base = 0xf802c000;
+    macb_sdram = 0x20000000;
+    test_macb_tx_ring_persist();
+    macb_machine = "sam9m10g45ek";
+    macb_base = G45_MACB_BASE;
+    macb_sdram = G45_SDRAM_BASE;
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
 
     qtest_add_func("/at91-macb/tx-ring-persist", test_macb_tx_ring_persist);
+    qtest_add_func("/at91-macb/g35/tx-ring-persist",
+                   test_g35_tx_ring_persist);
     qtest_add_func("/at91-macb/rx-wrap-rbof-refill",
                    test_macb_rx_wrap_rbof_refill);
     qtest_add_func("/at91-macb/rx-multibuffer-frame",

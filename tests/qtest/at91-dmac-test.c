@@ -756,15 +756,17 @@ static void run_spi_dma_roundtrip(uint64_t spi_base, unsigned tx_request,
  * halfword widths an audio stream would use; SSC1 uses ids 7/8 with
  * byte widths.
  */
-static void run_ssc_dma_loopback(uint64_t ssc_base, unsigned tx_request,
-                                 unsigned rx_request, bool halfword)
+static void run_ssc_dma_loopback_on(const char *machine,
+                                    uint64_t sdram_base, uint64_t dmac_base,
+                                    uint64_t ssc_base, unsigned tx_request,
+                                    unsigned rx_request, bool halfword)
 {
-    QTestState *qts = qtest_init("-machine sam9m10g45ek -S");
-    const uint64_t tx_buf = G45_SDRAM_BASE + 0x41000;
-    const uint64_t rx_buf = G45_SDRAM_BASE + 0x41100;
-    const uint64_t tx_base = G45_DMAC_BASE + DMAC_CH0_BASE +
+    QTestState *qts = qtest_initf("-machine %s -S", machine);
+    const uint64_t tx_buf = sdram_base + 0x41000;
+    const uint64_t rx_buf = sdram_base + 0x41100;
+    const uint64_t tx_base = dmac_base + DMAC_CH0_BASE +
                              6 * DMAC_CH_STRIDE;
-    const uint64_t rx_base = G45_DMAC_BASE + DMAC_CH0_BASE +
+    const uint64_t rx_base = dmac_base + DMAC_CH0_BASE +
                              7 * DMAC_CH_STRIDE;
     const uint32_t widths = halfword ?
         DMAC_CTRLA_SRC_WIDTH_2 | DMAC_CTRLA_DST_WIDTH_2 : 0;
@@ -806,13 +808,13 @@ static void run_ssc_dma_loopback(uint64_t ssc_base, unsigned tx_request,
     qtest_writel(qts, rx_base + DMAC_CFG,
                  dmac_cfg_src_per(rx_request) | DMAC_CFG_SRC_H2SEL);
 
-    qtest_writel(qts, G45_DMAC_BASE + DMAC_EN, 1);
-    qtest_writel(qts, G45_DMAC_BASE + DMAC_CHER,
+    qtest_writel(qts, dmac_base + DMAC_EN, 1);
+    qtest_writel(qts, dmac_base + DMAC_CHER,
                  DMAC_ENA(6) | DMAC_ENA(7));
-    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 6);
-    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 7);
+    wait_for_dmac_channel_disabled(qts, dmac_base, 6);
+    wait_for_dmac_channel_disabled(qts, dmac_base, 7);
 
-    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR) &
+    g_assert_cmphex(qtest_readl(qts, dmac_base + DMAC_EBCISR) &
                     (DMAC_BTC(6) | DMAC_BTC(7) | DMAC_ERR(6) | DMAC_ERR(7)),
                     ==, DMAC_BTC(6) | DMAC_BTC(7));
     for (i = 0; i < 4; i++) {
@@ -824,6 +826,14 @@ static void run_ssc_dma_loopback(uint64_t ssc_base, unsigned tx_request,
         g_assert_cmphex(got, ==, want);
     }
     qtest_quit(qts);
+}
+
+
+static void run_ssc_dma_loopback(uint64_t ssc_base, unsigned tx_request,
+                                 unsigned rx_request, bool halfword)
+{
+    run_ssc_dma_loopback_on("sam9m10g45ek", G45_SDRAM_BASE, G45_DMAC_BASE,
+                            ssc_base, tx_request, rx_request, halfword);
 }
 
 static void test_ssc0_loopback_via_dma(void)
@@ -852,6 +862,13 @@ static void test_g35_spi0_jedec_via_dma(void)
 
     run_spi_dma_roundtrip_on("sam9g35ek", G35_SDRAM_BASE, G35_DMAC0_BASE,
                              G35_SPI0_BASE, 1, 2, true, jedec, 3);
+}
+
+/* SAM9x5 SSC on DMAC0's request lines 13/14. */
+static void test_g35_ssc_loopback_via_dma(void)
+{
+    run_ssc_dma_loopback_on("sam9g35ek", G35_SDRAM_BASE, G35_DMAC0_BASE,
+                            0xf0010000, 13, 14, true);
 }
 
 static void test_spi1_route_smoke(void)
@@ -4071,6 +4088,8 @@ int main(int argc, char **argv)
                    test_spi0_jedec_via_dma);
     qtest_add_func("/at91-dmac/g35/spi0/jedec-via-dma",
                    test_g35_spi0_jedec_via_dma);
+    qtest_add_func("/at91-dmac/g35/ssc/loopback-via-dma",
+                   test_g35_ssc_loopback_via_dma);
     qtest_add_func("/at91-dmac/g45/spi1/route-smoke",
                    test_spi1_route_smoke);
     qtest_add_func("/at91-dmac/g45/ssc0/loopback-via-dma",
