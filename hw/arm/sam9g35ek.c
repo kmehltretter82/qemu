@@ -48,6 +48,11 @@
 #include "hw/misc/at91_memc.h"
 #include "hw/misc/at91_sckc.h"
 #include "hw/rtc/at91_rtc.h"
+#include "hw/ssi/at91_spi.h"
+#include "hw/ssi/at91_ssc.h"
+#include "hw/ssi/ssi.h"
+#include "hw/i2c/at91_twi.h"
+#include "hw/misc/at91_pwm.h"
 #include "hw/misc/unimp.h"
 #include "qom/object.h"
 #include "target/arm/cpu-qom.h"
@@ -100,6 +105,16 @@
 #define SAM9X5_DMAC0_BASE     0xFFFFEC00   /* DMA Controller 0 */
 #define SAM9X5_DMAC1_BASE     0xFFFFEE00   /* DMA Controller 1 (USART DMA)      */
 
+#define SAM9X5_SPI0_BASE      0xF0000000
+#define SAM9X5_SPI1_BASE      0xF0004000
+#define SAM9X5_SSC_BASE       0xF0010000
+#define SAM9X5_TWI0_BASE      0xF8010000
+#define SAM9X5_TWI1_BASE      0xF8014000
+#define SAM9X5_TWI2_BASE      0xF8018000
+#define SAM9X5_PWM_BASE       0xF8034000
+#define SAM9X5_RTT_BASE       0xFFFFFE20
+#define SAM9X5_GPBR_BASE      0xFFFFFE60
+
 /* Debug Unit chip identification (SAM9x5 base CIDR + G35 extension ID). */
 #define SAM9X5_CIDR           0x819A05A1
 #define SAM9G35_EXID          0x00000001
@@ -111,7 +126,13 @@
 #define SAM9X5_IRQ_USART0     5
 #define SAM9X5_IRQ_USART1     6
 #define SAM9X5_IRQ_USART2     7
+#define SAM9X5_IRQ_TWI0       9
+#define SAM9X5_IRQ_TWI1       10
+#define SAM9X5_IRQ_TWI2       11
 #define SAM9X5_IRQ_HSMCI0     12
+#define SAM9X5_IRQ_SPI0       13
+#define SAM9X5_IRQ_SPI1       14
+#define SAM9X5_IRQ_PWM        18
 #define SAM9X5_IRQ_UART0      15
 #define SAM9X5_IRQ_UART1      16
 #define SAM9X5_IRQ_TCB        17   /* both TC blocks share this       */
@@ -120,6 +141,17 @@
 #define SAM9X5_IRQ_UHPHS      22   /* USB host (OHCI + EHCI share this) */
 #define SAM9X5_IRQ_MACB0      24
 #define SAM9X5_IRQ_HSMCI1     26
+#define SAM9X5_IRQ_SSC        28
+
+/* DMAC hardware request lines (at91sam9x5.dtsi AT91_DMA_CFG_PER_ID). */
+#define SAM9X5_DMA0_REQ_HSMCI0 0
+#define SAM9X5_DMA0_REQ_SPI0_TX 1
+#define SAM9X5_DMA0_REQ_SPI0_RX 2
+#define SAM9X5_DMA0_REQ_SSC_TX 13
+#define SAM9X5_DMA0_REQ_SSC_RX 14
+#define SAM9X5_DMA1_REQ_HSMCI1 0
+#define SAM9X5_DMA1_REQ_SPI1_TX 1
+#define SAM9X5_DMA1_REQ_SPI1_RX 2
 
 /* Must match what the guest derives from the PMC reset values above:
  * PLLA = 12 MHz * 66 = 792 MHz, MCK = PLLA / PRES(2) / MDIV(3) = 132 MHz. */
@@ -208,7 +240,7 @@ static void sam9g35ek_init(MachineState *machine)
     /* System interrupt (AIC source 1) is the wired-OR of DBGU, PIT, RTC and
      * other system-controller peripherals. */
     sys_or = qdev_new(TYPE_OR_IRQ);
-    qdev_prop_set_uint16(sys_or, "num-lines", 4);
+    qdev_prop_set_uint16(sys_or, "num-lines", 5);
     qdev_realize_and_unref(sys_or, NULL, &error_fatal);
     qdev_connect_gpio_out(sys_or, 0, qdev_get_gpio_in(aic, SAM9X5_IRQ_SYS));
 
@@ -244,10 +276,24 @@ static void sam9g35ek_init(MachineState *machine)
         };
         int i;
 
+        /* Hardware request lines with a modelled source, per controller:
+         * DMAC0: HSMCI0(0), SPI0 TX/RX(1,2), SSC TX/RX(13,14);
+         * DMAC1: HSMCI1(0), SPI1 TX/RX(1,2). */
+        static const uint64_t req_mask[] = {
+            (UINT64_C(1) << SAM9X5_DMA0_REQ_HSMCI0) |
+            (UINT64_C(1) << SAM9X5_DMA0_REQ_SPI0_TX) |
+            (UINT64_C(1) << SAM9X5_DMA0_REQ_SPI0_RX) |
+            (UINT64_C(1) << SAM9X5_DMA0_REQ_SSC_TX) |
+            (UINT64_C(1) << SAM9X5_DMA0_REQ_SSC_RX),
+            (UINT64_C(1) << SAM9X5_DMA1_REQ_HSMCI1) |
+            (UINT64_C(1) << SAM9X5_DMA1_REQ_SPI1_TX) |
+            (UINT64_C(1) << SAM9X5_DMA1_REQ_SPI1_RX),
+        };
+
         for (i = 0; i < ARRAY_SIZE(dmac); i++) {
             DeviceState *d = qdev_new(TYPE_AT91_DMAC);
 
-            qdev_prop_set_uint64(d, AT91_DMAC_REQUEST_MASK, UINT64_C(1));
+            qdev_prop_set_uint64(d, AT91_DMAC_REQUEST_MASK, req_mask[i]);
             sysbus_realize_and_unref(SYS_BUS_DEVICE(d), &error_fatal);
             sysbus_mmio_map(SYS_BUS_DEVICE(d), 0, dmac[i].base);
             sysbus_connect_irq(SYS_BUS_DEVICE(d), 0,
@@ -255,6 +301,107 @@ static void sam9g35ek_init(MachineState *machine)
             dmac_dev[i] = d;
         }
     }
+
+    /* SPI masters.  SPI0 pairs with DMAC0's request lines, SPI1 with
+     * DMAC1's - the SAM9x5 splits peripheral DMA across the two
+     * controllers (at91sam9x5.dtsi dmas).  An n25q032 SPI-NOR sits on
+     * SPI0 NPCS0 as on the G45 board model, giving the JEDEC-probe
+     * qtests an identical target. */
+    {
+        static const struct {
+            hwaddr base;
+            int irq;
+            int dmac;
+            int tx_req, rx_req;
+        } spi[] = {
+            { SAM9X5_SPI0_BASE, SAM9X5_IRQ_SPI0, 0,
+              SAM9X5_DMA0_REQ_SPI0_TX, SAM9X5_DMA0_REQ_SPI0_RX },
+            { SAM9X5_SPI1_BASE, SAM9X5_IRQ_SPI1, 1,
+              SAM9X5_DMA1_REQ_SPI1_TX, SAM9X5_DMA1_REQ_SPI1_RX },
+        };
+        DeviceState *spi0 = NULL;
+        int i;
+
+        for (i = 0; i < ARRAY_SIZE(spi); i++) {
+            DeviceState *dev = qdev_new(TYPE_AT91_SPI);
+
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, spi[i].base);
+            sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                               qdev_get_gpio_in(aic, spi[i].irq));
+            qdev_connect_gpio_out_named(dev, AT91_SPI_TX_DMA_REQUEST, 0,
+                qdev_get_gpio_in_named(dmac_dev[spi[i].dmac],
+                                       AT91_DMAC_REQUEST_GPIO,
+                                       spi[i].tx_req));
+            qdev_connect_gpio_out_named(dev, AT91_SPI_RX_DMA_REQUEST, 0,
+                qdev_get_gpio_in_named(dmac_dev[spi[i].dmac],
+                                       AT91_DMAC_REQUEST_GPIO,
+                                       spi[i].rx_req));
+            if (i == 0) {
+                spi0 = dev;
+            }
+        }
+
+        {
+            SSIBus *bus = (SSIBus *)qdev_get_child_bus(spi0, "spi");
+            DeviceState *flash = qdev_new("n25q032");
+
+            qdev_realize_and_unref(flash, BUS(bus), &error_fatal);
+            qdev_connect_gpio_out_named(spi0, "cs", 0,
+                qdev_get_gpio_in_named(flash, SSI_GPIO_CS, 0));
+        }
+    }
+
+    /* SSC audio serial controller, DMAC0 requests 13/14. */
+    {
+        DeviceState *ssc = qdev_new(TYPE_AT91_SSC);
+
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(ssc), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(ssc), 0, SAM9X5_SSC_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(ssc), 0,
+                           qdev_get_gpio_in(aic, SAM9X5_IRQ_SSC));
+        qdev_connect_gpio_out_named(ssc, AT91_SSC_TX_DMA_REQUEST, 0,
+            qdev_get_gpio_in_named(dmac_dev[0], AT91_DMAC_REQUEST_GPIO,
+                                   SAM9X5_DMA0_REQ_SSC_TX));
+        qdev_connect_gpio_out_named(ssc, AT91_SSC_RX_DMA_REQUEST, 0,
+            qdev_get_gpio_in_named(dmac_dev[0], AT91_DMAC_REQUEST_GPIO,
+                                   SAM9X5_DMA0_REQ_SSC_RX));
+    }
+
+    /* Three TWI (I2C) controllers; the buses are empty by default and
+     * slaves attach with -device ...,bus=i2c-bus.N. */
+    {
+        static const struct { hwaddr base; int irq; } twi[] = {
+            { SAM9X5_TWI0_BASE, SAM9X5_IRQ_TWI0 },
+            { SAM9X5_TWI1_BASE, SAM9X5_IRQ_TWI1 },
+            { SAM9X5_TWI2_BASE, SAM9X5_IRQ_TWI2 },
+        };
+        int i;
+
+        for (i = 0; i < ARRAY_SIZE(twi); i++) {
+            DeviceState *dev = qdev_new(TYPE_AT91_TWI);
+
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, twi[i].base);
+            sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                               qdev_get_gpio_in(aic, twi[i].irq));
+        }
+    }
+
+    /* PWM controller (register-level model). */
+    sysbus_create_simple(TYPE_AT91_PWM, SAM9X5_PWM_BASE,
+                         qdev_get_gpio_in(aic, SAM9X5_IRQ_PWM));
+
+    /* Battery-backed RTT (shared system interrupt) and GPBR. */
+    {
+        DeviceState *rtt = qdev_new(TYPE_AT91_RTT);
+
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(rtt), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(rtt), 0, SAM9X5_RTT_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(rtt), 0,
+                           qdev_get_gpio_in(sys_or, 4));
+    }
+    sysbus_create_simple(TYPE_AT91_GPBR, SAM9X5_GPBR_BASE, NULL);
 
     /* NAND flash chip-select (EBI CS3). No NAND chip is modelled; back the
      * window so the atmel-nand controller's exec_op reads 0 (-> "no device

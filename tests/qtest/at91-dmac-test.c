@@ -19,6 +19,7 @@
 #define G35_HSMCI0_BASE        0xf0008000
 #define G35_HSMCI1_BASE        0xf000c000
 #define G35_SDRAM_BASE         0x20000000
+#define G35_SPI0_BASE          0xf0000000
 
 #define DMAC_CHER              0x28
 #define DMAC_CHDR              0x2c
@@ -664,17 +665,20 @@ static void test_hsmci_descriptor_longer_than_transaction(void)
  * JEDEC id proves data ordering end to end on SPI0 (requests 1/2); SPI1
  * (requests 3/4) has no slave, so its read data is idle zeros.
  */
-static void run_spi_dma_roundtrip(uint64_t spi_base, unsigned tx_request,
-                                  unsigned rx_request, bool byte_width,
-                                  const uint32_t *expected_tail,
-                                  int expected_words)
+static void run_spi_dma_roundtrip_on(const char *machine,
+                                     uint64_t sdram_base,
+                                     uint64_t dmac_base,
+                                     uint64_t spi_base, unsigned tx_request,
+                                     unsigned rx_request, bool byte_width,
+                                     const uint32_t *expected_tail,
+                                     int expected_words)
 {
-    QTestState *qts = qtest_init("-machine sam9m10g45ek -S");
-    const uint64_t tx_buf = G45_SDRAM_BASE + 0x40000;
-    const uint64_t rx_buf = G45_SDRAM_BASE + 0x40100;
-    const uint64_t tx_base = G45_DMAC_BASE + DMAC_CH0_BASE +
+    QTestState *qts = qtest_initf("-machine %s -S", machine);
+    const uint64_t tx_buf = sdram_base + 0x40000;
+    const uint64_t rx_buf = sdram_base + 0x40100;
+    const uint64_t tx_base = dmac_base + DMAC_CH0_BASE +
                              4 * DMAC_CH_STRIDE;
-    const uint64_t rx_base = G45_DMAC_BASE + DMAC_CH0_BASE +
+    const uint64_t rx_base = dmac_base + DMAC_CH0_BASE +
                              5 * DMAC_CH_STRIDE;
     const uint32_t widths = byte_width ? 0 :
         DMAC_CTRLA_SRC_WIDTH_4 | DMAC_CTRLA_DST_WIDTH_4;
@@ -713,14 +717,14 @@ static void run_spi_dma_roundtrip(uint64_t spi_base, unsigned tx_request,
     qtest_writel(qts, rx_base + DMAC_CFG,
                  dmac_cfg_src_per(rx_request) | DMAC_CFG_SRC_H2SEL);
 
-    qtest_writel(qts, G45_DMAC_BASE + DMAC_EN, 1);
-    qtest_writel(qts, G45_DMAC_BASE + DMAC_CHER,
+    qtest_writel(qts, dmac_base + DMAC_EN, 1);
+    qtest_writel(qts, dmac_base + DMAC_CHER,
                  DMAC_ENA(4) | DMAC_ENA(5));
-    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 4);
-    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 5);
+    wait_for_dmac_channel_disabled(qts, dmac_base, 4);
+    wait_for_dmac_channel_disabled(qts, dmac_base, 5);
     qtest_writel(qts, spi_base + SPI_CR, SPI_CR_LASTXFER);
 
-    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR) &
+    g_assert_cmphex(qtest_readl(qts, dmac_base + DMAC_EBCISR) &
                     (DMAC_BTC(4) | DMAC_BTC(5) | DMAC_ERR(4) | DMAC_ERR(5)),
                     ==, DMAC_BTC(4) | DMAC_BTC(5));
     /* Word-wide RDR reads carry the live PCS field in bits 16..19. */
@@ -732,6 +736,17 @@ static void run_spi_dma_roundtrip(uint64_t spi_base, unsigned tx_request,
         g_assert_cmphex(got, ==, expected_tail[i - (4 - expected_words)]);
     }
     qtest_quit(qts);
+}
+
+
+static void run_spi_dma_roundtrip(uint64_t spi_base, unsigned tx_request,
+                                  unsigned rx_request, bool byte_width,
+                                  const uint32_t *expected_tail,
+                                  int expected_words)
+{
+    run_spi_dma_roundtrip_on("sam9m10g45ek", G45_SDRAM_BASE, G45_DMAC_BASE,
+                             spi_base, tx_request, rx_request, byte_width,
+                             expected_tail, expected_words);
 }
 
 /*
@@ -827,6 +842,16 @@ static void test_spi0_jedec_via_dma(void)
     static const uint32_t jedec[3] = { 0x20, 0xba, 0x16 };
 
     run_spi_dma_roundtrip(G45_SPI0_BASE, 1, 2, true, jedec, 3);
+}
+
+/* The same JEDEC probe on the SAM9x5 board: SPI0 pairs with DMAC0's
+ * request lines 1/2 and carries the same n25q032 on NPCS0. */
+static void test_g35_spi0_jedec_via_dma(void)
+{
+    static const uint32_t jedec[3] = { 0x20, 0xba, 0x16 };
+
+    run_spi_dma_roundtrip_on("sam9g35ek", G35_SDRAM_BASE, G35_DMAC0_BASE,
+                             G35_SPI0_BASE, 1, 2, true, jedec, 3);
 }
 
 static void test_spi1_route_smoke(void)
@@ -4044,6 +4069,8 @@ int main(int argc, char **argv)
                    test_dmac_subbuffer_arbitration_fixed);
     qtest_add_func("/at91-dmac/g45/spi0/jedec-via-dma",
                    test_spi0_jedec_via_dma);
+    qtest_add_func("/at91-dmac/g35/spi0/jedec-via-dma",
+                   test_g35_spi0_jedec_via_dma);
     qtest_add_func("/at91-dmac/g45/spi1/route-smoke",
                    test_spi1_route_smoke);
     qtest_add_func("/at91-dmac/g45/ssc0/loopback-via-dma",
