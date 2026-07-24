@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 38 cases:
+The registry currently contains 40 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -172,7 +172,14 @@ The registry currently contains 38 cases:
   the guest validates PENCNT/NOCNT plus the pen-detect-triggered
   ratio pairs (numerator never exceeding the full-scale denominator —
   any contact point passes on model and silicon; on a physical board a
-  human or fixture supplies the contact instead). Cases
+  human or fixture supplies the contact instead). The two-phase
+  reset-domain proof (`r4reset-seed`/`r4reset-verify`, driven by the
+  runner before the regular suites) parks seed-derived patterns in the
+  battery-backed GPBR, pulls the RSTC processor+peripheral reset from
+  inside the guest, and verifies the patterns after the reboot — the
+  runner temporarily switches QEMU's reboot action to in-process reset
+  for exactly this phase, keeping `-no-reboot`'s unexpected-reset
+  detection everywhere else. Cases
   that assert the shared system IRQ isolate it at the AIC and bound all
   waits with the free-running RTT value instead of the (frozen)
   scheduler tick.
