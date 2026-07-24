@@ -7,7 +7,9 @@
 #include "libqtest.h"
 
 #define G45_PIOA_BASE          0xfffff200
+#define G35_PIOA_BASE          0xfffff400
 #define G45_PIOA_PATH          "/machine/pioa"
+#define G35_PIOA_PATH          "/machine/pioa"
 #define G45_AIC_BASE           0xfffff000
 #define G45_AIC_IPR            0x10c
 #define G45_AIC_PIOA           (1u << 2)
@@ -68,19 +70,23 @@ static void wait_for_migration_complete(QTestState *qts)
     }
 }
 
+static const char *pio_machine = "sam9m10g45ek";
+static uint64_t pio_base = G45_PIOA_BASE;
+static const char *pio_path = G45_PIOA_PATH;
+
 static void pio_write(QTestState *qts, uint32_t reg, uint32_t value)
 {
-    qtest_writel(qts, G45_PIOA_BASE + reg, value);
+    qtest_writel(qts, pio_base + reg, value);
 }
 
 static uint32_t pio_read(QTestState *qts, uint32_t reg)
 {
-    return qtest_readl(qts, G45_PIOA_BASE + reg);
+    return qtest_readl(qts, pio_base + reg);
 }
 
 static void set_pin(QTestState *qts, unsigned pin, int level)
 {
-    qtest_set_irq_in(qts, G45_PIOA_PATH, NULL, pin, level);
+    qtest_set_irq_in(qts, pio_path, NULL, pin, level);
 }
 
 static void assert_aic_pioa(QTestState *qts, bool asserted)
@@ -93,10 +99,10 @@ static void assert_aic_pioa(QTestState *qts, bool asserted)
 
 static void test_registers_mux_and_sync_output(void)
 {
-    QTestState *qts = qtest_init("-machine sam9m10g45ek");
+    QTestState *qts = qtest_initf("-machine %s", pio_machine);
     const uint32_t pin = 1u << 0;
 
-    qtest_irq_intercept_out(qts, G45_PIOA_PATH);
+    qtest_irq_intercept_out(qts, pio_path);
     g_assert_cmphex(pio_read(qts, PIO_PSR), ==, UINT32_MAX);
     g_assert_cmphex(pio_read(qts, PIO_OSR), ==, 0);
     g_assert_cmphex(pio_read(qts, PIO_IFSR), ==, 0);
@@ -289,6 +295,18 @@ static void test_filter_clock_change(void)
     qtest_quit(qts);
 }
 
+/* Same register/mux/output contract at the SAM9x5 PIOA base. */
+static void test_g35_registers_mux_and_sync_output(void)
+{
+    pio_machine = "sam9g35ek";
+    pio_base = G35_PIOA_BASE;
+    pio_path = G35_PIOA_PATH;
+    test_registers_mux_and_sync_output();
+    pio_machine = "sam9m10g45ek";
+    pio_base = G45_PIOA_BASE;
+    pio_path = G45_PIOA_PATH;
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -303,6 +321,8 @@ int main(int argc, char **argv)
                    test_filter_migration);
     qtest_add_func("/at91-pio/g45/filter-clock-change",
                    test_filter_clock_change);
+    qtest_add_func("/at91-pio/g35/registers-mux-sync-output",
+                   test_g35_registers_mux_and_sync_output);
 
     return g_test_run();
 }

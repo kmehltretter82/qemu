@@ -457,9 +457,13 @@ static void sam9g35ek_init(MachineState *machine)
     qdev_connect_gpio_out(piocd_or, 0, qdev_get_gpio_in(aic, SAM9X5_IRQ_PIOCD));
 
     {
-        static const struct { hwaddr base; bool cd; int line; } pio[] = {
-            { SAM9X5_PIOA_BASE, false, 0 }, { SAM9X5_PIOB_BASE, false, 1 },
-            { SAM9X5_PIOC_BASE, true,  0 }, { SAM9X5_PIOD_BASE, true,  1 },
+        static const struct {
+            const char *name; hwaddr base; bool cd; int line;
+        } pio[] = {
+            { "pioa", SAM9X5_PIOA_BASE, false, 0 },
+            { "piob", SAM9X5_PIOB_BASE, false, 1 },
+            { "pioc", SAM9X5_PIOC_BASE, true,  0 },
+            { "piod", SAM9X5_PIOD_BASE, true,  1 },
         };
         DeviceState *piod = NULL;
         int i;
@@ -467,6 +471,8 @@ static void sam9g35ek_init(MachineState *machine)
         for (i = 0; i < ARRAY_SIZE(pio); i++) {
             DeviceState *p = qdev_new(TYPE_AT91_PIO);
 
+            object_property_add_child(OBJECT(machine), pio[i].name,
+                                      OBJECT(p));
             qdev_connect_clock_in(p, "mck", mck);
             sysbus_realize_and_unref(SYS_BUS_DEVICE(p), &error_fatal);
             sysbus_mmio_map(SYS_BUS_DEVICE(p), 0, pio[i].base);
