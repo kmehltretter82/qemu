@@ -12,6 +12,7 @@
 #include "qemu/timer.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "system/memory.h"
 #include "system/runstate.h"
@@ -261,6 +262,7 @@ struct AT91WdtState {
     int64_t remaining_ns;
     bool mr_written;       /* WDT_MR is write-once */
     bool counter_expired;
+    bool disabled_at_boot;
 };
 
 static void wdt_update_irq(AT91WdtState *s)
@@ -402,6 +404,16 @@ static void wdt_reset(DeviceState *dev)
     s->sr = 0;
     s->mr_written = false;
     s->counter_expired = false;
+    /*
+     * "disabled-at-boot" stands in for a first-stage bootloader's
+     * at91_disable_wdt(): a single WDT_MR = WDDIS write that also consumes
+     * the write-once slot, for direct -kernel boots of guests that cannot
+     * service the watchdog themselves.
+     */
+    if (s->disabled_at_boot) {
+        s->mr = WDT_MR_WDDIS;
+        s->mr_written = true;
+    }
     wdt_update_irq(s);
     wdt_reload(s);
 }
@@ -467,12 +479,18 @@ static const VMStateDescription vmstate_at91_wdt = {
     }
 };
 
+static const Property wdt_properties[] = {
+    DEFINE_PROP_BOOL("disabled-at-boot", AT91WdtState, disabled_at_boot,
+                     false),
+};
+
 static void wdt_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     device_class_set_legacy_reset(dc, wdt_reset);
     dc->vmsd = &vmstate_at91_wdt;
+    device_class_set_props(dc, wdt_properties);
     set_bit(DEVICE_CATEGORY_WATCHDOG, dc->categories);
 }
 
