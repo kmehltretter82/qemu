@@ -235,7 +235,7 @@ static void test_filter_migration(void)
     g_assert_cmpint(fd, >=, 0);
     close(fd);
 
-    src = qtest_init("-machine sam9m10g45ek -S");
+    src = qtest_initf("-machine %s -S", pio_machine);
     set_pin(src, 4, 0);
     pio_read(src, PIO_ISR);
     pio_write(src, PIO_IFER, pin);
@@ -251,7 +251,7 @@ static void test_filter_migration(void)
     wait_for_migration_complete(src);
     qtest_quit(src);
 
-    dst = qtest_initf("-machine sam9m10g45ek -S -incoming %s", uri);
+    dst = qtest_initf("-machine %s -S -incoming %s", pio_machine, uri);
     wait_for_migration_complete(dst);
     g_assert_cmphex(pio_read(dst, PIO_IFSR) & pin, ==, pin);
     g_assert_cmphex(pio_read(dst, PIO_IMR) & pin, ==, pin);
@@ -295,16 +295,32 @@ static void test_filter_clock_change(void)
     qtest_quit(qts);
 }
 
-/* Same register/mux/output contract at the SAM9x5 PIOA base. */
-static void test_g35_registers_mux_and_sync_output(void)
+/* Re-run a G45 case body against the SAM9x5 board's PIOA. */
+static void run_on_g35(void (*body)(void))
 {
     pio_machine = "sam9g35ek";
     pio_base = G35_PIOA_BASE;
     pio_path = G35_PIOA_PATH;
-    test_registers_mux_and_sync_output();
+    body();
     pio_machine = "sam9m10g45ek";
     pio_base = G45_PIOA_BASE;
     pio_path = G45_PIOA_PATH;
+}
+
+/* Same register/mux/output contract at the SAM9x5 PIOA base. */
+static void test_g35_registers_mux_and_sync_output(void)
+{
+    run_on_g35(test_registers_mux_and_sync_output);
+}
+
+/*
+ * The glitch filter samples on MCK, and the SAM9x5 board's reset clock
+ * tree lands on the same 132 MHz MCK, so the deadline arithmetic carried
+ * across a migration is identical.
+ */
+static void test_g35_filter_migration(void)
+{
+    run_on_g35(test_filter_migration);
 }
 
 int main(int argc, char **argv)
@@ -323,6 +339,8 @@ int main(int argc, char **argv)
                    test_filter_clock_change);
     qtest_add_func("/at91-pio/g35/registers-mux-sync-output",
                    test_g35_registers_mux_and_sync_output);
+    qtest_add_func("/at91-pio/g35/filter-migration",
+                   test_g35_filter_migration);
 
     return g_test_run();
 }

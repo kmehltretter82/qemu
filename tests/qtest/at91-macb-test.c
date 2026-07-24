@@ -13,6 +13,8 @@
 
 #define G45_MACB_BASE          0xfffbc000
 #define G45_SDRAM_BASE         0x70000000
+#define G35_MACB_BASE          0xf802c000
+#define G35_SDRAM_BASE         0x20000000
 
 #define MACB_NCR               0x00
 #define MACB_NCFGR             0x04
@@ -458,8 +460,9 @@ static void test_macb_rx_ring_migration(void)
 
         g_assert_cmpint(socketpair(PF_UNIX, SOCK_STREAM, 0, pair), ==, 0);
         dst_args = g_strdup_printf(
-            "-machine sam9m10g45ek -nic socket,fd=%d,model=at91-macb,"
-            "mac=52:54:00:12:34:56 -S -incoming %s", pair[1], uri);
+            "-machine %s -nic socket,fd=%d,model=at91-macb,"
+            "mac=52:54:00:12:34:56 -S -incoming %s",
+            macb_machine, pair[1], uri);
         dqts = qtest_init(dst_args);
         close(pair[1]);
         dfd = pair[0];
@@ -484,16 +487,28 @@ static void test_macb_rx_ring_migration(void)
     unlink(state_path);
 }
 
-/* The same TX ring persistence contract on the SAM9x5 board. */
-static void test_g35_tx_ring_persist(void)
+/* Re-run a G45 case body against the SAM9x5 board's MACB instance. */
+static void run_on_g35(void (*body)(void))
 {
     macb_machine = "sam9g35ek";
-    macb_base = 0xf802c000;
-    macb_sdram = 0x20000000;
-    test_macb_tx_ring_persist();
+    macb_base = G35_MACB_BASE;
+    macb_sdram = G35_SDRAM_BASE;
+    body();
     macb_machine = "sam9m10g45ek";
     macb_base = G45_MACB_BASE;
     macb_sdram = G45_SDRAM_BASE;
+}
+
+/* The same TX ring persistence contract on the SAM9x5 board. */
+static void test_g35_tx_ring_persist(void)
+{
+    run_on_g35(test_macb_tx_ring_persist);
+}
+
+/* ...and the same RX ring state across a live migration. */
+static void test_g35_rx_ring_migration(void)
+{
+    run_on_g35(test_macb_rx_ring_migration);
 }
 
 int main(int argc, char **argv)
@@ -511,6 +526,8 @@ int main(int argc, char **argv)
                    test_macb_rx_oversize_preflight_drop);
     qtest_add_func("/at91-macb/rx-ring-migration",
                    test_macb_rx_ring_migration);
+    qtest_add_func("/at91-macb/g35/rx-ring-migration",
+                   test_g35_rx_ring_migration);
 
     return g_test_run();
 }

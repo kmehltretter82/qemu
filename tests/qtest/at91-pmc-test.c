@@ -11,6 +11,7 @@
 #define G45_TCB0_BASE      0xfff7c000
 
 #define G35_PMC_BASE       0xfffffc00
+#define G35_PIT_BASE       0xfffffe30
 #define G35_TCB0_BASE      0xf8008000
 
 #define PMC_MCFR           0x24
@@ -117,7 +118,14 @@ static void test_g45_pit_clock_change(void)
     qtest_quit(qts);
 }
 
-static void test_g45_programmed_clock_migration(void)
+/*
+ * Both boards reset to the same 132 MHz MCK, so the tick arithmetic either
+ * side of the MAINCK switch is identical; only the peripheral bases move.
+ */
+static void run_programmed_clock_migration(const char *machine,
+                                           uint64_t pmc_base,
+                                           uint64_t tcb0_base,
+                                           uint64_t pit_base)
 {
     g_autofree char *state_path = NULL;
     g_autofree char *uri = NULL;
@@ -128,20 +136,20 @@ static void test_g45_programmed_clock_migration(void)
     g_assert_cmpint(fd, >=, 0);
     close(fd);
 
-    src = qtest_init("-machine sam9m10g45ek -S");
-    start_tc_mck_div2(src, G45_TCB0_BASE);
+    src = qtest_initf("-machine %s -S", machine);
+    start_tc_mck_div2(src, tcb0_base);
     qtest_clock_step(src, 1000);
-    g_assert_cmpuint(qtest_readl(src, G45_TCB0_BASE + TC_CV), ==, 66);
+    g_assert_cmpuint(qtest_readl(src, tcb0_base + TC_CV), ==, 66);
 
-    qtest_writel(src, G45_PMC_BASE + PMC_MCKR, MCKR_MAINCK);
+    qtest_writel(src, pmc_base + PMC_MCKR, MCKR_MAINCK);
     qtest_clock_step(src, 1000);
-    g_assert_cmpuint(qtest_readl(src, G45_TCB0_BASE + TC_CV), ==, 72);
+    g_assert_cmpuint(qtest_readl(src, tcb0_base + TC_CV), ==, 72);
 
     /* Keep a PIT interval part-way complete across the same migration. */
-    qtest_writel(src, G45_PIT_BASE + PIT_MR, PIT_MR_PITEN | 749);
+    qtest_writel(src, pit_base + PIT_MR, PIT_MR_PITEN | 749);
     qtest_clock_step(src, 400000);
-    g_assert_cmpuint(qtest_readl(src, G45_TCB0_BASE + TC_CV), ==, 2472);
-    g_assert_cmpuint(qtest_readl(src, G45_PIT_BASE + PIT_PIIR) & 0xfffff,
+    g_assert_cmpuint(qtest_readl(src, tcb0_base + TC_CV), ==, 2472);
+    g_assert_cmpuint(qtest_readl(src, pit_base + PIT_PIIR) & 0xfffff,
                      ==, 300);
 
     uri = g_strdup_printf("file:%s", state_path);
@@ -150,20 +158,32 @@ static void test_g45_programmed_clock_migration(void)
     wait_for_migration_complete(src);
     qtest_quit(src);
 
-    dst = qtest_initf("-machine sam9m10g45ek -S -incoming %s", uri);
+    dst = qtest_initf("-machine %s -S -incoming %s", machine, uri);
     wait_for_migration_complete(dst);
-    g_assert_cmphex(qtest_readl(dst, G45_PMC_BASE + PMC_MCKR), ==,
+    g_assert_cmphex(qtest_readl(dst, pmc_base + PMC_MCKR), ==,
                     MCKR_MAINCK);
-    g_assert_cmpuint(qtest_readl(dst, G45_TCB0_BASE + TC_CV), ==, 2472);
-    g_assert_cmpuint(qtest_readl(dst, G45_PIT_BASE + PIT_PIIR) & 0xfffff,
+    g_assert_cmpuint(qtest_readl(dst, tcb0_base + TC_CV), ==, 2472);
+    g_assert_cmpuint(qtest_readl(dst, pit_base + PIT_PIIR) & 0xfffff,
                      ==, 300);
     qtest_clock_step(dst, 100000);
-    g_assert_cmpuint(qtest_readl(dst, G45_TCB0_BASE + TC_CV), ==, 3072);
-    g_assert_cmpuint(qtest_readl(dst, G45_PIT_BASE + PIT_PIIR) & 0xfffff,
+    g_assert_cmpuint(qtest_readl(dst, tcb0_base + TC_CV), ==, 3072);
+    g_assert_cmpuint(qtest_readl(dst, pit_base + PIT_PIIR) & 0xfffff,
                      ==, 375);
     qtest_quit(dst);
 
     unlink(state_path);
+}
+
+static void test_g45_programmed_clock_migration(void)
+{
+    run_programmed_clock_migration("sam9m10g45ek", G45_PMC_BASE,
+                                   G45_TCB0_BASE, G45_PIT_BASE);
+}
+
+static void test_g35_programmed_clock_migration(void)
+{
+    run_programmed_clock_migration("sam9g35ek", G35_PMC_BASE,
+                                   G35_TCB0_BASE, G35_PIT_BASE);
 }
 
 static void test_g35_master_clock_layout(void)
@@ -195,6 +215,8 @@ int main(int argc, char **argv)
                    test_g45_programmed_clock_migration);
     qtest_add_func("/at91-pmc/g35/master-clock-layout",
                    test_g35_master_clock_layout);
+    qtest_add_func("/at91-pmc/g35/programmed-clock-migration",
+                   test_g35_programmed_clock_migration);
 
     return g_test_run();
 }
