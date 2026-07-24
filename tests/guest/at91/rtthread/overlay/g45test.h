@@ -63,6 +63,7 @@ void g45test_r4_pwm(struct g45test_result *result);
 void g45test_r4_tsadcc(struct g45test_result *result);
 void g45test_r4_twi(struct g45test_result *result);
 void g45test_r4_spi(struct g45test_result *result);
+void g45test_r4_touch(struct g45test_result *result);
 void g45test_r4_trng(struct g45test_result *result);
 void g45test_r4_gpbr(struct g45test_result *result);
 

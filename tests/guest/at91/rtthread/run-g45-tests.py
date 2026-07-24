@@ -25,13 +25,33 @@ from typing import Any
 PROTOCOL_VERSION = 1
 DEFAULT_SEED = 0x45D0A11C
 PROMPT_RE = re.compile(rb"msh />")
-DEFAULT_SUITES = ("d0", "d1", "d2", "r4", "core.scheduler")
+DEFAULT_SUITES = ("d0", "d1", "d2", "r4", "r4touch", "core.scheduler")
 EXPECTED_PASSES = {
     "d0": 5,
     "d1": 20,
     "d2": 1,
     "r4": 10,
+    "r4touch": 1,
     "core.scheduler": 1,
+}
+
+# Host-side QMP actions for guest G45TEST HOSTREQ markers, per suite.
+# The pen press lands mid-panel; the guest only asserts ratio shapes.
+HOSTREQ_ACTIONS = {
+    "r4touch": {
+        "touch-press": [
+            ("input-send-event", {"events": [
+                {"type": "abs", "data": {"axis": "x", "value": 16000}},
+                {"type": "abs", "data": {"axis": "y", "value": 12000}},
+                {"type": "btn", "data": {"down": True, "button": "left"}},
+            ]}),
+        ],
+        "touch-release": [
+            ("input-send-event", {"events": [
+                {"type": "btn", "data": {"down": False, "button": "left"}},
+            ]}),
+        ],
+    },
 }
 
 
@@ -380,19 +400,36 @@ def guest_status(vm: QemuVM) -> int:
 
 
 def guest_run(vm: QemuVM, selection: str, seed: int, expected_passes: int,
-              timeout: float) -> bytes:
+              timeout: float,
+              hostreq: "dict[str, Any] | None" = None) -> bytes:
     assert vm.serial is not None
     start = vm.serial.mark()
     vm.serial.send_line(f"g45test run {selection} 0x{seed:08x}")
     end_pattern = re.compile(
-        rb"G45TEST END suite=" + re.escape(selection.encode("ascii")) +
+        rb"G45TEST (?:HOSTREQ (\S+)|END suite=" +
+        re.escape(selection.encode("ascii")) +
         rb" passed=(\d+) failed=(\d+) skipped=(\d+) "
-        rb"seed=0x([0-9a-fA-F]+)\r?\n"
+        rb"seed=0x([0-9a-fA-F]+))\r?\n"
     )
-    match, end = vm.serial.wait_regex(end_pattern, start, timeout)
+    deadline = time.monotonic() + timeout
+    scan = start
+    while True:
+        match, end = vm.serial.wait_regex(
+            end_pattern, scan, max(deadline - time.monotonic(), 0.1))
+        if match.group(1) is None:
+            break
+        # A guest HOSTREQ marker: perform the mapped host-side action.
+        action = match.group(1).decode("ascii")
+        if hostreq is None or action not in hostreq:
+            raise TestFailure(f"guest requested unknown host action "
+                              f"{action!r} in {selection}")
+        assert vm.qmp is not None
+        for command, arguments in hostreq[action]:
+            vm.qmp.execute(command, arguments, timeout=10.0)
+        scan = end
     region = bytes(vm.serial.buffer[start:end])
-    passed, failed, skipped = map(int, match.groups()[:3])
-    returned_seed = int(match.group(4), 16)
+    passed, failed, skipped = map(int, match.groups()[1:4])
+    returned_seed = int(match.group(5), 16)
     if b"G45TEST FAIL " in region:
         raise TestFailure(
             f"guest reported a failure in {selection}:\n"
@@ -514,9 +551,10 @@ def main() -> int:
         summary["initial_tick"] = guest_status(source)
 
         for suite in args.suite or DEFAULT_SUITES:
-            suite_timeout = 90.0 if suite in ("d1", "r4") else 60.0
+            suite_timeout = 90.0 if suite in ("d1", "r4", "r4touch") else 60.0
             output = guest_run(
-                source, suite, args.seed, EXPECTED_PASSES[suite], suite_timeout
+                source, suite, args.seed, EXPECTED_PASSES[suite],
+                suite_timeout, hostreq=HOSTREQ_ACTIONS.get(suite)
             )
             if suite == "core.scheduler":
                 scheduler_match = re.search(
