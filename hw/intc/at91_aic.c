@@ -156,6 +156,18 @@ static uint64_t aic_read(void *opaque, hwaddr offset, unsigned size)
 
     switch (offset) {
     case AIC_IVR:
+        /* In protect mode (DCR.PROT) reads are side-effect-free - a
+         * debugger can inspect the vector - and the handler's IVR
+         * *write* performs the push/acknowledge instead. */
+        if (s->dcr & 1) {
+            pending = aic_pending(s);
+            best = aic_best_irq(s, pending, &best_prio);
+            cur_prio = (s->sp > 0) ? s->prio_stack[s->sp - 1] : -1;
+            if (best < 0 || best_prio <= cur_prio) {
+                return s->spu;
+            }
+            return s->svr[best];
+        }
         /* Entry point of interrupt handling: return the vector of the current
          * highest-priority IRQ, push its priority, ack edge sources. */
         pending = aic_pending(s);
@@ -254,6 +266,32 @@ static void aic_write(void *opaque, hwaddr offset, uint64_t value,
     case AIC_ISCR:
         s->edge |= val;            /* software-set edge pendings */
         aic_update(s);
+        break;
+    case AIC_IVR:
+        /* Protect-mode acknowledge: the write performs what the read
+         * does in normal mode.  Ignored outside protect mode. */
+        if (s->dcr & 1) {
+            uint32_t pending = aic_pending(s);
+            int best_prio;
+            int best = aic_best_irq(s, pending, &best_prio);
+            int cur_prio = (s->sp > 0) ? s->prio_stack[s->sp - 1] : -1;
+
+            if (best < 0 || best_prio <= cur_prio) {
+                s->isr = 0;
+                if (s->sp < AIC_STACK_SZ) {
+                    s->prio_stack[s->sp++] = cur_prio;
+                }
+            } else {
+                s->isr = best;
+                if (s->sp < AIC_STACK_SZ) {
+                    s->prio_stack[s->sp++] = best_prio;
+                }
+                if (AIC_SRCTYPE_IS_EDGE(s->smr[best])) {
+                    s->edge &= ~(1u << best);
+                }
+            }
+            aic_update(s);
+        }
         break;
     case AIC_EOICR:
         if (s->sp > 0) {
