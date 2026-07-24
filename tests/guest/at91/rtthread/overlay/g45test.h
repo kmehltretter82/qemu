@@ -68,6 +68,7 @@ void g45test_r4_reset_seed(struct g45test_result *result);
 void g45test_r4_reset_verify(struct g45test_result *result);
 void g45test_irq_wired_or(struct g45test_result *result);
 void g45test_irq_priority_order(struct g45test_result *result);
+void g45test_irq_pit_ack(struct g45test_result *result);
 void g45test_r4_trng(struct g45test_result *result);
 void g45test_r4_gpbr(struct g45test_result *result);
 

@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 42 cases:
+The registry currently contains 43 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -190,9 +190,13 @@ The registry currently contains 42 cases:
   the last drain; and AIC priority ordering — TWI1 NACK, SPI1 overrun
   and TSADCC DRDY latch together while the CPU is masked (priorities
   1/4/7) and real installed handlers must run highest-first (20,15,13),
-  draining through the same SR/LCDR reads real drivers use. The
-  randomized IVR/EOI-injection and nested-preemption variants remain
-  future work.
+  draining through the same SR/LCDR reads real drivers use. The PIT case owns the
+  whole timer under the mask: no accumulation while disabled, tolerant
+  RTT-bounded interval counts, PIIR observing without acknowledging,
+  and the PIVR read-clear of PICNT and PITS proven with interval
+  generation frozen first (PICNT saturate-versus-wrap at 0xfff is
+  deliberately unasserted pending a datasheet check). The randomized
+  IVR/EOI-injection and nested-preemption variants remain future work.
 - Core: the 1 kHz scheduler runs and switches tasks for at least ten seconds.
 
 The D1 suite performs 340,206 checks. It first found three deterministic bugs in

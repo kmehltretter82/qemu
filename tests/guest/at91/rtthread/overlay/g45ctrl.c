@@ -833,6 +833,80 @@ void g45test_irq_wired_or(struct g45test_result *result)
     g45ctrl_clock_stop();
 }
 
+#define PIT_SR          0x04U
+#define PIT_PIVR        0x08U
+#define PIT_PIIR        0x0cU
+#define PIT_MR_PITEN    (1U << 24)
+#define PIT_PICNT(v)    ((v) >> 20)
+
+/*
+ * PIT boundary and acknowledgement torture.  The case owns the whole
+ * PIT while the shared system interrupt is masked, so the OS tick is
+ * frozen either way.  All waits are bounded by the RTT, which counts
+ * the same virtual clock as the PIT - the tolerant interval counts
+ * hold even under heavy TCG stall.  PICNT saturate-versus-wrap at
+ * 0xfff is deliberately unasserted (model saturates; silicon behavior
+ * needs a datasheet check).  PIV=8249 gives ~1 ms intervals at the
+ * 132 MHz master clock's /16 PIT input.
+ */
+void g45test_irq_pit_ack(struct g45test_result *result)
+{
+    rt_uint32_t pit_mr, v1, v2, start;
+
+    g45ctrl_clock_start();
+    *g45_reg(G45_AIC_BASE, AIC_IDCR) = AIC_SYS;
+    pit_mr = *g45_reg(G45_PIT_BASE, PIT_MR);
+
+    /* Disabled: no accumulation, image reads zero. */
+    *g45_reg(G45_PIT_BASE, PIT_MR) = 0;
+    (void)*g45_reg(G45_PIT_BASE, PIT_PIVR);
+    start = g45ctrl_clock_ms();
+    while (g45ctrl_clock_ms() - start < 3U) {
+    }
+    g45test_check(result, *g45_reg(G45_PIT_BASE, PIT_PIIR) == 0U,
+                  0, *g45_reg(G45_PIT_BASE, PIT_PIIR), 0);
+
+    /* ~1 ms intervals, interrupt line kept off. */
+    *g45_reg(G45_PIT_BASE, PIT_MR) = 8249U | PIT_MR_PITEN;
+    start = g45ctrl_clock_ms();
+    while (g45ctrl_clock_ms() - start < 5U) {
+    }
+    v1 = *g45_reg(G45_PIT_BASE, PIT_PIIR);
+    g45test_check(result,
+                  PIT_PICNT(v1) >= 3U && PIT_PICNT(v1) <= 8U,
+                  5U, PIT_PICNT(v1), 1);
+    /* The image register does not acknowledge. */
+    v2 = *g45_reg(G45_PIT_BASE, PIT_PIIR);
+    g45test_check(result, PIT_PICNT(v2) >= PIT_PICNT(v1),
+                  PIT_PICNT(v1), PIT_PICNT(v2), 2);
+    g45test_check(result,
+                  (*g45_reg(G45_PIT_BASE, PIT_SR) & 1U) == 1U,
+                  1, *g45_reg(G45_PIT_BASE, PIT_SR), 3);
+
+    /*
+     * Freeze interval generation before proving the PIVR ack so a
+     * boundary cannot re-latch between the reads.
+     */
+    *g45_reg(G45_PIT_BASE, PIT_MR) = 8249U;
+    v1 = *g45_reg(G45_PIT_BASE, PIT_PIVR);
+    g45test_check(result, PIT_PICNT(v1) >= 3U, 3U, PIT_PICNT(v1), 4);
+    g45test_check(result,
+                  PIT_PICNT(*g45_reg(G45_PIT_BASE, PIT_PIIR)) == 0U,
+                  0, *g45_reg(G45_PIT_BASE, PIT_PIIR), 5);
+    g45test_check(result, *g45_reg(G45_PIT_BASE, PIT_SR) == 0U,
+                  0, *g45_reg(G45_PIT_BASE, PIT_SR), 6);
+
+    /* Restore the OS tick configuration and resynchronize. */
+    *g45_reg(G45_PIT_BASE, PIT_MR) = pit_mr;
+    (void)*g45_reg(G45_PIT_BASE, PIT_PIVR);
+    *g45_reg(G45_AIC_BASE, AIC_ICCR) = AIC_SYS;
+    *g45_reg(G45_AIC_BASE, AIC_IECR) = AIC_SYS;
+
+    rt_kprintf("G45TEST DATA case=irq.pit-ack picnt=0x%03x\n",
+               PIT_PICNT(v1));
+    g45ctrl_clock_stop();
+}
+
 static volatile rt_uint32_t g45ctrl_irq_log[4];
 static volatile rt_uint32_t g45ctrl_irq_log_n;
 
