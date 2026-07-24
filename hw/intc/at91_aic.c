@@ -185,7 +185,13 @@ static uint64_t aic_read(void *opaque, hwaddr offset, unsigned size)
         aic_update(s);
         break;
     case AIC_FVR:
+        /* An edge-programmed fast interrupt stays pending until the
+         * FVR is read (the FIQ handler's entry point acknowledges it). */
         r = s->svr[0];
+        if (AIC_SRCTYPE_IS_EDGE(s->smr[0])) {
+            s->edge &= ~1u;
+            aic_update(s);
+        }
         break;
     case AIC_ISR:
         r = s->isr;
