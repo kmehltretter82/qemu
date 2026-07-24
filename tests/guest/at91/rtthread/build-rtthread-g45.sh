@@ -138,6 +138,12 @@ if [[ ${version} == "5.2.2" ]] && \
     patch -d "${source_dir}" -p1 < \
         "${script_dir}/patches/0003-at91sam9g45-use-arm9-barrier-v5.2.2.patch"
 fi
+if [[ ${version} == "5.2.2" ]] && \
+        ! grep -q 'LWIP_NETIF_LOOPBACK' \
+        "${source_dir}/components/net/lwip/port/lwipopts.h"; then
+    patch -d "${source_dir}" -p1 < \
+        "${script_dir}/patches/0004-lwip-enable-loopback-v5.2.2.patch"
+fi
 
 "${script_dir}/configure-profile.py" \
     --source "${source_dir}" \
