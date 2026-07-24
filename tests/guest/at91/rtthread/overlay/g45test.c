@@ -481,6 +481,7 @@ static const struct g45test_case g45test_cases[] = {
     { "r4.rtc-alarm-irq", "r4", "R4", g45test_r4_rtc_alarm_irq },
     { "r4.rtt-increment-alarm", "r4", "R4",
       g45test_r4_rtt_increment_alarm },
+    { "r4.trng", "r4", "R4", g45test_r4_trng },
     { "r4.gpbr", "r4", "R4", g45test_r4_gpbr },
     { "core.scheduler", "core", "CORE", g45test_core_scheduler },
 };
