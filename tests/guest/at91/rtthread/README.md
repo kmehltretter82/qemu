@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 40 cases:
+The registry currently contains 41 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -183,6 +183,12 @@ The registry currently contains 40 cases:
   that assert the shared system IRQ isolate it at the AIC and bound all
   waits with the free-running RTT value instead of the (frozen)
   scheduler tick.
+- IRQ (interrupt-torture catalog, first case): the shared system
+  interrupt's wired-OR contract — RTC alarm and RTT increments assert
+  together, then drain one source at a time in both orders; AIC_IPR
+  must stay pending while any source still asserts and drop only after
+  the last drain. The randomized IVR/EOI-injection variant needs an
+  installed vector-1 handler and remains future work.
 - Core: the 1 kHz scheduler runs and switches tasks for at least ten seconds.
 
 The D1 suite performs 340,206 checks. It first found three deterministic bugs in

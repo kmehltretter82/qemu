@@ -25,13 +25,15 @@ from typing import Any
 PROTOCOL_VERSION = 1
 DEFAULT_SEED = 0x45D0A11C
 PROMPT_RE = re.compile(rb"msh />")
-DEFAULT_SUITES = ("d0", "d1", "d2", "r4", "r4touch", "core.scheduler")
+DEFAULT_SUITES = ("d0", "d1", "d2", "r4", "r4touch", "irq",
+                  "core.scheduler")
 EXPECTED_PASSES = {
     "d0": 5,
     "d1": 20,
     "d2": 1,
     "r4": 10,
     "r4touch": 1,
+    "irq": 1,
     "r4reset-verify": 1,
     "core.scheduler": 1,
 }
@@ -589,7 +591,7 @@ def main() -> int:
             summary["reset_cycle"] = "pass"
 
         for suite in args.suite or DEFAULT_SUITES:
-            suite_timeout = 90.0 if suite in ("d1", "r4", "r4touch") else 60.0
+            suite_timeout = 90.0 if suite in ("d1", "r4", "r4touch", "irq") else 60.0
             output = guest_run(
                 source, suite, args.seed, EXPECTED_PASSES[suite],
                 suite_timeout, hostreq=HOSTREQ_ACTIONS.get(suite)
