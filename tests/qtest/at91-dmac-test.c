@@ -890,6 +890,70 @@ static void test_dmac_subbuffer_arbitration_fixed(void)
 }
 
 /*
+ * D4 media-vector row: read the same card block once via CPU PIO (DMAEN
+ * clear, RDR polling - the driver's non-DMA path) and once via the DMA
+ * route.  The bytes must match the host-written pattern and each other,
+ * and the HSMCI must end both transfers in the same completed state.
+ */
+static void test_hsmci_pio_vs_dma_media(void)
+{
+    g_autofree char *image_path = NULL;
+    const uint64_t lli = G45_SDRAM_BASE + 0x42000;
+    const uint64_t dma_dst = G45_SDRAM_BASE + 0x43000;
+    uint8_t pattern[1024];
+    uint8_t pio_data[512];
+    QTestState *qts;
+    uint32_t status;
+    uint32_t expected;
+    int i;
+
+    image_path = hsmci_create_pattern_image(pattern, sizeof(pattern));
+    qts = qtest_initf("-machine sam9m10g45ek -S "
+                      "-drive if=sd,index=0,format=raw,file=%s", image_path);
+    ensure_vm_running(qts);
+    hsmci_select_sd_card(qts);
+
+    /* PIO pass: DMAEN clear, drain RDR while DTIP. */
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_DMA_REG, 0);
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_BLKR, (512u << 16) | 1);
+    hsmci_command(qts, 17 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
+                  HSMCI_CMDR_START | HSMCI_CMDR_READ, 0);
+    for (i = 0; i < 512; i += 4) {
+        uint32_t word = qtest_readl(qts, G45_HSMCI0_BASE + HSMCI_RDR);
+
+        memcpy(&pio_data[i], &word, 4);
+    }
+    qtest_clock_step(qts, 10000);
+    status = qtest_readl(qts, G45_HSMCI0_BASE + HSMCI_SR);
+    g_assert_cmphex(status & (HSMCI_SR_DTIP | HSMCI_SR_NOTBUSY |
+                              HSMCI_SR_XFRDONE), ==,
+                    HSMCI_SR_NOTBUSY | HSMCI_SR_XFRDONE);
+    g_assert_cmpmem(pio_data, sizeof(pio_data), pattern, sizeof(pio_data));
+
+    /* DMA pass of the same block; same data, same completed status. */
+    qtest_memset(qts, dma_dst, 0xcc, 512);
+    hsmci_program_read_lli(qts, lli, dma_dst, 128);
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_DMA_REG, HSMCI_DMA_DMAEN);
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_BLKR, (512u << 16) | 1);
+    hsmci_command(qts, 17 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
+                  HSMCI_CMDR_START | HSMCI_CMDR_READ, 0);
+    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 0);
+    qtest_clock_step(qts, 10000);
+    status = qtest_readl(qts, G45_HSMCI0_BASE + HSMCI_SR);
+    g_assert_cmphex(status & (HSMCI_SR_DTIP | HSMCI_SR_NOTBUSY |
+                              HSMCI_SR_XFRDONE), ==,
+                    HSMCI_SR_NOTBUSY | HSMCI_SR_XFRDONE);
+    for (i = 0; i < 512; i += 4) {
+        memcpy(&expected, &pio_data[i], sizeof(expected));
+        g_assert_cmphex(qtest_readl(qts, dma_dst + i), ==, expected);
+    }
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR) &
+                    (DMAC_BTC(0) | DMAC_ERR(0)), ==, DMAC_BTC(0));
+    qtest_quit(qts);
+    unlink(image_path);
+}
+
+/*
  * Migrate while a too-long descriptor waits with exact residue after the
  * card's XFRDONE.  The destination must show the same residue, and the
  * driver-shaped CHDR recovery plus channel reuse must stay byte-exact.
@@ -3411,6 +3475,8 @@ int main(int argc, char **argv)
                    test_ssc0_loopback_via_dma);
     qtest_add_func("/at91-dmac/g45/ssc1/loopback-via-dma",
                    test_ssc1_loopback_via_dma);
+    qtest_add_func("/at91-dmac/g45/hsmci0/pio-vs-dma-media",
+                   test_hsmci_pio_vs_dma_media);
     qtest_add_func("/at91-dmac/g45/hsmci0/mismatch-residue-migration",
                    test_hsmci_mismatch_residue_migration);
     qtest_add_func("/at91-dmac/g45/hsmci0/mismatch-card-in-progress-migration",
