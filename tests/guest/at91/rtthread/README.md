@@ -220,7 +220,10 @@ The registry currently contains 47 cases:
   network-lwip-threadsafe profile against a slirp backend on a
   192.168.1.0/24 subnet and proves the full MACB driver+lwip stack:
   PHY link negotiation, a DHCP lease acquired through the model
-  (broadcast RX included) and ICMP echo replies from the gateway.
+  (broadcast RX included) and ICMP echo replies from the gateway,
+  then a link-change torture: QMP set_link drops the backend, the PHY
+  and driver must report link down, and after restoration traffic must
+  recover with fresh echo replies.
 
 The D1 suite performs 340,206 checks. It first found three deterministic bugs in
 the local QEMU HDMAC model: missing CHSR EMPTY reset bits, missing global-enable
