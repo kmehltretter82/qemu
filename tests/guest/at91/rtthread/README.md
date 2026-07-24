@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 33 cases:
+The registry currently contains 34 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -144,7 +144,12 @@ The registry currently contains 33 cases:
   GPBR read/write persistence; and the TRNG's key-protected
   enable/disable (wrong keys ignored in both directions), DATRDY while
   enabled, quiet ISR/ODATA while disabled, an eight-word
-  distinctness/nonzero health check and the single-bit MR mask. Cases
+  distinctness/nonzero health check and the single-bit MR mask; and the
+  PWM controller's enable/disable bitmap (reserved CHID bits ignored),
+  per-channel register independence, CUPD double-buffer steering to
+  CDTY or CPRD per CMR.UPD_CDTY, period events on running channels and
+  IER/IDR/IMR bookkeeping — all in board-portable shapes that poll with
+  a budget wherever silicon defers an effect to a period boundary. Cases
   that assert the shared system IRQ isolate it at the AIC and bound all
   waits with the free-running RTT value instead of the (frozen)
   scheduler tick.
