@@ -863,8 +863,13 @@ static void g45_dma_run_linear_copy(struct g45test_result *result,
     status = g45_dma_read(g45_dma_channel_reg(channel, DMAC_DADDR));
     g45test_check(result, status == expected_destination,
                   expected_destination, status, check_base + 3U);
+    /*
+     * A CTRLA read reports transfers COMPLETED on the source interface
+     * (datasheet 40.7.16), so a finished buffer reads back its full size.
+     */
     status = g45_dma_read(g45_dma_channel_reg(channel, DMAC_CTRLA)) & 0xffffU;
-    g45test_check(result, status == 0U, 0, status, check_base + 4U);
+    g45test_check(result, status == DMAC_CTRLA_BTSIZE(ctrla),
+                  DMAC_CTRLA_BTSIZE(ctrla), status, check_base + 4U);
 }
 
 void g45test_d1_boundary_overlap(struct g45test_result *result)
@@ -1575,7 +1580,7 @@ void g45test_d1_software_requests(struct g45test_result *result)
     g45test_check(result, status == destination_address + 4U,
                   destination_address + 4U, status, 6);
     status = g45_dma_read(g45_dma_channel_reg(channel, DMAC_CTRLA));
-    g45test_check(result, (status & 0xffffU) == 7U, 7, status & 0xffffU, 7);
+    g45test_check(result, (status & 0xffffU) == 1U, 1, status & 0xffffU, 7);
 
     g45_dma_write(DMAC_CREQ, request);
     g45test_check(result, g45_dma_wait_clear(DMAC_CREQ, request), 1, 0, 8);
@@ -1588,7 +1593,7 @@ void g45test_d1_software_requests(struct g45test_result *result)
     g45test_check(result, destination[5] == 0xdeadbeefU,
                   0xdeadbeefU, destination[5], 14);
     status = g45_dma_read(g45_dma_channel_reg(channel, DMAC_CTRLA));
-    g45test_check(result, (status & 0xffffU) == 3U, 3, status & 0xffffU, 15);
+    g45test_check(result, (status & 0xffffU) == 5U, 5, status & 0xffffU, 15);
 
     g45_dma_write(DMAC_CREQ, request);
     g45test_check(result,
@@ -1782,8 +1787,8 @@ void g45test_d1_bus_error(struct g45test_result *result)
     g45test_check(result, status == destination_address,
                   destination_address, status, 5);
     status = g45_dma_read(g45_dma_channel_reg(channel, DMAC_CTRLA));
-    g45test_check(result, (status & 0xffffU) == 4U,
-                  4, status & 0xffffU, 6);
+    g45test_check(result, (status & 0xffffU) == 0U,
+                  0, status & 0xffffU, 6);
     mmu_invalidate_dcache((rt_uint32_t)(rt_ubase_t)&dma_destination,
                           sizeof(dma_destination));
     __sync_synchronize();
@@ -1807,8 +1812,8 @@ void g45test_d1_bus_error(struct g45test_result *result)
     g45test_check(result, status == invalid_address,
                   invalid_address, status, 11);
     status = g45_dma_read(g45_dma_channel_reg(channel, DMAC_CTRLA));
-    g45test_check(result, (status & 0xffffU) == 3U,
-                  3, status & 0xffffU, 12);
+    g45test_check(result, (status & 0xffffU) == 1U,
+                  1, status & 0xffffU, 12);
 
     /* A failed descriptor fetch raises ERR without changing live addresses. */
     g45_dma_program(channel, source_address, destination_address,
@@ -1825,8 +1830,8 @@ void g45test_d1_bus_error(struct g45test_result *result)
     g45test_check(result, status == destination_address,
                   destination_address, status, 16);
     status = g45_dma_read(g45_dma_channel_reg(channel, DMAC_CTRLA));
-    g45test_check(result, (status & 0xffffU) == 4U,
-                  4, status & 0xffffU, 17);
+    g45test_check(result, (status & 0xffffU) == 0U,
+                  0, status & 0xffffU, 17);
 
     /* Reprogramming the failed channel must make it usable immediately. */
     g45_dma_program(channel, source_address, destination_address, 0,
@@ -1844,8 +1849,8 @@ void g45test_d1_bus_error(struct g45test_result *result)
     g45test_check(result, destination[0] == source[0],
                   source[0], destination[0], 20);
     status = g45_dma_read(g45_dma_channel_reg(channel, DMAC_CTRLA));
-    g45test_check(result, (status & 0xffffU) == 0U,
-                  0, status & 0xffffU, 21);
+    g45test_check(result, (status & 0xffffU) == 4U,
+                  4, status & 0xffffU, 21);
     g45_dma_check_guards(result, &dma_source, 0x32000000U);
     g45_dma_check_guards(result, &dma_destination, 0x33000000U);
     g45_dma_quiesce();
@@ -1893,8 +1898,8 @@ void g45test_d1_stop_on_done(struct g45test_result *result)
     g45test_check(result, destination[0] == 0xdeadbeefU,
                   0xdeadbeefU, destination[0], 1);
     status = g45_dma_read(g45_dma_channel_reg(channel, DMAC_CTRLA));
-    g45test_check(result, status == descriptor_ctrla,
-                  descriptor_ctrla, status, 2);
+    g45test_check(result, status == (descriptor_ctrla & ~0xffffU),
+                  descriptor_ctrla & ~0xffffU, status, 2);
     status = g45_dma_read(DMAC_CHSR);
     g45test_check(result, (status & channel_bit) == 0U,
                   0, status & channel_bit, 3);
@@ -2154,7 +2159,8 @@ void g45test_d1_auto_replay(struct g45test_result *result)
     g45test_check(result, status == destination_address,
                   destination_address, status, 5);
     status = g45_dma_read(g45_dma_channel_reg(channel, DMAC_CTRLA));
-    g45test_check(result, status == ctrla, ctrla, status, 6);
+    g45test_check(result, status == (ctrla & ~0xffffU),
+                  ctrla & ~0xffffU, status, 6);
     status = g45_dma_read(DMAC_EBCISR);
     g45test_check(result, status == DMAC_BTC(channel),
                   DMAC_BTC(channel), status, 7);

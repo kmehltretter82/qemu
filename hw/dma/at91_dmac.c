@@ -104,6 +104,7 @@ typedef struct AT91DmacChan {
     uint32_t replay_saddr;
     uint32_t replay_daddr;
     uint32_t replay_ctrla;
+    uint32_t btsize_loaded;  /* BTSIZE of the buffer in progress */
     uint16_t src_pip_count;
     uint16_t dst_pip_count;
     uint16_t src_request_remaining;
@@ -648,6 +649,7 @@ static MemTxResult dmac_load_descriptor(AT91DmacChan *c)
     }
     c->ctrlb = d[3];
     c->dscr = d[4];
+    c->btsize_loaded = DMAC_CTRLA_BTSIZE(c->ctrla);
     c->active_dscr = descriptor;
     c->src_pip_count = 0;
     c->dst_pip_count = 0;
@@ -674,6 +676,7 @@ static void dmac_reload_auto_buffer(AT91DmacChan *c)
         c->daddr = c->replay_daddr;
     }
     c->ctrla = c->replay_ctrla;
+    c->btsize_loaded = DMAC_CTRLA_BTSIZE(c->ctrla);
     c->src_pip_count = 0;
     c->dst_pip_count = 0;
     c->fifo_fill = 0;
@@ -1058,6 +1061,27 @@ static void dmac_bh(void *opaque)
     }
 }
 
+/*
+ * Datasheet 40.7.16: a CTRLA write programs the buffer size, but a READ
+ * returns the number of source-width transfers ALREADY COMPLETED on the
+ * source interface - that is what Linux's at_hdmac turns into the DMA
+ * residue (atc_calc_bytes_left(): residue = len - (btsize << src_width)).
+ * The model counts BTSIZE down internally, so convert on the way out.  A
+ * channel whose descriptor has not been fetched yet, and a parked cyclic
+ * ring, both report zero completed transfers - "nothing received".
+ */
+static uint32_t dmac_channel_ctrla_read(AT91DmacState *s, int n)
+{
+    AT91DmacChan *c = &s->ch[n];
+    uint32_t remaining = DMAC_CTRLA_BTSIZE(c->ctrla);
+    uint32_t completed = 0;
+
+    if (!c->cyclic && c->btsize_loaded > remaining) {
+        completed = c->btsize_loaded - remaining;
+    }
+    return (c->ctrla & ~0xffffu) | completed;
+}
+
 static uint64_t dmac_read(void *opaque, hwaddr offset, unsigned size)
 {
     AT91DmacState *s = AT91_DMAC(opaque);
@@ -1090,7 +1114,7 @@ static uint64_t dmac_read(void *opaque, hwaddr offset, unsigned size)
             }
             return s->ch[n].dscr;
         case DMAC_CTRLA:
-            return s->ch[n].cyclic ? 0 : s->ch[n].ctrla;
+            return dmac_channel_ctrla_read(s, n);
         case DMAC_CTRLB:
             return s->ch[n].ctrlb;
         case DMAC_CFG:
@@ -1168,6 +1192,7 @@ static void dmac_write(void *opaque, hwaddr offset, uint64_t value,
             break;
         case DMAC_CTRLA:
             s->ch[n].ctrla = val;
+            s->ch[n].btsize_loaded = DMAC_CTRLA_BTSIZE(val);
             break;
         case DMAC_CTRLB:
             s->ch[n].ctrlb = val;
@@ -1439,7 +1464,7 @@ static int dmac_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_at91_dmac_chan = {
     .name = "at91-dmac-chan",
-    .version_id = 6,
+    .version_id = 7,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(saddr, AT91DmacChan),
@@ -1459,6 +1484,7 @@ static const VMStateDescription vmstate_at91_dmac_chan = {
         VMSTATE_UINT32_V(replay_saddr, AT91DmacChan, 5),
         VMSTATE_UINT32_V(replay_daddr, AT91DmacChan, 5),
         VMSTATE_UINT32_V(replay_ctrla, AT91DmacChan, 5),
+        VMSTATE_UINT32_V(btsize_loaded, AT91DmacChan, 7),
         VMSTATE_BOOL_V(replay_started, AT91DmacChan, 5),
         VMSTATE_UINT16_V(src_request_remaining, AT91DmacChan, 6),
         VMSTATE_UINT16_V(dst_request_remaining, AT91DmacChan, 6),

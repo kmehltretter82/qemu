@@ -45,6 +45,12 @@
 #define DMAC_DPIP              0x1c
 
 #define DMAC_CTRLA_BTSIZE(x)   (x)
+/*
+ * Writes program the buffer size, but a CTRLA READ reports the number of
+ * source-width transfers ALREADY COMPLETED (datasheet 40.7.16) - the field
+ * Linux turns into a DMA residue.  Expectations below are in those terms.
+ */
+#define DMAC_CTRLA_BTSIZE_FIELD(x) ((x) & 0xffff)
 #define DMAC_CTRLA_SCSIZE(x)   ((x) << 16)
 #define DMAC_CTRLA_DCSIZE(x)   ((x) << 20)
 #define DMAC_CTRLA_SRC_WIDTH_4 (2u << 24)
@@ -1891,7 +1897,7 @@ static void dmac_run_memory_copy(QTestState *qts, unsigned int channel,
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_DADDR), ==,
                     expected_destination);
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_CTRLA) & 0xffff,
-                    ==, 0);
+                    ==, DMAC_CTRLA_BTSIZE_FIELD(ctrla));
     g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_CHSR) &
                     (DMAC_ENA(channel) | DMAC_EMPTY(channel)), ==,
                     DMAC_EMPTY(channel));
@@ -2248,7 +2254,9 @@ static void test_dmac_stop_on_done(void)
     g_assert_cmphex(qtest_readl(qts, dst), ==, 0xdeadbeef);
     g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_CHSR) &
                     DMAC_ENA(channel), ==, 0);
-    g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_CTRLA), ==, ctrla);
+    /* The loaded controls read back, with BTSIZE reporting no transfer. */
+    g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_CTRLA), ==,
+                    ctrla & ~0xffffu);
     g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR), ==, 0);
 
     /* With SOD clear, the same DONE descriptor is deliberately executed. */
@@ -2767,7 +2775,7 @@ static void test_dmac_hardware_request_chunk_pacing(void)
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_DADDR), ==,
                     dst + 8 * 4);
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_CTRLA) & 0xffff,
-                    ==, 4);
+                    ==, 8);
     status = qtest_readl(qts, G45_DMAC_BASE + DMAC_CHSR);
     g_assert_cmphex(status & (DMAC_ENA(channel) | DMAC_EMPTY(channel)), ==,
                     DMAC_ENA(channel) | DMAC_EMPTY(channel));
@@ -2775,7 +2783,7 @@ static void test_dmac_hardware_request_chunk_pacing(void)
 
     qtest_clock_step(qts, 1000);
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_CTRLA) & 0xffff,
-                    ==, 4);
+                    ==, 8);
     g_assert_cmphex(qtest_readl(qts, dst + 8 * 4), ==, 0xdeadbeef);
 
     qtest_set_irq_in(qts, G45_DMAC_QOM_PATH, "peripheral-request", 0, 0);
@@ -2837,7 +2845,7 @@ static void test_dmac_hardware_request_independent_sides(void)
     pulse_dmac_request(qts, 0);
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_SADDR), ==, src + 1);
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_CTRLA) & 0xffff,
-                    ==, 7);
+                    ==, 1);
     g_assert_cmphex(qtest_readl(qts, dst), ==, 0xdeadbeef);
     g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_CHSR) &
                     DMAC_EMPTY(channel), ==, 0);
@@ -2992,7 +3000,7 @@ static void test_dmac_picture_in_picture_migration(void)
     g_assert_cmphex(qtest_readl(src, channel_base + DMAC_DADDR), ==,
                     dst_addr + 4);
     g_assert_cmphex(qtest_readl(src, channel_base + DMAC_CTRLA) & 0xffff,
-                    ==, 3);
+                    ==, 1);
 
     uri = g_strdup_printf("file:%s", state_path);
     qtest_qmp_assert_success(src,
@@ -3071,7 +3079,8 @@ static void test_dmac_auto_replay_migration(void)
                     src_addr);
     g_assert_cmphex(qtest_readl(src, channel_base + DMAC_DADDR), ==,
                     dst_addr);
-    g_assert_cmphex(qtest_readl(src, channel_base + DMAC_CTRLA), ==, ctrla);
+    g_assert_cmphex(qtest_readl(src, channel_base + DMAC_CTRLA), ==,
+                    ctrla & ~0xffffu);
     g_assert_cmphex(qtest_readl(src, G45_DMAC_BASE + DMAC_EBCISR), ==,
                     DMAC_BTC(channel));
 
@@ -3086,7 +3095,8 @@ static void test_dmac_auto_replay_migration(void)
     status = qtest_readl(dst, G45_DMAC_BASE + DMAC_CHSR);
     g_assert_cmphex(status & stalled, ==, stalled);
     g_assert_cmphex(qtest_readl(dst, channel_base + DMAC_CTRLB), ==, ctrlb);
-    g_assert_cmphex(qtest_readl(dst, channel_base + DMAC_CTRLA), ==, ctrla);
+    g_assert_cmphex(qtest_readl(dst, channel_base + DMAC_CTRLA), ==,
+                    ctrla & ~0xffffu);
 
     /* Clear AUTO while stalled; KEEPON executes one final row-1 buffer. */
     qtest_writel(dst, src_addr, 0x33333333);
@@ -3195,7 +3205,7 @@ static void test_dmac_software_requests(void)
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_SADDR), ==, src + 4);
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_DADDR), ==, dst + 4);
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_CTRLA) & 0xffff,
-                    ==, 7);
+                    ==, 1);
 
     /* SCSIZE=4: each chunk request advances four source transactions. */
     qtest_writel(qts, G45_DMAC_BASE + DMAC_CREQ, DMAC_SCREQ(channel));
@@ -3207,7 +3217,7 @@ static void test_dmac_software_requests(void)
     }
     g_assert_cmphex(qtest_readl(qts, dst + 20), ==, 0xdeadbeef);
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_CTRLA) & 0xffff,
-                    ==, 3);
+                    ==, 5);
     g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_CHSR) &
                     DMAC_ENA(channel), ==, DMAC_ENA(channel));
 
@@ -3311,7 +3321,7 @@ static void test_dmac_software_destination_requests(void)
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_SADDR), ==, src + 12);
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_DADDR), ==, dst + 4);
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_CTRLA) & 0xffff,
-                    ==, 5);
+                    ==, 3);
 
     qtest_writel(qts, G45_DMAC_BASE + DMAC_CREQ, DMAC_DCREQ(channel));
     qtest_clock_step(qts, 1);
@@ -3321,7 +3331,7 @@ static void test_dmac_software_destination_requests(void)
     }
     g_assert_cmphex(qtest_readl(qts, dst + 20), ==, 0xdeadbeef);
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_CTRLA) & 0xffff,
-                    ==, 1);
+                    ==, 7);
 
     qtest_writel(qts, G45_DMAC_BASE + DMAC_CREQ, DMAC_DCREQ(channel));
     qtest_clock_step(qts, 1);
@@ -3431,7 +3441,7 @@ static void test_dmac_access_errors(void)
     g_assert_cmphex(qtest_readl(qts, dst), ==, 0xdeadbeef);
     g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_CHSR) & 1, ==, 0);
     g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_CH0_BASE +
-                                DMAC_CTRLA) & 0xffff, ==, 4);
+                                DMAC_CTRLA) & 0xffff, ==, 0);
 
     /* A failed descriptor fetch is an ERR, not a zero-filled transfer. */
     qtest_writel(qts, G45_DMAC_BASE + DMAC_CH0_BASE + DMAC_CH_STRIDE +
@@ -3461,7 +3471,7 @@ static void test_dmac_access_errors(void)
     g_assert_cmphex(qtest_readl(qts, channel2_base + DMAC_DADDR), ==,
                     invalid);
     g_assert_cmphex(qtest_readl(qts, channel2_base + DMAC_CTRLA) & 0xffff,
-                    ==, 3);
+                    ==, 1);
     g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_CHSR) &
                     DMAC_ENA(channel2), ==, 0);
 
@@ -3539,7 +3549,7 @@ static void test_dmac_partial_access_error_residue(void)
     g_assert_cmphex(actual[1], ==, source_bytes[1]);
     g_assert_cmphex(qtest_readl(qts, channel1 + DMAC_SADDR), ==, src + 3);
     g_assert_cmphex(qtest_readl(qts, channel1 + DMAC_DADDR), ==, ram_end);
-    g_assert_cmphex(qtest_readl(qts, channel1 + DMAC_CTRLA) & 0xffff, ==, 1);
+    g_assert_cmphex(qtest_readl(qts, channel1 + DMAC_CTRLA) & 0xffff, ==, 3);
     status = qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR);
     g_assert_cmphex(status, ==, DMAC_ERR(1));
 
@@ -3560,7 +3570,7 @@ static void test_dmac_partial_access_error_residue(void)
     g_assert_cmphex(qtest_readl(qts, channel2 + DMAC_SADDR), ==, 0x11111111);
     g_assert_cmphex(qtest_readl(qts, channel2 + DMAC_DADDR), ==, 0x22222222);
     g_assert_cmphex(qtest_readl(qts, channel2 + DMAC_DSCR), ==, ram_end - 8);
-    g_assert_cmphex(qtest_readl(qts, channel2 + DMAC_CTRLA), ==, 0x33330004);
+    g_assert_cmphex(qtest_readl(qts, channel2 + DMAC_CTRLA), ==, 0x33330000);
     g_assert_cmphex(qtest_readl(qts, channel2 + DMAC_CTRLB), ==, 0x44440000);
     status = qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR);
     g_assert_cmphex(status, ==, DMAC_ERR(2));
@@ -3634,7 +3644,7 @@ static void test_dmac_rejected_destination_and_writeback(void)
     g_assert_cmphex(qtest_readl(qts, channel0 + DMAC_SADDR), ==, src + 1);
     g_assert_cmphex(qtest_readl(qts, channel0 + DMAC_DADDR), ==,
                     rejected_destination);
-    g_assert_cmphex(qtest_readl(qts, channel0 + DMAC_CTRLA) & 0xffff, ==, 3);
+    g_assert_cmphex(qtest_readl(qts, channel0 + DMAC_CTRLA) & 0xffff, ==, 1);
     g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR), ==,
                     DMAC_ERR(0));
 
@@ -3651,7 +3661,7 @@ static void test_dmac_rejected_destination_and_writeback(void)
     g_assert_cmphex(qtest_readl(qts, descriptor + 8), ==, ctrla);
     g_assert_cmphex(qtest_readl(qts, channel1 + DMAC_SADDR), ==, src + 4);
     g_assert_cmphex(qtest_readl(qts, channel1 + DMAC_DADDR), ==, dst + 4);
-    g_assert_cmphex(qtest_readl(qts, channel1 + DMAC_CTRLA) & 0xffff, ==, 0);
+    g_assert_cmphex(qtest_readl(qts, channel1 + DMAC_CTRLA) & 0xffff, ==, 4);
     status = qtest_readl(qts, G45_DMAC_BASE + DMAC_CHSR);
     g_assert_cmphex(status & DMAC_ENA(1), ==, 0);
     g_assert_cmphex(status & DMAC_EMPTY(1), ==, DMAC_EMPTY(1));
@@ -3691,7 +3701,7 @@ static void test_dmac_peripheral_access_abort(void)
     g_assert_cmphex(qtest_readl(qts, dst), ==, 0xdeadbeef);
     g_assert_cmphex(qtest_readl(qts, channel0 + DMAC_SADDR), ==, pmc_mckr);
     g_assert_cmphex(qtest_readl(qts, channel0 + DMAC_DADDR), ==, dst);
-    g_assert_cmphex(qtest_readl(qts, channel0 + DMAC_CTRLA) & 0xffff, ==, 4);
+    g_assert_cmphex(qtest_readl(qts, channel0 + DMAC_CTRLA) & 0xffff, ==, 0);
     status = qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR);
     g_assert_cmphex(status, ==, DMAC_ERR(0));
 
@@ -3708,7 +3718,7 @@ static void test_dmac_peripheral_access_abort(void)
 
     g_assert_cmphex(qtest_readl(qts, channel1 + DMAC_SADDR), ==, src + 1);
     g_assert_cmphex(qtest_readl(qts, channel1 + DMAC_DADDR), ==, pmc_mckr);
-    g_assert_cmphex(qtest_readl(qts, channel1 + DMAC_CTRLA) & 0xffff, ==, 3);
+    g_assert_cmphex(qtest_readl(qts, channel1 + DMAC_CTRLA) & 0xffff, ==, 1);
     status = qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR);
     g_assert_cmphex(status, ==, DMAC_ERR(1));
     qtest_quit(qts);
@@ -3783,7 +3793,7 @@ static void test_dmac_word_width_alias(void)
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_SADDR), ==, src + 4);
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_DADDR), ==, dst + 4);
     g_assert_cmphex(qtest_readl(qts, channel_base + DMAC_CTRLA) & 0xffff,
-                    ==, 0);
+                    ==, 1);
     g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR), ==,
                     DMAC_BTC(0));
     qtest_quit(qts);
@@ -3849,33 +3859,33 @@ static void test_dmac_software_request_migration(void)
     g_assert_cmpint(fd, >=, 0);
     close(fd);
 
-    src = qtest_init("-machine sam9m10g45ek -S");
+    src = qtest_initf("-machine %s -S", machine);
     qtest_writel(src, src_addr, 0x44332211);
     qtest_writel(src, dst_addr, 0xdeadbeef);
     qtest_writel(src, channel_base + DMAC_SADDR, src_addr);
     qtest_writel(src, channel_base + DMAC_DADDR, dst_addr);
     qtest_writel(src, channel_base + DMAC_CTRLA, ctrla);
     qtest_writel(src, channel_base + DMAC_CTRLB, ctrlb);
-    qtest_writel(src, G45_DMAC_BASE + DMAC_EN, 1);
-    qtest_writel(src, G45_DMAC_BASE + DMAC_CHER, DMAC_ENA(0));
+    qtest_writel(src, dmac_base + DMAC_EN, 1);
+    qtest_writel(src, dmac_base + DMAC_CHER, DMAC_ENA(0));
 
     /*
      * One byte is resident in the conversion FIFO; no destination word has
      * been emitted yet.  Suspend and queue the final chunk before migration.
      */
-    qtest_writel(src, G45_DMAC_BASE + DMAC_SREQ, DMAC_SSREQ(0));
+    qtest_writel(src, dmac_base + DMAC_SREQ, DMAC_SSREQ(0));
     qtest_clock_step(src, 1);
     g_assert_cmphex(qtest_readl(src, channel_base + DMAC_SADDR), ==,
                     src_addr + 1);
     g_assert_cmphex(qtest_readl(src, channel_base + DMAC_DADDR), ==,
                     dst_addr);
     g_assert_cmphex(qtest_readl(src, channel_base + DMAC_CTRLA) & 0xffff,
-                    ==, 3);
+                    ==, 1);
     g_assert_cmphex(qtest_readl(src, dst_addr), ==, 0xdeadbeef);
-    qtest_writel(src, G45_DMAC_BASE + DMAC_CHER, DMAC_SUSP(0));
-    qtest_writel(src, G45_DMAC_BASE + DMAC_CREQ, DMAC_SCREQ(0));
+    qtest_writel(src, dmac_base + DMAC_CHER, DMAC_SUSP(0));
+    qtest_writel(src, dmac_base + DMAC_CREQ, DMAC_SCREQ(0));
     qtest_clock_step(src, 1);
-    g_assert_cmphex(qtest_readl(src, G45_DMAC_BASE + DMAC_CREQ), ==,
+    g_assert_cmphex(qtest_readl(src, dmac_base + DMAC_CREQ), ==,
                     DMAC_SCREQ(0));
 
     uri = g_strdup_printf("file:%s", state_path);
