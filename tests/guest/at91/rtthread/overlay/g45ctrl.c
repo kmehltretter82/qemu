@@ -70,6 +70,24 @@
 #define PIT_MR          0x00U
 #define PIT_MR_PITIEN   (1U << 25)
 
+#define G45_PWM_BASE    0xfffb8000U
+#define G45_PWM_PID     19U
+
+#define PWM_MR          0x00U
+#define PWM_ENA         0x04U
+#define PWM_DIS         0x08U
+#define PWM_SR          0x0cU
+#define PWM_IER         0x10U
+#define PWM_IDR         0x14U
+#define PWM_IMR         0x18U
+#define PWM_ISR         0x1cU
+#define PWM_CH(n, r)    (0x200U + 0x20U * (n) + (r))
+#define PWM_CMR         0x00U
+#define PWM_CDTY        0x04U
+#define PWM_CPRD        0x08U
+#define PWM_CUPD        0x10U
+#define PWM_CMR_UPD_CDTY (1U << 10)
+
 #define TRNG_CR         0x00U
 #define TRNG_MR         0x04U
 #define TRNG_ISR        0x1cU
@@ -106,6 +124,22 @@ static void g45ctrl_clock_stop(void)
 {
     *g45_reg(G45_RTT_BASE, RTT_AR) = 0xffffffffU;
     *g45_reg(G45_RTT_BASE, RTT_MR) = RTT_MR_RESET;
+}
+
+/* Wait until *reg == want or budget_ms elapses; returns the last value. */
+static rt_uint32_t g45ctrl_wait_value(volatile rt_uint32_t *reg,
+                                      rt_uint32_t want,
+                                      rt_uint32_t budget_ms)
+{
+    rt_uint32_t start = g45ctrl_clock_ms();
+    rt_uint32_t v;
+
+    for (;;) {
+        v = *reg;
+        if (v == want || g45ctrl_clock_ms() - start > budget_ms) {
+            return v;
+        }
+    }
 }
 
 /* Wait until cond_reg & mask (!= 0 when set is true) or budget_ms elapses. */
@@ -391,6 +425,89 @@ void g45test_r4_rtt_increment_alarm(struct g45test_result *result)
 
     rt_kprintf("G45TEST DATA case=r4.rtt-increment-alarm sr=0x%08x "
                "vr=%u\n", sr, v2);
+}
+
+/*
+ * PWM checks are written in board-portable shapes: where real silicon
+ * defers an effect to the next period boundary (CUPD, first period
+ * event) the check polls with a time budget, so it converges both on
+ * the immediate-effect model and on hardware.  Deliberately unchecked
+ * model gaps (see working notes): CCNT always reads 0, ISR is not
+ * clear-on-read, and the AIC line is never asserted.
+ */
+void g45test_r4_pwm(struct g45test_result *result)
+{
+    rt_uint32_t v;
+
+    g45ctrl_clock_start();
+    *(volatile rt_uint32_t *)G45_PMC_PCER = 1U << G45_PWM_PID;
+
+    *g45_reg(G45_PWM_BASE, PWM_DIS) = 0xfU;
+    *g45_reg(G45_PWM_BASE, PWM_IDR) = 0xfU;
+
+    /* Valid-field MR round trip: DIVA = DIVB = 1, PREA = PREB = 0. */
+    *g45_reg(G45_PWM_BASE, PWM_MR) = 0x00010001U;
+    g45test_check(result, *g45_reg(G45_PWM_BASE, PWM_MR) == 0x00010001U,
+                  0x00010001U, *g45_reg(G45_PWM_BASE, PWM_MR), 0);
+
+    /* Independent per-channel registers. */
+    *g45_reg(G45_PWM_BASE, PWM_CH(0, PWM_CMR)) = PWM_CMR_UPD_CDTY;
+    *g45_reg(G45_PWM_BASE, PWM_CH(0, PWM_CPRD)) = 100U;
+    *g45_reg(G45_PWM_BASE, PWM_CH(0, PWM_CDTY)) = 25U;
+    *g45_reg(G45_PWM_BASE, PWM_CH(1, PWM_CMR)) = 0U;
+    *g45_reg(G45_PWM_BASE, PWM_CH(1, PWM_CPRD)) = 400U;
+    *g45_reg(G45_PWM_BASE, PWM_CH(1, PWM_CDTY)) = 300U;
+    g45test_check(result,
+                  *g45_reg(G45_PWM_BASE, PWM_CH(0, PWM_CPRD)) == 100U,
+                  100U, *g45_reg(G45_PWM_BASE, PWM_CH(0, PWM_CPRD)), 1);
+    g45test_check(result,
+                  *g45_reg(G45_PWM_BASE, PWM_CH(1, PWM_CDTY)) == 300U,
+                  300U, *g45_reg(G45_PWM_BASE, PWM_CH(1, PWM_CDTY)), 2);
+
+    /* Enable bitmap semantics: only CHID0-3 exist. */
+    *g45_reg(G45_PWM_BASE, PWM_ENA) = 0x3U;
+    g45test_check(result, *g45_reg(G45_PWM_BASE, PWM_SR) == 0x3U,
+                  0x3U, *g45_reg(G45_PWM_BASE, PWM_SR), 3);
+    *g45_reg(G45_PWM_BASE, PWM_ENA) = 0xf0U;
+    g45test_check(result, *g45_reg(G45_PWM_BASE, PWM_SR) == 0x3U,
+                  0x3U, *g45_reg(G45_PWM_BASE, PWM_SR), 4);
+
+    /* A running channel reports period events (eventually on silicon). */
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_PWM_BASE, PWM_ISR), 0x3U,
+                               RT_TRUE, 200U),
+                  0x3U, *g45_reg(G45_PWM_BASE, PWM_ISR) & 0x3U, 5);
+
+    /* CUPD steers to CDTY or CPRD per CMR.UPD_CDTY, by the next period. */
+    *g45_reg(G45_PWM_BASE, PWM_CH(0, PWM_CUPD)) = 50U;
+    v = g45ctrl_wait_value(g45_reg(G45_PWM_BASE, PWM_CH(0, PWM_CDTY)),
+                           50U, 200U);
+    g45test_check(result, v == 50U, 50U, v, 6);
+    g45test_check(result,
+                  *g45_reg(G45_PWM_BASE, PWM_CH(0, PWM_CPRD)) == 100U,
+                  100U, *g45_reg(G45_PWM_BASE, PWM_CH(0, PWM_CPRD)), 7);
+    *g45_reg(G45_PWM_BASE, PWM_CH(1, PWM_CUPD)) = 350U;
+    v = g45ctrl_wait_value(g45_reg(G45_PWM_BASE, PWM_CH(1, PWM_CPRD)),
+                           350U, 200U);
+    g45test_check(result, v == 350U, 350U, v, 8);
+
+    /* Interrupt mask bookkeeping (line assertion is a documented gap). */
+    *g45_reg(G45_PWM_BASE, PWM_IER) = 0x5U;
+    g45test_check(result, *g45_reg(G45_PWM_BASE, PWM_IMR) == 0x5U,
+                  0x5U, *g45_reg(G45_PWM_BASE, PWM_IMR), 9);
+    *g45_reg(G45_PWM_BASE, PWM_IDR) = 0x1U;
+    g45test_check(result, *g45_reg(G45_PWM_BASE, PWM_IMR) == 0x4U,
+                  0x4U, *g45_reg(G45_PWM_BASE, PWM_IMR), 10);
+
+    /* Disable everything again. */
+    *g45_reg(G45_PWM_BASE, PWM_DIS) = 0xfU;
+    *g45_reg(G45_PWM_BASE, PWM_IDR) = 0xfU;
+    v = *g45_reg(G45_PWM_BASE, PWM_SR);
+    g45test_check(result, v == 0U, 0, v, 11);
+
+    rt_kprintf("G45TEST DATA case=r4.pwm imr_final=0x%08x\n",
+               *g45_reg(G45_PWM_BASE, PWM_IMR));
+    g45ctrl_clock_stop();
 }
 
 void g45test_r4_trng(struct g45test_result *result)
