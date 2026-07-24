@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 41 cases:
+The registry currently contains 42 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -187,8 +187,12 @@ The registry currently contains 41 cases:
   interrupt's wired-OR contract — RTC alarm and RTT increments assert
   together, then drain one source at a time in both orders; AIC_IPR
   must stay pending while any source still asserts and drop only after
-  the last drain. The randomized IVR/EOI-injection variant needs an
-  installed vector-1 handler and remains future work.
+  the last drain; and AIC priority ordering — TWI1 NACK, SPI1 overrun
+  and TSADCC DRDY latch together while the CPU is masked (priorities
+  1/4/7) and real installed handlers must run highest-first (20,15,13),
+  draining through the same SR/LCDR reads real drivers use. The
+  randomized IVR/EOI-injection and nested-preemption variants remain
+  future work.
 - Core: the 1 kHz scheduler runs and switches tasks for at least ten seconds.
 
 The D1 suite performs 340,206 checks. It first found three deterministic bugs in
