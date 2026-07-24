@@ -296,6 +296,190 @@ static void test_macb_rx_wrap_rbof_refill(void)
     qtest_quit(qts);
 }
 
+/*
+ * A 300-byte frame spans three 128-byte buffers: SOF only on the first
+ * descriptor, EOF and the total length only on the last, data split at
+ * the RBOF-adjusted boundaries.
+ */
+static void test_macb_rx_multibuffer_frame(void)
+{
+    const uint32_t ring = G45_SDRAM_BASE + 0x154000;
+    const uint32_t bufs = G45_SDRAM_BASE + 0x155000;
+    uint8_t frame[300], readback[300];
+    QTestState *qts;
+    uint32_t status;
+    int fd;
+
+    qts = macb_start(&fd);
+    macb_setup_rx_ring(qts, ring, bufs);
+    qtest_writel(qts, G45_MACB_BASE + MACB_NCFGR,
+                 NCFGR_CAF | NCFGR_RBOF_2);
+    qtest_writel(qts, G45_MACB_BASE + MACB_NCR, NCR_RE);
+
+    build_frame(frame, sizeof(frame), 0x77);
+    send_frame(fd, frame, sizeof(frame));
+
+    status = wait_rx_used(qts, ring + 0);
+    g_assert_cmphex(status & (RXD_SOF | RXD_EOF), ==, RXD_SOF);
+    status = wait_rx_used(qts, ring + 8);
+    g_assert_cmphex(status & (RXD_SOF | RXD_EOF), ==, 0);
+    status = wait_rx_used(qts, ring + 16);
+    g_assert_cmphex(status & (RXD_SOF | RXD_EOF), ==, RXD_EOF);
+    g_assert_cmpuint(status & RXD_LEN_MASK, ==, sizeof(frame));
+
+    /* First buffer holds 126 bytes after the offset, the rest follow. */
+    qtest_memread(qts, bufs + 2, readback, RX_BUF_SIZE - 2);
+    qtest_memread(qts, bufs + RX_BUF_SIZE, readback + RX_BUF_SIZE - 2,
+                  RX_BUF_SIZE);
+    qtest_memread(qts, bufs + 2 * RX_BUF_SIZE,
+                  readback + 2 * RX_BUF_SIZE - 2,
+                  sizeof(frame) - (2 * RX_BUF_SIZE - 2));
+    g_assert_cmpmem(readback, sizeof(frame), frame, sizeof(frame));
+
+    close(fd);
+    qtest_quit(qts);
+}
+
+/*
+ * A frame larger than the free ring capacity is dropped whole by the
+ * preflight - BNA raised, the ring untouched, and the next normal frame
+ * delivered at the expected position.  This is the safety net that
+ * replaced mid-frame SOF-without-EOF fragments (the Linux macb driver
+ * spins forever on those).
+ */
+static void test_macb_rx_oversize_preflight_drop(void)
+{
+    const uint32_t ring = G45_SDRAM_BASE + 0x156000;
+    const uint32_t bufs = G45_SDRAM_BASE + 0x157000;
+    uint8_t frame[1600], readback[64];
+    QTestState *qts;
+    uint32_t status;
+    int fd;
+    int i;
+
+    qts = macb_start(&fd);
+    macb_setup_rx_ring(qts, ring, bufs);
+    /*
+     * Pre-consume the LAST four descriptors: can_receive's 12-descriptor
+     * window from the ring head stays free, but a 13-buffer frame hits
+     * the used tail inside the delivery preflight.
+     */
+    for (i = RX_RING_DESCS - 4; i < RX_RING_DESCS; i++) {
+        qtest_writel(qts, ring + 8 * i,
+                     qtest_readl(qts, ring + 8 * i) | RXD_USED);
+    }
+    qtest_writel(qts, G45_MACB_BASE + MACB_NCFGR, NCFGR_CAF);
+    qtest_writel(qts, G45_MACB_BASE + MACB_NCR, NCR_RE);
+
+    /* Needs 13 buffers; only 12 are free: dropped whole with BNA. */
+    build_frame(frame, sizeof(frame), 0x99);
+    send_frame(fd, frame, sizeof(frame));
+    g_usleep(100000);
+    g_assert_cmphex(qtest_readl(qts, G45_MACB_BASE + MACB_RSR) & RSR_BNA,
+                    ==, RSR_BNA);
+    for (i = 0; i < RX_RING_DESCS - 4; i++) {
+        g_assert_cmphex(qtest_readl(qts, ring + 8 * i) & RXD_USED, ==, 0);
+    }
+
+    /* The ring still works: a normal frame lands at the ring head. */
+    build_frame(frame, 60, 0xab);
+    send_frame(fd, frame, 60);
+    status = wait_rx_used(qts, ring + 0);
+    g_assert_cmphex(status & (RXD_SOF | RXD_EOF), ==, RXD_SOF | RXD_EOF);
+    qtest_memread(qts, bufs, readback, 60);
+    g_assert_cmpmem(readback, 60, frame, 60);
+
+    close(fd);
+    qtest_quit(qts);
+}
+
+static void wait_for_migration_complete(QTestState *qts)
+{
+    while (true) {
+        QDict *response = qtest_qmp(qts,
+                                    "{ 'execute': 'query-migrate' }");
+        QDict *result = qdict_get_qdict(response, "return");
+        const char *status = qdict_get_str(result, "status");
+        bool complete = !strcmp(status, "completed");
+
+        g_assert_cmpstr(status, !=, "failed");
+        g_assert_cmpstr(status, !=, "cancelled");
+        qobject_unref(response);
+        if (complete) {
+            return;
+        }
+        g_usleep(1000);
+    }
+}
+
+/* Migrate mid-ring: the write position and ring state must continue. */
+static void test_macb_rx_ring_migration(void)
+{
+    const uint32_t ring = G45_SDRAM_BASE + 0x158000;
+    const uint32_t bufs = G45_SDRAM_BASE + 0x159000;
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    g_autofree char *dst_args = NULL;
+    uint8_t frame[64], readback[64];
+    QTestState *sqts, *dqts;
+    uint32_t status;
+    int sfd, dfd, state_fd;
+    int i;
+
+    state_fd = g_file_open_tmp("at91-macb-migration-XXXXXX",
+                               &state_path, NULL);
+    g_assert_cmpint(state_fd, >=, 0);
+    close(state_fd);
+    uri = g_strdup_printf("file:%s", state_path);
+
+    sqts = macb_start(&sfd);
+    macb_setup_rx_ring(sqts, ring, bufs);
+    qtest_writel(sqts, G45_MACB_BASE + MACB_NCFGR,
+                 NCFGR_CAF | NCFGR_RBOF_2);
+    qtest_writel(sqts, G45_MACB_BASE + MACB_NCR, NCR_RE);
+    for (i = 0; i < 3; i++) {
+        build_frame(frame, 60, (uint8_t)i);
+        send_frame(sfd, frame, 60);
+        (void)wait_rx_used(sqts, ring + 8 * i);
+    }
+
+    qtest_qmp_assert_success(sqts,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    wait_for_migration_complete(sqts);
+    qtest_quit(sqts);
+    close(sfd);
+
+    {
+        int pair[2];
+
+        g_assert_cmpint(socketpair(PF_UNIX, SOCK_STREAM, 0, pair), ==, 0);
+        dst_args = g_strdup_printf(
+            "-machine sam9m10g45ek -nic socket,fd=%d,model=at91-macb,"
+            "mac=52:54:00:12:34:56 -S -incoming %s", pair[1], uri);
+        dqts = qtest_init(dst_args);
+        close(pair[1]);
+        dfd = pair[0];
+    }
+    wait_for_migration_complete(dqts);
+    qtest_qmp_assert_success(dqts, "{ 'execute': 'cont' }");
+
+    /* Ring contents and position survived; delivery continues at 3. */
+    for (i = 0; i < 3; i++) {
+        g_assert_cmphex(qtest_readl(dqts, ring + 8 * i) & RXD_USED, ==,
+                        RXD_USED);
+    }
+    build_frame(frame, 60, 0x44);
+    send_frame(dfd, frame, 60);
+    status = wait_rx_used(dqts, ring + 8 * 3);
+    g_assert_cmphex(status & (RXD_SOF | RXD_EOF), ==, RXD_SOF | RXD_EOF);
+    qtest_memread(dqts, bufs + RX_BUF_SIZE * 3 + 2, readback, 60);
+    g_assert_cmpmem(readback, 60, frame, 60);
+
+    close(dfd);
+    qtest_quit(dqts);
+    unlink(state_path);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -303,6 +487,12 @@ int main(int argc, char **argv)
     qtest_add_func("/at91-macb/tx-ring-persist", test_macb_tx_ring_persist);
     qtest_add_func("/at91-macb/rx-wrap-rbof-refill",
                    test_macb_rx_wrap_rbof_refill);
+    qtest_add_func("/at91-macb/rx-multibuffer-frame",
+                   test_macb_rx_multibuffer_frame);
+    qtest_add_func("/at91-macb/rx-oversize-preflight-drop",
+                   test_macb_rx_oversize_preflight_drop);
+    qtest_add_func("/at91-macb/rx-ring-migration",
+                   test_macb_rx_ring_migration);
 
     return g_test_run();
 }
