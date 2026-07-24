@@ -29,8 +29,12 @@
 #define AIC_FFDR        (AIC_BASE + 0x144)
 #define AIC_FFSR        (AIC_BASE + 0x148)
 
+#define AIC_DCR         (AIC_BASE + 0x138)
+
 #define CISR_NFIQ       (1u << 0)
 #define CISR_NIRQ       (1u << 1)
+
+#define DCR_PROT        (1u << 0)
 
 #define SMR_EDGE        (1u << 5)   /* SRCTYPE: positive edge */
 
@@ -201,6 +205,41 @@ static void test_fast_forcing(void)
     qtest_quit(qts);
 }
 
+static void test_protect_mode(void)
+{
+    QTestState *qts = aic_start();
+
+    qtest_writel(qts, AIC_DCR, DCR_PROT);
+    qtest_writel(qts, AIC_SVR(SRC_MID), 0xaa550000 + SRC_MID);
+    qtest_writel(qts, AIC_SMR(SRC_MID), SMR_EDGE | 3);
+    qtest_writel(qts, AIC_IECR, 1u << SRC_MID);
+    qtest_writel(qts, AIC_ISCR, 1u << SRC_MID);
+
+    /* Reads are side-effect-free: repeatable, nothing acknowledged. */
+    g_assert_cmphex(qtest_readl(qts, AIC_IVR), ==, 0xaa550000 + SRC_MID);
+    g_assert_cmphex(qtest_readl(qts, AIC_IVR), ==, 0xaa550000 + SRC_MID);
+    g_assert_cmphex(qtest_readl(qts, AIC_IPR) & (1u << SRC_MID), ==,
+                    1u << SRC_MID);
+    g_assert_cmphex(qtest_readl(qts, AIC_CISR) & CISR_NIRQ, ==, CISR_NIRQ);
+
+    /* The IVR write performs the acknowledge instead. */
+    qtest_writel(qts, AIC_IVR, 0);
+    g_assert_cmphex(qtest_readl(qts, AIC_ISR), ==, SRC_MID);
+    g_assert_cmphex(qtest_readl(qts, AIC_IPR) & (1u << SRC_MID), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, AIC_CISR) & CISR_NIRQ, ==, 0);
+    qtest_writel(qts, AIC_EOICR, 0);
+
+    /* Back in normal mode the read consumes state again. */
+    qtest_writel(qts, AIC_DCR, 0);
+    qtest_writel(qts, AIC_ISCR, 1u << SRC_MID);
+    g_assert_cmphex(qtest_readl(qts, AIC_IVR), ==, 0xaa550000 + SRC_MID);
+    g_assert_cmphex(qtest_readl(qts, AIC_IPR) & (1u << SRC_MID), ==, 0);
+    qtest_writel(qts, AIC_EOICR, 0);
+
+    aic_teardown(qts, SRC_MID);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -209,5 +248,6 @@ int main(int argc, char **argv)
     qtest_add_func("/at91-aic/g45/priority-nesting", test_priority_nesting);
     qtest_add_func("/at91-aic/g45/fiq-edge-dispatch", test_fiq_edge_dispatch);
     qtest_add_func("/at91-aic/g45/fast-forcing", test_fast_forcing);
+    qtest_add_func("/at91-aic/g45/protect-mode", test_protect_mode);
     return g_test_run();
 }
