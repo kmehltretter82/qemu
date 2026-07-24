@@ -120,6 +120,7 @@
 #define ADC_CR_SWRST    (1U << 0)
 #define ADC_CR_START    (1U << 1)
 #define ADC_MR          0x04U
+#define ADC_TRGR        0x08U
 #define ADC_CHER        0x10U
 #define ADC_CHDR        0x14U
 #define ADC_CHSR        0x18U
@@ -133,6 +134,10 @@
 #define ADC_SR_OVRE(n)  (1U << ((n) + 8U))
 #define ADC_SR_DRDY     (1U << 16)
 #define ADC_SR_GOVRE    (1U << 17)
+#define ADC_SR_PENCNT   (1U << 20)
+#define ADC_SR_NOCNT    (1U << 21)
+#define ADC_MR_TS_ONLY  1U
+#define ADC_MR_PENDET   (1U << 6)
 
 #define PWM_MR          0x00U
 #define PWM_ENA         0x04U
@@ -899,6 +904,62 @@ void g45test_r4_spi(struct g45test_result *result)
     *g45_reg(G45_SPI1_BASE, SPI_CR) = SPI_CR_SWRST;
 
     rt_kprintf("G45TEST DATA case=r4.spi sr=0x%08x\n", sr);
+    g45ctrl_clock_stop();
+}
+
+/*
+ * Host-coordinated touchscreen case (suite r4touch, not part of plain
+ * r4): the G45TEST HOSTREQ lines ask the harness to press and release
+ * a pen through the QEMU input layer.  On a physical board a human (or
+ * a fixture) provides the contact instead.  Position checks are ratio
+ * shapes only - the sensed numerator can never exceed the full-scale
+ * denominator - so any contact point passes on model and silicon.
+ */
+void g45test_r4_touch(struct g45test_result *result)
+{
+    rt_uint32_t cdr0, cdr1, cdr2, cdr3, sr;
+
+    g45ctrl_clock_start();
+    *(volatile rt_uint32_t *)G45_PMC_PCER = 1U << G45_ADC_PID;
+    *g45_reg(G45_ADC_BASE, ADC_CR) = ADC_CR_SWRST;
+    *g45_reg(G45_ADC_BASE, ADC_MR) = ADC_MR_TS_ONLY | ADC_MR_PENDET;
+    /* TRGR.TRGMOD = pen-detect: contact hardware-triggers the sequence. */
+    *g45_reg(G45_ADC_BASE, ADC_TRGR) = 4U;
+
+    rt_kprintf("G45TEST HOSTREQ touch-press\n");
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_ADC_BASE, ADC_SR), ADC_SR_PENCNT,
+                               RT_TRUE, 8000U),
+                  ADC_SR_PENCNT, *g45_reg(G45_ADC_BASE, ADC_SR), 0);
+
+    /* Pen detection hardware-triggers a touchscreen sequence. */
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_ADC_BASE, ADC_SR), ADC_SR_DRDY,
+                               RT_TRUE, 1000U),
+                  ADC_SR_DRDY, *g45_reg(G45_ADC_BASE, ADC_SR), 1);
+    cdr0 = *g45_reg(G45_ADC_BASE, ADC_CDR(0));
+    cdr1 = *g45_reg(G45_ADC_BASE, ADC_CDR(1));
+    cdr2 = *g45_reg(G45_ADC_BASE, ADC_CDR(2));
+    cdr3 = *g45_reg(G45_ADC_BASE, ADC_CDR(3));
+    g45test_check(result, cdr0 != 0U, 1, cdr0, 2);
+    g45test_check(result, cdr2 != 0U, 1, cdr2, 3);
+    g45test_check(result, cdr1 <= cdr0, cdr0, cdr1, 4);
+    g45test_check(result, cdr3 <= cdr2, cdr2, cdr3, 5);
+
+    rt_kprintf("G45TEST HOSTREQ touch-release\n");
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_ADC_BASE, ADC_SR), ADC_SR_NOCNT,
+                               RT_TRUE, 8000U),
+                  ADC_SR_NOCNT, *g45_reg(G45_ADC_BASE, ADC_SR), 6);
+    sr = *g45_reg(G45_ADC_BASE, ADC_SR);
+    g45test_check(result, (sr & ADC_SR_PENCNT) == 0U,
+                  0, sr & ADC_SR_PENCNT, 7);
+
+    *g45_reg(G45_ADC_BASE, ADC_TRGR) = 0;
+    *g45_reg(G45_ADC_BASE, ADC_MR) = 0;
+    *g45_reg(G45_ADC_BASE, ADC_CR) = ADC_CR_SWRST;
+    rt_kprintf("G45TEST DATA case=r4.touch y=%u/%u x=%u/%u\n",
+               cdr1, cdr0, cdr3, cdr2);
     g45ctrl_clock_stop();
 }
 

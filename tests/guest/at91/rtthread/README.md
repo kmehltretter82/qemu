@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 37 cases:
+The registry currently contains 38 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -165,7 +165,14 @@ The registry currently contains 37 cases:
   pattern on SPI1's status machine — idle flags, SPIENS, RDRF, overrun
   from an unread RDR, OVRES pending/dropping at the AIC on SR read —
   without asserting received data (MISO floats on the EK); it pinned
-  the matching stale-OVRES defect (fixed in 0548510ff0). Cases
+  the matching stale-OVRES defect (fixed in 0548510ff0). The
+  host-coordinated `r4.touch` case (its own `r4touch` suite) exercises
+  pen detection end to end: the guest prints `G45TEST HOSTREQ` markers,
+  the runner answers with QMP `input-send-event` presses/releases, and
+  the guest validates PENCNT/NOCNT plus the pen-detect-triggered
+  ratio pairs (numerator never exceeding the full-scale denominator —
+  any contact point passes on model and silicon; on a physical board a
+  human or fixture supplies the contact instead). Cases
   that assert the shared system IRQ isolate it at the AIC and bound all
   waits with the free-running RTT value instead of the (frozen)
   scheduler tick.
