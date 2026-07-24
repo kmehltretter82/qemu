@@ -743,6 +743,95 @@ void g45test_r4_tsadcc(struct g45test_result *result)
 }
 
 /*
+ * Wired-OR proof for the shared system interrupt: assert the RTC
+ * (second-match alarm) and RTT (fast increments) together, then drain
+ * one source at a time in both orders.  The AIC line must stay pending
+ * while any source is still asserting and drop only after the last is
+ * drained.  The randomized IVR/EOI-injection variant from the plan
+ * needs an installed vector-1 handler and stays future work.
+ */
+void g45test_irq_wired_or(struct g45test_result *result)
+{
+    rt_uint32_t pit_mr;
+
+    g45ctrl_clock_start();
+    *g45_reg(G45_AIC_BASE, AIC_IDCR) = AIC_SYS;
+    pit_mr = *g45_reg(G45_PIT_BASE, PIT_MR);
+    *g45_reg(G45_PIT_BASE, PIT_MR) = pit_mr & ~PIT_MR_PITIEN;
+    *g45_reg(G45_AIC_BASE, AIC_ICCR) = AIC_SYS;
+    *g45_reg(G45_RTC_BASE, RTC_SCCR) = RTC_SR_ALL;
+    (void)*g45_reg(G45_RTT_BASE, RTT_SR);
+
+    /* RTC: alarm two seconds out. */
+    g45ctrl_rtc_set(g45_bcd(0) | (g45_bcd(0) << 8) | (g45_bcd(9) << 16),
+                    g45_bcd(20) | (g45_bcd(26) << 8) | (g45_bcd(7) << 16) |
+                    (1U << 21) | (g45_bcd(24) << 24));
+    *g45_reg(G45_RTC_BASE, RTC_TIMALR) = RTC_ALR_SECEN | g45_bcd(2);
+    *g45_reg(G45_RTC_BASE, RTC_IER) = RTC_SR_ALARM;
+
+    /* RTT: ~1 ms increments; clock helper keeps the same prescale. */
+    *g45_reg(G45_RTT_BASE, RTT_MR) =
+        RTT_FAST_PRES | RTT_MR_RTTINCIEN | RTT_MR_RTTRST;
+
+    /* Both sources up: RTT within ~1 ms, RTC within ~3 s. */
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_AIC_BASE, AIC_IPR), AIC_SYS,
+                               RT_TRUE, 100U),
+                  AIC_SYS, *g45_reg(G45_AIC_BASE, AIC_IPR) & AIC_SYS, 0);
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_RTC_BASE, RTC_SR), RTC_SR_ALARM,
+                               RT_TRUE, 5000U),
+                  RTC_SR_ALARM, *g45_reg(G45_RTC_BASE, RTC_SR), 1);
+
+    /*
+     * Drain the RTT side: freeze its latching first so a new tick
+     * cannot re-assert, then clear.  The wired-OR must stay pending on
+     * the RTC alone.
+     */
+    *g45_reg(G45_RTT_BASE, RTT_MR) = RTT_FAST_PRES;
+    (void)*g45_reg(G45_RTT_BASE, RTT_SR);
+    g45test_check(result,
+                  (*g45_reg(G45_AIC_BASE, AIC_IPR) & AIC_SYS) != 0U,
+                  AIC_SYS, *g45_reg(G45_AIC_BASE, AIC_IPR) & AIC_SYS, 2);
+
+    /* Drain the RTC side: now the line must drop. */
+    *g45_reg(G45_RTC_BASE, RTC_SCCR) = RTC_SR_ALL;
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_AIC_BASE, AIC_IPR), AIC_SYS,
+                               RT_FALSE, 100U),
+                  0, *g45_reg(G45_AIC_BASE, AIC_IPR) & AIC_SYS, 3);
+
+    /* Reverse order: re-assert both, drain the RTC first. */
+    *g45_reg(G45_RTT_BASE, RTT_MR) = RTT_FAST_PRES | RTT_MR_RTTINCIEN;
+    *g45_reg(G45_RTC_BASE, RTC_TIMALR) = RTC_ALR_SECEN | g45_bcd(6);
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_RTC_BASE, RTC_SR), RTC_SR_ALARM,
+                               RT_TRUE, 6000U),
+                  RTC_SR_ALARM, *g45_reg(G45_RTC_BASE, RTC_SR), 4);
+    *g45_reg(G45_RTC_BASE, RTC_SCCR) = RTC_SR_ALL;
+    g45test_check(result,
+                  (*g45_reg(G45_AIC_BASE, AIC_IPR) & AIC_SYS) != 0U,
+                  AIC_SYS, *g45_reg(G45_AIC_BASE, AIC_IPR) & AIC_SYS, 5);
+    *g45_reg(G45_RTT_BASE, RTT_MR) = RTT_FAST_PRES;
+    (void)*g45_reg(G45_RTT_BASE, RTT_SR);
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_AIC_BASE, AIC_IPR), AIC_SYS,
+                               RT_FALSE, 100U),
+                  0, *g45_reg(G45_AIC_BASE, AIC_IPR) & AIC_SYS, 6);
+
+    /* Teardown. */
+    *g45_reg(G45_RTC_BASE, RTC_IDR) = RTC_SR_ALL;
+    *g45_reg(G45_RTC_BASE, RTC_TIMALR) = 0;
+    *g45_reg(G45_RTC_BASE, RTC_SCCR) = RTC_SR_ALL;
+    *g45_reg(G45_AIC_BASE, AIC_ICCR) = AIC_SYS;
+    *g45_reg(G45_PIT_BASE, PIT_MR) = pit_mr;
+    *g45_reg(G45_AIC_BASE, AIC_IECR) = AIC_SYS;
+
+    rt_kprintf("G45TEST DATA case=irq.wired-or drains=2x2\n");
+    g45ctrl_clock_stop();
+}
+
+/*
  * TWI1 control/error paths.  The bus is empty in the model and address
  * 0x03 sits in the I2C reserved range no standard device ever ACKs, so
  * the NACK path is board-portable.  NACK also doubles as the
