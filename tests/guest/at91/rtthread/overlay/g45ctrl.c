@@ -22,6 +22,10 @@
 #include "g45test.h"
 
 #define AIC_SMR(n)      (4U * (n))
+#define AIC_SVR(n)      (0x80U + 4U * (n))
+#define AIC_IVR         0x100U
+#define AIC_ISR         0x108U
+#define AIC_EOICR       0x130U
 
 #define G45_RTT_BASE    0xfffffd20U
 #define G45_GPBR_BASE   0xfffffd60U
@@ -1102,6 +1106,184 @@ void g45test_irq_tc_chain(struct g45test_result *result)
     *g45_reg(G45_TCB0_BASE, TC_BMR) = bmr;
 
     rt_kprintf("G45TEST DATA case=irq.tc-chain cv1=%u\n", cv1);
+    g45ctrl_clock_stop();
+}
+
+static rt_uint32_t g45ctrl_prng(rt_uint32_t *state)
+{
+    rt_uint32_t value = *state;
+
+    if (value == 0U) {
+        value = 0x6d2b79f5U;
+    }
+    value ^= value << 13;
+    value ^= value >> 17;
+    value ^= value << 5;
+    *state = value;
+    return value;
+}
+
+static void g45ctrl_src_arm(rt_uint32_t pid)
+{
+    switch (pid) {
+    case G45_TWI1_PID:
+        *g45_reg(G45_TWI1_BASE, TWI_CR) = TWI_CR_START | TWI_CR_STOP;
+        break;
+    case G45_SPI1_PID:
+        *g45_reg(G45_SPI1_BASE, SPI_TDR) = 0x33U;
+        *g45_reg(G45_SPI1_BASE, SPI_TDR) = 0x44U;
+        break;
+    case G45_ADC_PID:
+        *g45_reg(G45_ADC_BASE, ADC_CR) = ADC_CR_START;
+        break;
+    default:
+        break;
+    }
+}
+
+static void g45ctrl_src_drain(rt_uint32_t pid)
+{
+    switch (pid) {
+    case G45_TWI1_PID:
+        (void)*g45_reg(G45_TWI1_BASE, TWI_SR);
+        break;
+    case G45_SPI1_PID:
+        (void)*g45_reg(G45_SPI1_BASE, SPI_SPSR);
+        (void)*g45_reg(G45_SPI1_BASE, SPI_RDR);
+        break;
+    case G45_ADC_PID:
+        (void)*g45_reg(G45_ADC_BASE, ADC_LCDR);
+        break;
+    default:
+        break;
+    }
+}
+
+/*
+ * Randomized (seed-deterministic) IVR/EOI choreography with a source
+ * injected between IVR and EOICR each round.  The CPU stays masked -
+ * the guest reads IVR and writes EOICR as plain register accesses,
+ * exactly what the qtest layer does - so the arbitration outcome of
+ * every step is predictable from the programmed priorities alone:
+ * TWI1=1, SPI1=4, ADC=7.  Level-source handler contract throughout:
+ * IVR, drain the device, then EOICR.
+ */
+void g45test_irq_random_inject(struct g45test_result *result)
+{
+    static const rt_uint32_t pid[3] = {
+        G45_TWI1_PID, G45_SPI1_PID, G45_ADC_PID
+    };
+    static const rt_uint32_t prio[3] = { 1U, 4U, 7U };
+    rt_uint32_t save_smr[3], save_svr[3];
+    rt_uint32_t pit_mr, state, round, i, check = 0;
+    rt_base_t level;
+
+    g45ctrl_clock_start();
+    *(volatile rt_uint32_t *)G45_PMC_PCER =
+        (1U << G45_TWI1_PID) | (1U << G45_SPI1_PID) | (1U << G45_ADC_PID);
+
+    /* Devices configured once; every arm/drain below is one assertion. */
+    *g45_reg(G45_TWI1_BASE, TWI_CR) = TWI_CR_SWRST;
+    *g45_reg(G45_TWI1_BASE, TWI_MMR) = (0x03U << 16) | TWI_MMR_MREAD;
+    *g45_reg(G45_TWI1_BASE, TWI_IER) = TWI_SR_NACK;
+    *g45_reg(G45_TWI1_BASE, TWI_CR) = TWI_CR_MSEN;
+    *g45_reg(G45_SPI1_BASE, SPI_CR) = SPI_CR_SWRST;
+    *g45_reg(G45_SPI1_BASE, SPI_MR) = SPI_MR_MSTR;
+    *g45_reg(G45_SPI1_BASE, SPI_CSR0) = 0x00000102U;
+    *g45_reg(G45_SPI1_BASE, SPI_IER) = SPI_SR_OVRES;
+    *g45_reg(G45_SPI1_BASE, SPI_CR) = SPI_CR_SPIEN;
+    *g45_reg(G45_ADC_BASE, ADC_CR) = ADC_CR_SWRST;
+    *g45_reg(G45_ADC_BASE, ADC_CHER) = 0x01U;
+    *g45_reg(G45_ADC_BASE, ADC_IER) = ADC_SR_DRDY;
+
+    for (i = 0; i < 3U; i++) {
+        save_smr[i] = *g45_reg(G45_AIC_BASE, AIC_SMR(pid[i]));
+        save_svr[i] = *g45_reg(G45_AIC_BASE, AIC_SVR(pid[i]));
+        *g45_reg(G45_AIC_BASE, AIC_SMR(pid[i])) =
+            (save_smr[i] & ~7U) | prio[i];
+        *g45_reg(G45_AIC_BASE, AIC_SVR(pid[i])) = 0xaa550000U + pid[i];
+    }
+    *g45_reg(G45_AIC_BASE, AIC_IECR) =
+        (1U << pid[0]) | (1U << pid[1]) | (1U << pid[2]);
+
+    level = rt_hw_interrupt_disable();
+    *g45_reg(G45_AIC_BASE, AIC_IDCR) = AIC_SYS;
+    pit_mr = *g45_reg(G45_PIT_BASE, PIT_MR);
+    *g45_reg(G45_PIT_BASE, PIT_MR) = pit_mr & ~PIT_MR_PITIEN;
+    *g45_reg(G45_AIC_BASE, AIC_ICCR) = AIC_SYS;
+
+    state = result->seed ^ 0x1c0ffee1U;
+    for (round = 0; round < 8U; round++) {
+        rt_uint32_t a = g45ctrl_prng(&state) % 3U;
+        rt_uint32_t b = (a + 1U + g45ctrl_prng(&state) % 2U) % 3U;
+        rt_uint32_t c = 3U - a - b;
+        rt_uint32_t live = (1U << a) | (1U << b);
+        rt_uint32_t vec, expect;
+
+        g45ctrl_src_arm(pid[a]);
+        g45ctrl_src_arm(pid[b]);
+
+        /* First IVR: the higher-priority of the armed pair. */
+        expect = prio[a] > prio[b] ? a : b;
+        vec = *g45_reg(G45_AIC_BASE, AIC_IVR);
+        g45test_check(result, vec == 0xaa550000U + pid[expect],
+                      0xaa550000U + pid[expect], vec, check++);
+        g45test_check(result,
+                      *g45_reg(G45_AIC_BASE, AIC_ISR) == pid[expect],
+                      pid[expect], *g45_reg(G45_AIC_BASE, AIC_ISR),
+                      check++);
+        g45ctrl_src_drain(pid[expect]);
+        live &= ~(1U << expect);
+
+        /* Injection between IVR and EOI: the third source goes live. */
+        g45ctrl_src_arm(pid[c]);
+        live |= 1U << c;
+        *g45_reg(G45_AIC_BASE, AIC_EOICR) = 0;
+
+        /* Drain the remaining two in strict priority order. */
+        while (live != 0U) {
+            expect = 3U;
+            for (i = 0; i < 3U; i++) {
+                if ((live & (1U << i)) &&
+                    (expect == 3U || prio[i] > prio[expect])) {
+                    expect = i;
+                }
+            }
+            vec = *g45_reg(G45_AIC_BASE, AIC_IVR);
+            g45test_check(result, vec == 0xaa550000U + pid[expect],
+                          0xaa550000U + pid[expect], vec, check++);
+            g45ctrl_src_drain(pid[expect]);
+            live &= ~(1U << expect);
+            *g45_reg(G45_AIC_BASE, AIC_EOICR) = 0;
+        }
+
+        g45test_check(result,
+                      (*g45_reg(G45_AIC_BASE, AIC_IPR) &
+                       ((1U << pid[0]) | (1U << pid[1]) | (1U << pid[2])))
+                      == 0U,
+                      0, *g45_reg(G45_AIC_BASE, AIC_IPR), check++);
+    }
+
+    /* Teardown: devices quiet, AIC state restored, OS line back. */
+    *g45_reg(G45_AIC_BASE, AIC_IDCR) =
+        (1U << pid[0]) | (1U << pid[1]) | (1U << pid[2]);
+    for (i = 0; i < 3U; i++) {
+        *g45_reg(G45_AIC_BASE, AIC_SMR(pid[i])) = save_smr[i];
+        *g45_reg(G45_AIC_BASE, AIC_SVR(pid[i])) = save_svr[i];
+    }
+    *g45_reg(G45_TWI1_BASE, TWI_IDR) = 0xffffffffU;
+    *g45_reg(G45_TWI1_BASE, TWI_CR) = TWI_CR_SWRST;
+    *g45_reg(G45_SPI1_BASE, SPI_IDR) = 0xffffffffU;
+    *g45_reg(G45_SPI1_BASE, SPI_CR) = SPI_CR_SWRST;
+    *g45_reg(G45_ADC_BASE, ADC_IDR) = 0xffffffffU;
+    *g45_reg(G45_ADC_BASE, ADC_CR) = ADC_CR_SWRST;
+    *g45_reg(G45_PIT_BASE, PIT_MR) = pit_mr;
+    *g45_reg(G45_AIC_BASE, AIC_ICCR) = AIC_SYS;
+    *g45_reg(G45_AIC_BASE, AIC_IECR) = AIC_SYS;
+    rt_hw_interrupt_enable(level);
+
+    rt_kprintf("G45TEST DATA case=irq.random-inject rounds=8 checks=%u\n",
+               check);
     g45ctrl_clock_stop();
 }
 

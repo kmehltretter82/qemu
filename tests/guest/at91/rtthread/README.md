@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 46 cases:
+The registry currently contains 47 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -206,8 +206,12 @@ The registry currently contains 46 cases:
   toggle programming (would have failed against the old hardwired
   65536). The clock-ratio case runs the MCK/16 PIT, a slow-clock TC
   channel and the RTT concurrently over one window and requires their
-  pairwise rate ratios to land in tolerant bands. Randomized IVR/EOI
-  injection remains future work; nested preemption is descoped at
+  pairwise rate ratios to land in tolerant bands. The randomized-injection case runs eight
+  seed-deterministic rounds of manual IVR/EOICR choreography with the
+  CPU masked: a random pair of the three armable sources asserts, the
+  IVR must serve the higher priority, a third source injects between
+  IVR and EOI, and every subsequent IVR must present the highest
+  remaining until quiescence. nested preemption is descoped at
   guest level - the ARM926 vector_irq never saves SPSR at entry, so a
   nested interrupt clobbers spsr_irq (BSP limitation; AIC-side nesting
   semantics belong to qtest).
