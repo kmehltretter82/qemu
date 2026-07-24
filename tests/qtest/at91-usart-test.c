@@ -9,8 +9,12 @@
 #define G45_DBGU_BASE          0xffffee00
 #define G35_DBGU_BASE          0xfffff200
 #define G45_SDRAM_BASE         0x70000000
+#define AIC_BASE               0xfffff000
+#define AIC_IPR                0x10c
+#define AIC_SYS_IRQ            (1u << 1)
 
 #define US_CR                  0x00
+#define US_IER                 0x08
 #define US_CSR                 0x14
 #define US_RHR                 0x18
 #define US_THR                 0x1c
@@ -25,6 +29,7 @@
 #define US_PTCR                0x120
 #define US_PTSR                0x124
 
+#define US_CR_RXEN             (1u << 4)
 #define US_CR_STTTO            (1u << 11)
 #define US_RXRDY               (1u << 0)
 #define US_TXRDY               (1u << 1)
@@ -259,6 +264,60 @@ static void send_exact(int fd, const uint8_t *buffer, size_t length)
         g_assert_cmpint(ret, >, 0);
         sent += ret;
     }
+}
+
+/*
+ * The receive path a console needs: a byte arriving on the chardev must
+ * raise RXRDY, be readable from RHR, and - once unmasked - reach the AIC
+ * over the board's system wired-OR line.  A board that only wires the
+ * transmit direction still prints a full boot log but never accepts a
+ * keystroke.
+ */
+static void run_rhr_character(const char *machine, uint64_t dbgu_base)
+{
+    g_autofree char *args = g_strdup_printf("-machine %s -S", machine);
+    static const uint8_t sent = 'K';
+    QTestState *qts;
+    int sock_fd;
+    int i;
+
+    qts = qtest_init_with_serial(args, &sock_fd);
+    qtest_writel(qts, dbgu_base + US_IER, US_RXRDY);
+    qtest_writel(qts, dbgu_base + US_CR, US_CR_RXEN);
+    g_assert_cmphex(qtest_readl(qts, dbgu_base + US_CSR) & US_RXRDY, ==, 0);
+    g_assert_cmphex(qtest_readl(qts, AIC_BASE + AIC_IPR) & AIC_SYS_IRQ,
+                    ==, 0);
+
+    send_exact(sock_fd, &sent, 1);
+    for (i = 0; i < 5000; i++) {
+        if (qtest_readl(qts, dbgu_base + US_CSR) & US_RXRDY) {
+            break;
+        }
+        g_usleep(1000);
+    }
+    g_assert_cmphex(qtest_readl(qts, dbgu_base + US_CSR) & US_RXRDY,
+                    ==, US_RXRDY);
+    g_assert_cmphex(qtest_readl(qts, AIC_BASE + AIC_IPR) & AIC_SYS_IRQ,
+                    ==, AIC_SYS_IRQ);
+
+    /* Reading RHR consumes the character and drops the interrupt. */
+    g_assert_cmphex(qtest_readl(qts, dbgu_base + US_RHR) & 0xff, ==, sent);
+    g_assert_cmphex(qtest_readl(qts, dbgu_base + US_CSR) & US_RXRDY, ==, 0);
+    g_assert_cmphex(qtest_readl(qts, AIC_BASE + AIC_IPR) & AIC_SYS_IRQ,
+                    ==, 0);
+
+    close(sock_fd);
+    qtest_quit(qts);
+}
+
+static void test_rhr_character(void)
+{
+    run_rhr_character("sam9m10g45ek", G45_DBGU_BASE);
+}
+
+static void test_g35_rhr_character(void)
+{
+    run_rhr_character("sam9g35ek", G35_DBGU_BASE);
 }
 
 /*
@@ -550,6 +609,8 @@ int main(int argc, char **argv)
 
     qtest_add_func("/at91-usart/thr/character", test_thr_character);
     qtest_add_func("/at91-usart/g35/thr/character", test_g35_thr_character);
+    qtest_add_func("/at91-usart/rhr/character", test_rhr_character);
+    qtest_add_func("/at91-usart/g35/rhr/character", test_g35_rhr_character);
     qtest_add_func("/at91-usart/pdc/rx-buffer-handoff",
                    test_pdc_rx_buffer_handoff);
     qtest_add_func("/at91-usart/pdc/rx-late-next-promotion",

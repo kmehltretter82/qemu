@@ -20,6 +20,15 @@
 #define G35_HSMCI1_BASE        0xf000c000
 #define G35_SDRAM_BASE         0x20000000
 #define G35_SPI0_BASE          0xf0000000
+#define G35_DBGU_BASE          0xfffff200
+#define G35_DMA1_REQ_DBGU_TX   8
+#define G35_DMA1_REQ_DBGU_RX   9
+
+#define US_CR                  0x00
+#define US_RHR                 0x18
+#define US_THR                 0x1c
+#define US_CR_RXEN             (1u << 4)
+#define US_CR_TXEN             (1u << 6)
 
 #define DMAC_CHER              0x28
 #define DMAC_CHDR              0x2c
@@ -868,6 +877,98 @@ static void test_g35_spi0_jedec_via_dma(void)
 
     run_spi_dma_roundtrip_on("sam9g35ek", G35_SDRAM_BASE, G35_DMAC0_BASE,
                              G35_SPI0_BASE, 1, 2, true, jedec, 3);
+}
+
+/* Blocking socket helpers for the serial chardev the DBGU route uses. */
+static void recv_exact(int fd, uint8_t *buffer, size_t length)
+{
+    size_t received = 0;
+
+    while (received < length) {
+        GPollFD pollfd = {
+            .fd = fd,
+            .events = G_IO_IN | G_IO_HUP | G_IO_ERR,
+        };
+        ssize_t ret;
+
+        g_assert_cmpint(g_poll(&pollfd, 1, 5000), >, 0);
+        ret = recv(fd, buffer + received, length - received, 0);
+        g_assert_cmpint(ret, >, 0);
+        received += ret;
+    }
+}
+
+static void send_exact(int fd, const uint8_t *buffer, size_t length)
+{
+    size_t sent = 0;
+
+    while (sent < length) {
+        ssize_t ret = send(fd, buffer + sent, length - sent, 0);
+
+        g_assert_cmpint(ret, >, 0);
+        sent += ret;
+    }
+}
+
+/*
+ * The SAM9x5 debug unit is a DMAC client, not a PDC one (at91sam9x5.dtsi
+ * gives it dma1 requests 8/9), and Linux drives the console that way: a
+ * missing route leaves a shell that prints nothing and takes no keystroke.
+ * Stream a buffer out of THR and back in through RHR to pin both directions.
+ */
+static void test_g35_dbgu_serial_via_dma(void)
+{
+    static const uint8_t message[4] = { 'D', 'B', 'G', 'U' };
+    const uint64_t tx_buf = G35_SDRAM_BASE + 0x42000;
+    const uint64_t rx_buf = G35_SDRAM_BASE + 0x42100;
+    const uint64_t tx_base = G35_DMAC1_BASE + DMAC_CH0_BASE;
+    const uint64_t rx_base = G35_DMAC1_BASE + DMAC_CH0_BASE + DMAC_CH_STRIDE;
+    uint8_t wire[sizeof(message)];
+    QTestState *qts;
+    int sock_fd;
+    size_t i;
+
+    qts = qtest_init_with_serial("-machine sam9g35ek -S", &sock_fd);
+    for (i = 0; i < sizeof(message); i++) {
+        qtest_writeb(qts, tx_buf + i, message[i]);
+        qtest_writeb(qts, rx_buf + i, 0xcc);
+    }
+    qtest_writel(qts, G35_DBGU_BASE + US_CR, US_CR_TXEN | US_CR_RXEN);
+
+    qtest_writel(qts, tx_base + DMAC_SADDR, tx_buf);
+    qtest_writel(qts, tx_base + DMAC_DADDR, G35_DBGU_BASE + US_THR);
+    qtest_writel(qts, tx_base + DMAC_CTRLA, DMAC_CTRLA_BTSIZE(4));
+    qtest_writel(qts, tx_base + DMAC_CTRLB, DMAC_CTRLB_FC_MEM2PER |
+                 DMAC_CTRLB_DST_FIXED | DMAC_CTRLB_SRC_DSCR_DIS |
+                 DMAC_CTRLB_DST_DSCR_DIS);
+    qtest_writel(qts, tx_base + DMAC_CFG,
+                 dmac_cfg_dst_per(G35_DMA1_REQ_DBGU_TX) | DMAC_CFG_DST_H2SEL);
+    qtest_writel(qts, G35_DMAC1_BASE + DMAC_EN, 1);
+    qtest_writel(qts, G35_DMAC1_BASE + DMAC_CHER, DMAC_ENA(0));
+    wait_for_dmac_channel_disabled(qts, G35_DMAC1_BASE, 0);
+    recv_exact(sock_fd, wire, sizeof(wire));
+    g_assert_cmpmem(wire, sizeof(wire), message, sizeof(message));
+
+    /* The receive request only advances once a character has arrived. */
+    qtest_writel(qts, rx_base + DMAC_SADDR, G35_DBGU_BASE + US_RHR);
+    qtest_writel(qts, rx_base + DMAC_DADDR, rx_buf);
+    qtest_writel(qts, rx_base + DMAC_CTRLA, DMAC_CTRLA_BTSIZE(4));
+    qtest_writel(qts, rx_base + DMAC_CTRLB, DMAC_CTRLB_FC_PER2MEM |
+                 DMAC_CTRLB_SRC_FIXED | DMAC_CTRLB_SRC_DSCR_DIS |
+                 DMAC_CTRLB_DST_DSCR_DIS);
+    qtest_writel(qts, rx_base + DMAC_CFG,
+                 dmac_cfg_src_per(G35_DMA1_REQ_DBGU_RX) | DMAC_CFG_SRC_H2SEL);
+    qtest_writel(qts, G35_DMAC1_BASE + DMAC_CHER, DMAC_ENA(1));
+    g_assert_cmphex(qtest_readb(qts, rx_buf), ==, 0xcc);
+
+    send_exact(sock_fd, message, sizeof(message));
+    wait_for_dmac_channel_disabled(qts, G35_DMAC1_BASE, 1);
+    for (i = 0; i < sizeof(message); i++) {
+        g_assert_cmphex(qtest_readb(qts, rx_buf + i), ==, message[i]);
+    }
+
+    close(sock_fd);
+    qtest_quit(qts);
 }
 
 /* SAM9x5 SSC on DMAC0's request lines 13/14. */
@@ -4100,6 +4201,8 @@ int main(int argc, char **argv)
                    test_g35_spi0_jedec_via_dma);
     qtest_add_func("/at91-dmac/g35/ssc/loopback-via-dma",
                    test_g35_ssc_loopback_via_dma);
+    qtest_add_func("/at91-dmac/g35/dbgu/serial-via-dma",
+                   test_g35_dbgu_serial_via_dma);
     qtest_add_func("/at91-dmac/g45/spi1/route-smoke",
                    test_spi1_route_smoke);
     qtest_add_func("/at91-dmac/g45/ssc0/loopback-via-dma",
