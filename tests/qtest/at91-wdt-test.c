@@ -82,6 +82,27 @@ static void test_mode_write_once_and_reset(void)
     qtest_quit(qts);
 }
 
+static void test_disabled_at_boot(void)
+{
+    QTestState *qts = qtest_init("-machine sam9m10g45ek "
+                                 "-global at91-wdt.disabled-at-boot=on "
+                                 "-watchdog-action none");
+
+    /* The modelled bootloader write left WDDIS set... */
+    g_assert_cmphex(qtest_readl(qts, G45_WDT_BASE + WDT_MR), ==,
+                    WDT_MR_WDDIS);
+
+    /* ...and consumed the write-once slot, so the guest cannot re-arm... */
+    qtest_writel(qts, G45_WDT_BASE + WDT_MR, WDT_MR_RESET);
+    g_assert_cmphex(qtest_readl(qts, G45_WDT_BASE + WDT_MR), ==,
+                    WDT_MR_WDDIS);
+
+    /* ...and no fault ever fires (16s is the power-on period). */
+    qtest_clock_step(qts, 20 * NANOSECONDS_PER_SECOND);
+    g_assert_cmphex(qtest_readl(qts, G45_WDT_BASE + WDT_SR), ==, 0);
+    qtest_quit(qts);
+}
+
 static void test_underflow_interrupt(void)
 {
     QTestState *qts = qtest_init("-machine sam9m10g45ek "
@@ -217,6 +238,7 @@ int main(int argc, char **argv)
 
     qtest_add_func("/at91-wdt/g45/mode-write-once-reset",
                    test_mode_write_once_and_reset);
+    qtest_add_func("/at91-wdt/g45/disabled-at-boot", test_disabled_at_boot);
     qtest_add_func("/at91-wdt/g45/underflow-interrupt",
                    test_underflow_interrupt);
     qtest_add_func("/at91-wdt/g45/restart-window", test_restart_window);
