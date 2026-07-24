@@ -201,6 +201,82 @@ static int g45udp(int argc, char **argv)
 MSH_CMD_EXPORT(g45udp, echo seeded datagrams of an exact size);
 
 /*
+ * g45udpflood <ip> <port> <size> <count>: send every datagram
+ * back-to-back, then collect the echoes.  Unlike the lockstep g45udp
+ * this keeps transmit and receive genuinely concurrent through the
+ * driver - the traffic shape TCP produces - without any TCP code.
+ * Echo order is preserved (single slirp UDP flow), so contents are
+ * still verified sequentially.
+ */
+static int g45udpflood(int argc, char **argv)
+{
+    struct sockaddr_in addr;
+    rt_uint32_t state = 0x33cc55aaU, check = 0x33cc55aaU;
+    rt_uint32_t size, count, i, got_total = 0;
+    struct timeval tv;
+    int sock;
+
+    if (argc != 5) {
+        rt_kprintf("usage: g45udpflood <ip> <port> <size> <count>\n");
+        return -1;
+    }
+    size = (rt_uint32_t)atoi(argv[3]);
+    count = (rt_uint32_t)atoi(argv[4]);
+    if (size > G45NET_CHUNK) {
+        size = G45NET_CHUNK;
+    }
+
+    sock = lwip_socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        rt_kprintf("G45NET FLOOD FAIL socket\n");
+        return -1;
+    }
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    lwip_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    rt_memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((rt_uint16_t)atoi(argv[2]));
+    addr.sin_addr.s_addr = inet_addr(argv[1]);
+
+    for (i = 0; i < count; i++) {
+        g45net_fill(txbuf, size, &state);
+        if (lwip_sendto(sock, txbuf, size, 0,
+                        (struct sockaddr *)&addr, sizeof(addr))
+            != (int)size) {
+            rt_kprintf("G45NET FLOOD FAIL send dgram=%u\n", i);
+            lwip_close(sock);
+            return -1;
+        }
+    }
+    for (i = 0; i < count; i++) {
+        rt_uint32_t j;
+        int n = lwip_recv(sock, rxbuf, sizeof(rxbuf), 0);
+
+        if (n != (int)size) {
+            /* UDP may legitimately drop under flood; report and stop. */
+            rt_kprintf("G45NET FLOOD SHORT got=%u of %u\n", got_total,
+                       count);
+            lwip_close(sock);
+            return 0;
+        }
+        g45net_fill(txbuf, size, &check);
+        for (j = 0; j < size; j++) {
+            if (rxbuf[j] != txbuf[j]) {
+                rt_kprintf("G45NET FLOOD FAIL dgram=%u off=%u\n", i, j);
+                lwip_close(sock);
+                return -1;
+            }
+        }
+        got_total++;
+    }
+    lwip_close(sock);
+    rt_kprintf("G45NET FLOOD OK size=%u count=%u\n", size, got_total);
+    return 0;
+}
+MSH_CMD_EXPORT(g45udpflood, concurrent-TX/RX datagram flood);
+
+/*
  * g45tcpself <bytes>: the same lockstep pattern as g45tcp but over the
  * lwip loopback interface with a guest-local listener - zero MACB
  * involvement.  If this crashes like g45tcp, the fault is in the lwip

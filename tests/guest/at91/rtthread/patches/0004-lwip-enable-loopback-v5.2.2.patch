@@ -1,0 +1,27 @@
+From: QEMU AT91 test suite <qemu-devel@nongnu.org>
+Subject: [PATCH] lwip: enable the loopback interface for self-tests
+
+The g45tcpself overlay command streams TCP over 127.0.0.1 to separate
+stack behaviour from the MACB driver path when investigating the
+streaming-TCP heap corruption.  The port's lwipopts pins
+LWIP_HAVE_LOOPIF to 0 and leaves LWIP_NETIF_LOOPBACK at its default 0,
+so self-addressed traffic is unroutable.  Enable both; profiles that do
+not build lwip are unaffected.
+
+---
+ components/net/lwip/port/lwipopts.h | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/components/net/lwip/port/lwipopts.h b/components/net/lwip/port/lwipopts.h
+--- a/components/net/lwip/port/lwipopts.h
++++ b/components/net/lwip/port/lwipopts.h
+@@ -82,7 +82,8 @@
+ #define LWIP_DNS                    0
+ #endif
+
+-#define LWIP_HAVE_LOOPIF            0
++#define LWIP_HAVE_LOOPIF            1
++#define LWIP_NETIF_LOOPBACK         1
+
+ #define LWIP_PLATFORM_BYTESWAP      0
+
