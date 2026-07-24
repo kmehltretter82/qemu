@@ -293,28 +293,39 @@ static void test_hsmci_tx_dma_request(void)
     qtest_quit(qts);
 }
 
+static void hsmci_command_at(QTestState *qts, uint64_t base,
+                             uint32_t command, uint32_t argument)
+{
+    qtest_writel(qts, base + HSMCI_ARGR, argument);
+    qtest_writel(qts, base + HSMCI_CMDR, command);
+    qtest_clock_step(qts, 4000);
+}
+
 static void hsmci_command(QTestState *qts, uint32_t command,
                           uint32_t argument)
 {
-    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_ARGR, argument);
-    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_CMDR, command);
-    qtest_clock_step(qts, 4000);
+    hsmci_command_at(qts, G45_HSMCI0_BASE, command, argument);
+}
+
+static uint32_t hsmci_select_sd_card_at(QTestState *qts, uint64_t base)
+{
+    uint32_t rca;
+
+    qtest_writel(qts, base + HSMCI_CR, HSMCI_CR_MCIEN);
+    hsmci_command_at(qts, base, 0, 0);
+    hsmci_command_at(qts, base, 55 | HSMCI_CMDR_RSP_48, 0);
+    hsmci_command_at(qts, base, 41 | HSMCI_CMDR_RSP_48, 0x00ff8000);
+    hsmci_command_at(qts, base, 2 | HSMCI_CMDR_RSP_136, 0);
+    hsmci_command_at(qts, base, 3 | HSMCI_CMDR_RSP_48, 0);
+    rca = qtest_readl(qts, base + HSMCI_RSPR) & 0xffff0000;
+    g_assert_cmphex(rca, !=, 0);
+    hsmci_command_at(qts, base, 7 | HSMCI_CMDR_RSP_48, rca);
+    return rca;
 }
 
 static uint32_t hsmci_select_sd_card(QTestState *qts)
 {
-    uint32_t rca;
-
-    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_CR, HSMCI_CR_MCIEN);
-    hsmci_command(qts, 0, 0);
-    hsmci_command(qts, 55 | HSMCI_CMDR_RSP_48, 0);
-    hsmci_command(qts, 41 | HSMCI_CMDR_RSP_48, 0x00ff8000);
-    hsmci_command(qts, 2 | HSMCI_CMDR_RSP_136, 0);
-    hsmci_command(qts, 3 | HSMCI_CMDR_RSP_48, 0);
-    rca = qtest_readl(qts, G45_HSMCI0_BASE + HSMCI_RSPR) & 0xffff0000;
-    g_assert_cmphex(rca, !=, 0);
-    hsmci_command(qts, 7 | HSMCI_CMDR_RSP_48, rca);
-    return rca;
+    return hsmci_select_sd_card_at(qts, G45_HSMCI0_BASE);
 }
 
 /*
@@ -1101,6 +1112,118 @@ static void test_hsmci_dma_odd_tail(void)
     qtest_quit(qts);
 }
 
+/*
+ * D4 multi-block vector: an eight-block CMD18 read via CPU PIO must
+ * deliver the same 4 KiB, byte for byte, as the DMA route reading the
+ * same blocks.
+ */
+static void test_hsmci_multiblock_pio_vs_dma(void)
+{
+    g_autofree char *image_path = NULL;
+    const uint64_t lli = G45_SDRAM_BASE + 0x49000;
+    const uint64_t dma_dst = G45_SDRAM_BASE + 0x4a000;
+    uint8_t pattern[4096];
+    g_autofree uint8_t *pio_data = g_malloc(4096);
+    QTestState *qts;
+    uint32_t expected;
+    int i;
+
+    /* Reuse the 1 KiB pattern helper, then extend the pattern to 4 KiB. */
+    image_path = hsmci_create_pattern_image(pattern, 1024);
+    for (i = 1024; i < 4096; i++) {
+        pattern[i] = (uint8_t)(i * 7 + (i >> 8) * 13 + 5);
+    }
+    {
+        int fd = open(image_path, O_WRONLY);
+
+        g_assert_cmpint(fd, >=, 0);
+        g_assert_cmpint(pwrite(fd, pattern + 1024, 3072, 1024), ==, 3072);
+        close(fd);
+    }
+
+    qts = qtest_initf("-machine sam9m10g45ek -S "
+                      "-drive if=sd,index=0,format=raw,file=%s", image_path);
+    ensure_vm_running(qts);
+    hsmci_select_sd_card(qts);
+
+    /* PIO CMD18: eight blocks drained from RDR, then STOP. */
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_DMA_REG, 0);
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_BLKR, (512u << 16) | 8);
+    hsmci_command(qts, 18 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
+                  HSMCI_CMDR_START | HSMCI_CMDR_READ | HSMCI_CMDR_MULTI, 0);
+    for (i = 0; i < 4096; i += 4) {
+        uint32_t word = qtest_readl(qts, G45_HSMCI0_BASE + HSMCI_RDR);
+
+        memcpy(&pio_data[i], &word, 4);
+    }
+    hsmci_command(qts, 12 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_STOP, 0);
+    g_assert_cmpmem(pio_data, 4096, pattern, 4096);
+
+    /* DMA CMD18 of the same blocks. */
+    qtest_memset(qts, dma_dst, 0xcc, 4096);
+    hsmci_program_read_lli(qts, lli, dma_dst, 1024);
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_DMA_REG, HSMCI_DMA_DMAEN);
+    qtest_writel(qts, G45_HSMCI0_BASE + HSMCI_BLKR, (512u << 16) | 8);
+    hsmci_command(qts, 18 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
+                  HSMCI_CMDR_START | HSMCI_CMDR_READ | HSMCI_CMDR_MULTI, 0);
+    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 0);
+    for (i = 0; i < 4096; i += 4) {
+        memcpy(&expected, &pio_data[i], sizeof(expected));
+        g_assert_cmphex(qtest_readl(qts, dma_dst + i), ==, expected);
+    }
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR) &
+                    (DMAC_BTC(0) | DMAC_ERR(0)), ==, DMAC_BTC(0));
+    qtest_quit(qts);
+    unlink(image_path);
+}
+
+/* D4 slot-1 vector: the same data contract on HSMCI1 via request 13. */
+static void test_hsmci1_dma_data_read(void)
+{
+    g_autofree char *image_path = NULL;
+    const uint64_t lli = G45_SDRAM_BASE + 0x4b000;
+    const uint64_t dst = G45_SDRAM_BASE + 0x4c000;
+    uint8_t pattern[1024];
+    QTestState *qts;
+    uint32_t expected;
+    int i;
+
+    image_path = hsmci_create_pattern_image(pattern, sizeof(pattern));
+    qts = qtest_initf("-machine sam9m10g45ek -S "
+                      "-drive if=sd,index=1,format=raw,file=%s", image_path);
+    ensure_vm_running(qts);
+    hsmci_select_sd_card_at(qts, G45_HSMCI1_BASE);
+
+    qtest_memset(qts, dst, 0xcc, 512);
+    qtest_writel(qts, lli + 0, G45_HSMCI1_BASE + HSMCI_RDR);
+    qtest_writel(qts, lli + 4, dst);
+    qtest_writel(qts, lli + 8, DMAC_CTRLA_BTSIZE(128) |
+                 DMAC_CTRLA_SRC_WIDTH_4 | DMAC_CTRLA_DST_WIDTH_4);
+    qtest_writel(qts, lli + 12, DMAC_CTRLB_FC_PER2MEM |
+                 DMAC_CTRLB_SRC_FIXED);
+    qtest_writel(qts, lli + 16, 0);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_CH0_BASE + DMAC_DSCR, lli);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_CH0_BASE + DMAC_CFG,
+                 dmac_cfg_src_per(13) | DMAC_CFG_SRC_H2SEL);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_EN, 1);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_CHER, DMAC_ENA(0));
+
+    qtest_writel(qts, G45_HSMCI1_BASE + HSMCI_DMA_REG, HSMCI_DMA_DMAEN);
+    qtest_writel(qts, G45_HSMCI1_BASE + HSMCI_BLKR, (512u << 16) | 1);
+    hsmci_command_at(qts, G45_HSMCI1_BASE,
+                     17 | HSMCI_CMDR_RSP_48 | HSMCI_CMDR_MAXLAT_64 |
+                     HSMCI_CMDR_START | HSMCI_CMDR_READ, 0);
+    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 0);
+    for (i = 0; i < 512; i += 4) {
+        memcpy(&expected, &pattern[i], sizeof(expected));
+        g_assert_cmphex(qtest_readl(qts, dst + i), ==, expected);
+    }
+    g_assert_cmphex(qtest_readl(qts, G45_DMAC_BASE + DMAC_EBCISR) &
+                    (DMAC_BTC(0) | DMAC_ERR(0)), ==, DMAC_BTC(0));
+    qtest_quit(qts);
+    unlink(image_path);
+}
+
 #define G45_NAND_BASE          0x40000000
 #define NAND_ALE               0x200000
 #define NAND_CLE               0x400000
@@ -1180,6 +1303,134 @@ static void test_nand_dmac_page_read(void)
                         DMAC_ERR(0), ==, 0);
     }
     qtest_quit(qts);
+    unlink(image_path);
+}
+
+/*
+ * D4 NAND program/erase row: deliver a full raw page's program data
+ * through the central DMAC (fixed destination on the CS3 window), read
+ * it back through the DMAC, then block-erase and confirm the erased
+ * state - and after shutdown, confirm the programmed bytes reached the
+ * media file before the erase and 0xff after it.
+ */
+static void test_nand_dmac_program_erase(void)
+{
+    g_autofree char *image_path = NULL;
+    g_autofree uint8_t *page = g_malloc(NAND_PAGE_RAW);
+    const uint64_t src = G45_SDRAM_BASE + 0x4d000;
+    const uint64_t dst = G45_SDRAM_BASE + 0x4e000;
+    const uint64_t channel_base = G45_DMAC_BASE + DMAC_CH0_BASE;
+    const uint32_t row = 70;            /* second erase block, page 6 */
+    uint8_t media[NAND_PAGE_RAW];
+    QTestState *qts;
+    int fd;
+    int j;
+
+    for (j = 0; j < NAND_PAGE_RAW; j++) {
+        page[j] = (uint8_t)(j * 11 + 5);
+    }
+    fd = g_file_open_tmp("at91-dmac-nandpe-XXXXXX.img", &image_path, NULL);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, (off_t)131072 * NAND_PAGE_RAW + 4096),
+                    ==, 0);
+    /* Programming ANDs onto the media: the target block must be erased. */
+    {
+        g_autofree uint8_t *erased = g_malloc(64 * NAND_PAGE_RAW);
+
+        memset(erased, 0xff, 64 * NAND_PAGE_RAW);
+        g_assert_cmpint(pwrite(fd, erased, 64 * NAND_PAGE_RAW,
+                               (off_t)64 * NAND_PAGE_RAW), ==,
+                        64 * NAND_PAGE_RAW);
+    }
+    close(fd);
+
+    qts = qtest_initf("-machine sam9m10g45ek -S "
+                      "-drive if=mtd,index=0,format=raw,file=%s", image_path);
+    ensure_vm_running(qts);
+    qtest_bufwrite(qts, src, page, NAND_PAGE_RAW);
+
+    /* PAGEPROG: 80h, addressing, DMA data cycles, 10h. */
+    qtest_writeb(qts, G45_NAND_BASE + NAND_CLE, 0x80);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, 0x00);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, 0x00);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, row & 0xff);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, (row >> 8) & 0xff);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, (row >> 16) & 0xff);
+    qtest_writel(qts, channel_base + DMAC_SADDR, src);
+    qtest_writel(qts, channel_base + DMAC_DADDR, G45_NAND_BASE);
+    qtest_writel(qts, channel_base + DMAC_CTRLA,
+                 DMAC_CTRLA_BTSIZE(NAND_PAGE_RAW));
+    qtest_writel(qts, channel_base + DMAC_CTRLB,
+                 DMAC_CTRLB_DST_FIXED | DMAC_CTRLB_SRC_DSCR_DIS |
+                 DMAC_CTRLB_DST_DSCR_DIS);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_EN, 1);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_CHER, DMAC_ENA(0));
+    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 0);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_CLE, 0x10);
+
+    /* Read the page back through the DMAC. */
+    qtest_writeb(qts, G45_NAND_BASE + NAND_CLE, 0x00);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, 0x00);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, 0x00);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, row & 0xff);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, (row >> 8) & 0xff);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, (row >> 16) & 0xff);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_CLE, 0x30);
+    qtest_memset(qts, dst, 0xcc, NAND_PAGE_RAW);
+    qtest_writel(qts, channel_base + DMAC_SADDR, G45_NAND_BASE);
+    qtest_writel(qts, channel_base + DMAC_DADDR, dst);
+    qtest_writel(qts, channel_base + DMAC_CTRLA,
+                 DMAC_CTRLA_BTSIZE(NAND_PAGE_RAW));
+    qtest_writel(qts, channel_base + DMAC_CTRLB,
+                 DMAC_CTRLB_SRC_FIXED | DMAC_CTRLB_SRC_DSCR_DIS |
+                 DMAC_CTRLB_DST_DSCR_DIS);
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_CHER, DMAC_ENA(0));
+    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 0);
+    for (j = 0; j < NAND_PAGE_RAW; j++) {
+        g_assert_cmphex(qtest_readb(qts, dst + j), ==, page[j]);
+    }
+
+    /* The program must be on the media before the erase. */
+    fd = open(image_path, O_RDONLY);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(pread(fd, media, NAND_PAGE_RAW,
+                          (off_t)row * NAND_PAGE_RAW), ==, NAND_PAGE_RAW);
+    close(fd);
+    g_assert_cmpmem(media, NAND_PAGE_RAW, page, NAND_PAGE_RAW);
+
+    /* BLOCK ERASE: 60h, three row cycles, D0h; the page reads 0xff. */
+    qtest_writeb(qts, G45_NAND_BASE + NAND_CLE, 0x60);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, row & 0xff);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, (row >> 8) & 0xff);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, (row >> 16) & 0xff);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_CLE, 0xd0);
+
+    qtest_writeb(qts, G45_NAND_BASE + NAND_CLE, 0x00);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, 0x00);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, 0x00);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, row & 0xff);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, (row >> 8) & 0xff);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_ALE, (row >> 16) & 0xff);
+    qtest_writeb(qts, G45_NAND_BASE + NAND_CLE, 0x30);
+    qtest_writel(qts, channel_base + DMAC_SADDR, G45_NAND_BASE);
+    qtest_writel(qts, channel_base + DMAC_DADDR, dst);
+    qtest_writel(qts, channel_base + DMAC_CTRLA,
+                 DMAC_CTRLA_BTSIZE(NAND_PAGE_RAW));
+    qtest_writel(qts, G45_DMAC_BASE + DMAC_CHER, DMAC_ENA(0));
+    wait_for_dmac_channel_disabled(qts, G45_DMAC_BASE, 0);
+    for (j = 0; j < NAND_PAGE_RAW; j++) {
+        g_assert_cmphex(qtest_readb(qts, dst + j), ==, 0xff);
+    }
+    qtest_quit(qts);
+
+    fd = open(image_path, O_RDONLY);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(pread(fd, media, NAND_PAGE_RAW,
+                          (off_t)row * NAND_PAGE_RAW), ==, NAND_PAGE_RAW);
+    close(fd);
+    for (j = 0; j < NAND_PAGE_RAW; j++) {
+        g_assert_cmphex(media[j], ==, 0xff);
+    }
     unlink(image_path);
 }
 
@@ -3713,6 +3964,12 @@ int main(int argc, char **argv)
                    test_hsmci_dma_odd_tail);
     qtest_add_func("/at91-dmac/g45/nand/dmac-page-read",
                    test_nand_dmac_page_read);
+    qtest_add_func("/at91-dmac/g45/hsmci0/multiblock-pio-vs-dma",
+                   test_hsmci_multiblock_pio_vs_dma);
+    qtest_add_func("/at91-dmac/g45/hsmci1/dma-data-read",
+                   test_hsmci1_dma_data_read);
+    qtest_add_func("/at91-dmac/g45/nand/dmac-program-erase",
+                   test_nand_dmac_program_erase);
     qtest_add_func("/at91-dmac/g45/hsmci0/mismatch-residue-migration",
                    test_hsmci_mismatch_residue_migration);
     qtest_add_func("/at91-dmac/g45/hsmci0/mismatch-card-in-progress-migration",

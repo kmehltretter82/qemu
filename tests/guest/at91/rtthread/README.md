@@ -284,9 +284,14 @@ path, reads both back and verifies the bytes reached the backing
 media file; dma-odd-tail covers a partial final word through the DMA
 route; and nand/dmac-page-read pulls whole raw pages 7/8/9 (main and
 OOB) through the central DMAC from the CS3 window, straddling the
-historical 512-byte-offset regression indices. Later phases cover the
-remaining storage vectors, rings, continuous fetch, cyclic streams,
-Linux companion tests, errors and soak.
+historical 512-byte-offset regression indices. The closing D4 rows add
+an eight-block CMD18 drained via PIO then DMA with 4 KiB byte
+equality, a slot-1 data vector through request 13, and a NAND
+program/erase cycle whose page data travels both directions through
+the DMAC with the media file checked at each stage. The HSMCI and
+NAND storage matrix is closed at qtest scope; next are the
+descriptor-owning engines (MACB, ISI, UDPHS), rings, continuous
+fetch, cyclic streams, Linux companion tests, errors and soak.
 
 Run the same payload on a physical SAM9M10-G45-EK when available. A QEMU pass
 is not evidence that cache maintenance or ordering is correct on non-coherent
