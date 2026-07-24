@@ -21,6 +21,8 @@
 
 #include "g45test.h"
 
+#define AIC_SMR(n)      (4U * (n))
+
 #define G45_RTT_BASE    0xfffffd20U
 #define G45_GPBR_BASE   0xfffffd60U
 #define G45_RTC_BASE    0xfffffdb0U
@@ -828,6 +830,140 @@ void g45test_irq_wired_or(struct g45test_result *result)
     *g45_reg(G45_AIC_BASE, AIC_IECR) = AIC_SYS;
 
     rt_kprintf("G45TEST DATA case=irq.wired-or drains=2x2\n");
+    g45ctrl_clock_stop();
+}
+
+static volatile rt_uint32_t g45ctrl_irq_log[4];
+static volatile rt_uint32_t g45ctrl_irq_log_n;
+
+static void g45ctrl_prio_handler(int vector, void *param)
+{
+    (void)param;
+    if (g45ctrl_irq_log_n < 4U) {
+        g45ctrl_irq_log[g45ctrl_irq_log_n] = (rt_uint32_t)vector;
+        g45ctrl_irq_log_n++;
+    }
+    /* Drain the device source; the line follows the flag down. */
+    switch (vector) {
+    case (int)G45_TWI1_PID:
+        (void)*g45_reg(G45_TWI1_BASE, TWI_SR);
+        break;
+    case (int)G45_SPI1_PID:
+        (void)*g45_reg(G45_SPI1_BASE, SPI_SPSR);
+        break;
+    case (int)G45_ADC_PID:
+        (void)*g45_reg(G45_ADC_BASE, ADC_LCDR);
+        break;
+    default:
+        break;
+    }
+}
+
+/*
+ * AIC priority ordering with three real, independently armed sources:
+ * TWI1 NACK (priority 1), SPI1 overrun (4) and TSADCC DRDY (7) all
+ * latch while the CPU is masked; on unmask the AIC must present them
+ * highest-priority-first.  The handlers drain through the same
+ * SR/LCDR reads real drivers use, so this also exercises both stale
+ * interrupt-line fixes through genuine vectored dispatch.  Nested
+ * preemption (a slow low-priority handler interrupted by a higher
+ * source) remains future work.
+ */
+void g45test_irq_priority_order(struct g45test_result *result)
+{
+    rt_uint32_t smr_twi, smr_spi, smr_adc;
+    rt_isr_handler_t old_twi, old_spi, old_adc;
+    rt_base_t level;
+    rt_uint32_t pending, start;
+
+    g45ctrl_clock_start();
+    *(volatile rt_uint32_t *)G45_PMC_PCER =
+        (1U << G45_TWI1_PID) | (1U << G45_SPI1_PID) | (1U << G45_ADC_PID);
+
+    smr_twi = *g45_reg(G45_AIC_BASE, AIC_SMR(G45_TWI1_PID));
+    smr_spi = *g45_reg(G45_AIC_BASE, AIC_SMR(G45_SPI1_PID));
+    smr_adc = *g45_reg(G45_AIC_BASE, AIC_SMR(G45_ADC_PID));
+    *g45_reg(G45_AIC_BASE, AIC_SMR(G45_TWI1_PID)) = (smr_twi & ~7U) | 1U;
+    *g45_reg(G45_AIC_BASE, AIC_SMR(G45_SPI1_PID)) = (smr_spi & ~7U) | 4U;
+    *g45_reg(G45_AIC_BASE, AIC_SMR(G45_ADC_PID)) = (smr_adc & ~7U) | 7U;
+
+    g45ctrl_irq_log_n = 0;
+    old_twi = rt_hw_interrupt_install(G45_TWI1_PID, g45ctrl_prio_handler,
+                                      RT_NULL, "g45prio-twi");
+    old_spi = rt_hw_interrupt_install(G45_SPI1_PID, g45ctrl_prio_handler,
+                                      RT_NULL, "g45prio-spi");
+    old_adc = rt_hw_interrupt_install(G45_ADC_PID, g45ctrl_prio_handler,
+                                      RT_NULL, "g45prio-adc");
+    rt_hw_interrupt_umask(G45_TWI1_PID);
+    rt_hw_interrupt_umask(G45_SPI1_PID);
+    rt_hw_interrupt_umask(G45_ADC_PID);
+
+    /* Latch all three sources with the CPU masked. */
+    level = rt_hw_interrupt_disable();
+    *g45_reg(G45_TWI1_BASE, TWI_CR) = TWI_CR_SWRST;
+    *g45_reg(G45_TWI1_BASE, TWI_MMR) = (0x03U << 16) | TWI_MMR_MREAD;
+    *g45_reg(G45_TWI1_BASE, TWI_IER) = TWI_SR_NACK;
+    *g45_reg(G45_TWI1_BASE, TWI_CR) = TWI_CR_MSEN;
+    *g45_reg(G45_TWI1_BASE, TWI_CR) = TWI_CR_START | TWI_CR_STOP;
+
+    *g45_reg(G45_SPI1_BASE, SPI_CR) = SPI_CR_SWRST;
+    *g45_reg(G45_SPI1_BASE, SPI_MR) = SPI_MR_MSTR;
+    *g45_reg(G45_SPI1_BASE, SPI_CSR0) = 0x00000102U;
+    *g45_reg(G45_SPI1_BASE, SPI_IER) = SPI_SR_OVRES;
+    *g45_reg(G45_SPI1_BASE, SPI_CR) = SPI_CR_SPIEN;
+    *g45_reg(G45_SPI1_BASE, SPI_TDR) = 0x11U;
+    *g45_reg(G45_SPI1_BASE, SPI_TDR) = 0x22U;
+
+    *g45_reg(G45_ADC_BASE, ADC_CR) = ADC_CR_SWRST;
+    *g45_reg(G45_ADC_BASE, ADC_CHER) = 0x01U;
+    *g45_reg(G45_ADC_BASE, ADC_IER) = ADC_SR_DRDY;
+    *g45_reg(G45_ADC_BASE, ADC_CR) = ADC_CR_START;
+
+    /* Give silicon conversion/transfer time; the model is synchronous. */
+    start = g45ctrl_clock_ms();
+    while (g45ctrl_clock_ms() - start < 5U) {
+    }
+    pending = *g45_reg(G45_AIC_BASE, AIC_IPR);
+    rt_hw_interrupt_enable(level);
+
+    g45test_check(result,
+                  (pending & ((1U << G45_TWI1_PID) | (1U << G45_SPI1_PID) |
+                              (1U << G45_ADC_PID))) ==
+                  ((1U << G45_TWI1_PID) | (1U << G45_SPI1_PID) |
+                   (1U << G45_ADC_PID)),
+                  (1U << G45_TWI1_PID) | (1U << G45_SPI1_PID) |
+                  (1U << G45_ADC_PID), pending, 0);
+
+    start = g45ctrl_clock_ms();
+    while (g45ctrl_irq_log_n < 3U && g45ctrl_clock_ms() - start < 100U) {
+    }
+    g45test_check(result, g45ctrl_irq_log_n == 3U, 3, g45ctrl_irq_log_n, 1);
+    g45test_check(result, g45ctrl_irq_log[0] == G45_ADC_PID,
+                  G45_ADC_PID, g45ctrl_irq_log[0], 2);
+    g45test_check(result, g45ctrl_irq_log[1] == G45_SPI1_PID,
+                  G45_SPI1_PID, g45ctrl_irq_log[1], 3);
+    g45test_check(result, g45ctrl_irq_log[2] == G45_TWI1_PID,
+                  G45_TWI1_PID, g45ctrl_irq_log[2], 4);
+
+    /* Teardown: quiesce devices, unhook vectors, restore priorities. */
+    *g45_reg(G45_TWI1_BASE, TWI_IDR) = 0xffffffffU;
+    *g45_reg(G45_TWI1_BASE, TWI_CR) = TWI_CR_SWRST;
+    *g45_reg(G45_SPI1_BASE, SPI_IDR) = 0xffffffffU;
+    *g45_reg(G45_SPI1_BASE, SPI_CR) = SPI_CR_SWRST;
+    *g45_reg(G45_ADC_BASE, ADC_IDR) = 0xffffffffU;
+    *g45_reg(G45_ADC_BASE, ADC_CR) = ADC_CR_SWRST;
+    rt_hw_interrupt_mask(G45_TWI1_PID);
+    rt_hw_interrupt_mask(G45_SPI1_PID);
+    rt_hw_interrupt_mask(G45_ADC_PID);
+    rt_hw_interrupt_install(G45_TWI1_PID, old_twi, RT_NULL, "g45prio-old");
+    rt_hw_interrupt_install(G45_SPI1_PID, old_spi, RT_NULL, "g45prio-old");
+    rt_hw_interrupt_install(G45_ADC_PID, old_adc, RT_NULL, "g45prio-old");
+    *g45_reg(G45_AIC_BASE, AIC_SMR(G45_TWI1_PID)) = smr_twi;
+    *g45_reg(G45_AIC_BASE, AIC_SMR(G45_SPI1_PID)) = smr_spi;
+    *g45_reg(G45_AIC_BASE, AIC_SMR(G45_ADC_PID)) = smr_adc;
+
+    rt_kprintf("G45TEST DATA case=irq.priority-order log=%u,%u,%u\n",
+               g45ctrl_irq_log[0], g45ctrl_irq_log[1], g45ctrl_irq_log[2]);
     g45ctrl_clock_stop();
 }
 
