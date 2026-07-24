@@ -7,6 +7,7 @@
 #include "libqtest.h"
 
 #define G45_DBGU_BASE          0xffffee00
+#define G35_DBGU_BASE          0xfffff200
 #define G45_SDRAM_BASE         0x70000000
 
 #define US_CR                  0x00
@@ -64,24 +65,35 @@ static void receive_exact(int fd, uint8_t *buffer, size_t length)
     }
 }
 
-static void test_thr_character(void)
+static void run_thr_character(const char *machine, uint64_t dbgu_base)
 {
+    g_autofree char *args = g_strdup_printf("-machine %s -S", machine);
     QTestState *qts;
     uint8_t byte;
     int sock_fd;
 
-    qts = qtest_init_with_serial("-machine sam9m10g45ek -S", &sock_fd);
+    qts = qtest_init_with_serial(args, &sock_fd);
 
-    g_assert_cmphex(qtest_readl(qts, G45_DBGU_BASE + US_CSR) &
+    g_assert_cmphex(qtest_readl(qts, dbgu_base + US_CSR) &
                     (US_TXRDY | US_TXEMPTY), ==, US_TXRDY | US_TXEMPTY);
-    qtest_writel(qts, G45_DBGU_BASE + US_THR, 'G');
+    qtest_writel(qts, dbgu_base + US_THR, 'G');
     receive_exact(sock_fd, &byte, 1);
     g_assert_cmphex(byte, ==, 'G');
-    g_assert_cmphex(qtest_readl(qts, G45_DBGU_BASE + US_CSR) &
+    g_assert_cmphex(qtest_readl(qts, dbgu_base + US_CSR) &
                     (US_TXRDY | US_TXEMPTY), ==, US_TXRDY | US_TXEMPTY);
 
     close(sock_fd);
     qtest_quit(qts);
+}
+
+static void test_thr_character(void)
+{
+    run_thr_character("sam9m10g45ek", G45_DBGU_BASE);
+}
+
+static void test_g35_thr_character(void)
+{
+    run_thr_character("sam9g35ek", G35_DBGU_BASE);
 }
 
 static void test_pdc_backpressure(void)
@@ -537,6 +549,7 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
 
     qtest_add_func("/at91-usart/thr/character", test_thr_character);
+    qtest_add_func("/at91-usart/g35/thr/character", test_g35_thr_character);
     qtest_add_func("/at91-usart/pdc/rx-buffer-handoff",
                    test_pdc_rx_buffer_handoff);
     qtest_add_func("/at91-usart/pdc/rx-late-next-promotion",
