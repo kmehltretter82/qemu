@@ -43,9 +43,14 @@
 #define SRC_MID         19
 #define SRC_HIGH        20
 
+static QTestState *aic_start_on(const char *machine)
+{
+    return qtest_initf("-machine %s", machine);
+}
+
 static QTestState *aic_start(void)
 {
-    return qtest_init("-machine sam9m10g45ek");
+    return aic_start_on("sam9m10g45ek");
 }
 
 static void aic_teardown(QTestState *qts, int src)
@@ -54,9 +59,11 @@ static void aic_teardown(QTestState *qts, int src)
     qtest_writel(qts, AIC_ICCR, 1u << src);
 }
 
+static const char *aic_machine = "sam9m10g45ek";
+
 static void test_vectored_dispatch(void)
 {
-    QTestState *qts = aic_start();
+    QTestState *qts = aic_start_on(aic_machine);
 
     qtest_writel(qts, AIC_SVR(SRC_MID), 0xaa550000 + SRC_MID);
     qtest_writel(qts, AIC_SMR(SRC_MID), SMR_EDGE | 3);
@@ -207,7 +214,7 @@ static void test_fast_forcing(void)
 
 static void test_protect_mode(void)
 {
-    QTestState *qts = aic_start();
+    QTestState *qts = aic_start_on(aic_machine);
 
     qtest_writel(qts, AIC_DCR, DCR_PROT);
     qtest_writel(qts, AIC_SVR(SRC_MID), 0xaa550000 + SRC_MID);
@@ -240,6 +247,22 @@ static void test_protect_mode(void)
     qtest_quit(qts);
 }
 
+/* The AIC sits at the same base on the SAM9x5: rerun the vectored
+ * dispatch and protect-mode contracts against the G35 machine. */
+static void test_g35_vectored_dispatch(void)
+{
+    aic_machine = "sam9g35ek";
+    test_vectored_dispatch();
+    aic_machine = "sam9m10g45ek";
+}
+
+static void test_g35_protect_mode(void)
+{
+    aic_machine = "sam9g35ek";
+    test_protect_mode();
+    aic_machine = "sam9m10g45ek";
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -249,5 +272,8 @@ int main(int argc, char **argv)
     qtest_add_func("/at91-aic/g45/fiq-edge-dispatch", test_fiq_edge_dispatch);
     qtest_add_func("/at91-aic/g45/fast-forcing", test_fast_forcing);
     qtest_add_func("/at91-aic/g45/protect-mode", test_protect_mode);
+    qtest_add_func("/at91-aic/g35/vectored-dispatch",
+                   test_g35_vectored_dispatch);
+    qtest_add_func("/at91-aic/g35/protect-mode", test_g35_protect_mode);
     return g_test_run();
 }
