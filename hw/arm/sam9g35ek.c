@@ -151,11 +151,19 @@
 #define SAM9X5_DMA0_REQ_HSMCI0 0
 #define SAM9X5_DMA0_REQ_SPI0_TX 1
 #define SAM9X5_DMA0_REQ_SPI0_RX 2
+#define SAM9X5_DMA0_REQ_USART0_TX 3
+#define SAM9X5_DMA0_REQ_USART0_RX 4
+#define SAM9X5_DMA0_REQ_USART1_TX 5
+#define SAM9X5_DMA0_REQ_USART1_RX 6
 #define SAM9X5_DMA0_REQ_SSC_TX 13
 #define SAM9X5_DMA0_REQ_SSC_RX 14
 #define SAM9X5_DMA1_REQ_HSMCI1 0
 #define SAM9X5_DMA1_REQ_SPI1_TX 1
 #define SAM9X5_DMA1_REQ_SPI1_RX 2
+#define SAM9X5_DMA1_REQ_DBGU_TX 8
+#define SAM9X5_DMA1_REQ_DBGU_RX 9
+#define SAM9X5_DMA1_REQ_USART2_TX 12
+#define SAM9X5_DMA1_REQ_USART2_RX 13
 
 /* Must match what the guest derives from the PMC reset values above:
  * PLLA = 12 MHz * 66 = 792 MHz, MCK = PLLA / PRES(2) / MDIV(3) = 132 MHz. */
@@ -196,6 +204,16 @@ static void sam9x5_create_hsmci(MachineState *machine, const char *name,
         qdev_realize_and_unref(card, qdev_get_child_bus(mci, "sd-bus"),
                                &error_fatal);
     }
+}
+
+/* Route a serial port's DMAC hardware request lines to its controller. */
+static void sam9x5_connect_usart_dma(DeviceState *port, DeviceState *dmac,
+                                     int tx_req, int rx_req)
+{
+    qdev_connect_gpio_out_named(port, AT91_USART_TX_DMA_REQUEST, 0,
+        qdev_get_gpio_in_named(dmac, AT91_DMAC_REQUEST_GPIO, tx_req));
+    qdev_connect_gpio_out_named(port, AT91_USART_RX_DMA_REQUEST, 0,
+        qdev_get_gpio_in_named(dmac, AT91_DMAC_REQUEST_GPIO, rx_req));
 }
 
 static void sam9g35ek_init(MachineState *machine)
@@ -281,17 +299,27 @@ static void sam9g35ek_init(MachineState *machine)
         int i;
 
         /* Hardware request lines with a modelled source, per controller:
-         * DMAC0: HSMCI0(0), SPI0 TX/RX(1,2), SSC TX/RX(13,14);
-         * DMAC1: HSMCI1(0), SPI1 TX/RX(1,2). */
+         * DMAC0: HSMCI0(0), SPI0 TX/RX(1,2), USART0 TX/RX(3,4),
+         *        USART1 TX/RX(5,6), SSC TX/RX(13,14);
+         * DMAC1: HSMCI1(0), SPI1 TX/RX(1,2), DBGU TX/RX(8,9),
+         *        USART2 TX/RX(12,13). */
         static const uint64_t req_mask[] = {
             (UINT64_C(1) << SAM9X5_DMA0_REQ_HSMCI0) |
             (UINT64_C(1) << SAM9X5_DMA0_REQ_SPI0_TX) |
             (UINT64_C(1) << SAM9X5_DMA0_REQ_SPI0_RX) |
+            (UINT64_C(1) << SAM9X5_DMA0_REQ_USART0_TX) |
+            (UINT64_C(1) << SAM9X5_DMA0_REQ_USART0_RX) |
+            (UINT64_C(1) << SAM9X5_DMA0_REQ_USART1_TX) |
+            (UINT64_C(1) << SAM9X5_DMA0_REQ_USART1_RX) |
             (UINT64_C(1) << SAM9X5_DMA0_REQ_SSC_TX) |
             (UINT64_C(1) << SAM9X5_DMA0_REQ_SSC_RX),
             (UINT64_C(1) << SAM9X5_DMA1_REQ_HSMCI1) |
             (UINT64_C(1) << SAM9X5_DMA1_REQ_SPI1_TX) |
-            (UINT64_C(1) << SAM9X5_DMA1_REQ_SPI1_RX),
+            (UINT64_C(1) << SAM9X5_DMA1_REQ_SPI1_RX) |
+            (UINT64_C(1) << SAM9X5_DMA1_REQ_DBGU_TX) |
+            (UINT64_C(1) << SAM9X5_DMA1_REQ_DBGU_RX) |
+            (UINT64_C(1) << SAM9X5_DMA1_REQ_USART2_TX) |
+            (UINT64_C(1) << SAM9X5_DMA1_REQ_USART2_RX),
         };
 
         for (i = 0; i < ARRAY_SIZE(dmac); i++) {
@@ -552,15 +580,32 @@ static void sam9g35ek_init(MachineState *machine)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dbgu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(dbgu), 0, SAM9X5_DBGU_BASE);
     sysbus_connect_irq(SYS_BUS_DEVICE(dbgu), 0, qdev_get_gpio_in(sys_or, 0));
+    /* Unlike the G45's PDC-fed DBGU, the SAM9x5 debug unit is a DMAC client
+     * (at91sam9x5.dtsi: dma1 requests 8/9), and Linux uses it for everything
+     * but the polled printk console - without these lines a shell on ttyS0
+     * prints nothing and accepts no keystroke. */
+    sam9x5_connect_usart_dma(dbgu, dmac_dev[1], SAM9X5_DMA1_REQ_DBGU_TX,
+                             SAM9X5_DMA1_REQ_DBGU_RX);
 
-    /* USART0-2 (ttyS1..3) + UART0-1 (ttyS4..5) on serial_hd(1..5). */
+    /* USART0-2 (ttyS1..3) + UART0-1 (ttyS4..5) on serial_hd(1..5).  The
+     * USARTs are DMAC clients like the DBGU; the two UARTs have no dmas
+     * entry in at91sam9x5.dtsi (dmac = -1 below). */
     {
-        static const struct { hwaddr base; int irq; } uart[] = {
-            { SAM9X5_USART0_BASE, SAM9X5_IRQ_USART0 },
-            { SAM9X5_USART1_BASE, SAM9X5_IRQ_USART1 },
-            { SAM9X5_USART2_BASE, SAM9X5_IRQ_USART2 },
-            { SAM9X5_UART0_BASE,  SAM9X5_IRQ_UART0 },
-            { SAM9X5_UART1_BASE,  SAM9X5_IRQ_UART1 },
+        static const struct {
+            hwaddr base;
+            int irq;
+            int dmac;
+            int tx_req;
+            int rx_req;
+        } uart[] = {
+            { SAM9X5_USART0_BASE, SAM9X5_IRQ_USART0, 0,
+              SAM9X5_DMA0_REQ_USART0_TX, SAM9X5_DMA0_REQ_USART0_RX },
+            { SAM9X5_USART1_BASE, SAM9X5_IRQ_USART1, 0,
+              SAM9X5_DMA0_REQ_USART1_TX, SAM9X5_DMA0_REQ_USART1_RX },
+            { SAM9X5_USART2_BASE, SAM9X5_IRQ_USART2, 1,
+              SAM9X5_DMA1_REQ_USART2_TX, SAM9X5_DMA1_REQ_USART2_RX },
+            { SAM9X5_UART0_BASE,  SAM9X5_IRQ_UART0, -1, 0, 0 },
+            { SAM9X5_UART1_BASE,  SAM9X5_IRQ_UART1, -1, 0, 0 },
         };
         int i;
 
@@ -572,6 +617,10 @@ static void sam9g35ek_init(MachineState *machine)
             sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, uart[i].base);
             sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
                                qdev_get_gpio_in(aic, uart[i].irq));
+            if (uart[i].dmac >= 0) {
+                sam9x5_connect_usart_dma(dev, dmac_dev[uart[i].dmac],
+                                         uart[i].tx_req, uart[i].rx_req);
+            }
         }
     }
 

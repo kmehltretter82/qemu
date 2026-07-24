@@ -104,6 +104,9 @@ struct AT91UsartState {
     MemoryRegion iomem;
     CharFrontend chr;
     qemu_irq irq;
+    qemu_irq tx_request;
+    qemu_irq rx_request;
+    QEMUBH *tx_request_bh;
     QEMUTimer *rx_timeout;
 
     uint32_t chip_id;   /* DBGU CIDR (0 = plain USART) */
@@ -120,6 +123,7 @@ struct AT91UsartState {
     bool     tx_enabled;
     uint8_t  tx_fifo;
     bool     tx_pending;
+    bool     tx_request_rearm;
     guint    watch_tag;
 
     /* PDC state */
@@ -168,6 +172,40 @@ static uint32_t usart_status(AT91UsartState *s)
 static void usart_update_irq(AT91UsartState *s)
 {
     qemu_set_irq(s->irq, (usart_status(s) & s->imr) ? 1 : 0);
+}
+
+/*
+ * Hardware DMA request lines, used by the SAM9x5-family boards whose DBGU
+ * and USARTs hang off the DMA controllers rather than the PDC.  The RX
+ * request follows RXRDY and is cleared by the controller's RHR read.  The
+ * TX request follows TXRDY, but transmission is synchronous here, so TXRDY
+ * never visibly drops: the request is lowered and re-raised through a
+ * bottom half so the controller sees one handshake edge per THR write,
+ * exactly like the SPI and SSC request lines.
+ */
+static void usart_update_dma_requests(AT91UsartState *s)
+{
+    qemu_set_irq(s->tx_request,
+                 s->tx_enabled && !s->tx_request_rearm && !s->tx_pending);
+    qemu_set_irq(s->rx_request, s->rx_enabled && s->rx_pending);
+}
+
+static void usart_tx_request_bh(void *opaque)
+{
+    AT91UsartState *s = opaque;
+
+    s->tx_request_rearm = false;
+    usart_update_dma_requests(s);
+}
+
+static void usart_rearm_tx_request(AT91UsartState *s)
+{
+    if (!s->tx_enabled) {
+        return;
+    }
+    s->tx_request_rearm = true;
+    usart_update_dma_requests(s);
+    qemu_bh_schedule(s->tx_request_bh);
 }
 
 static gboolean usart_transmit_watch(void *do_not_use, GIOCondition cond,
@@ -251,6 +289,7 @@ static void usart_transmit(AT91UsartState *s)
             }
         }
         usart_update_irq(s);
+        usart_update_dma_requests(s);
         return;
     }
 
@@ -283,6 +322,7 @@ static void usart_transmit(AT91UsartState *s)
     }
 
     usart_update_irq(s);
+    usart_update_dma_requests(s);
 }
 
 static gboolean usart_transmit_watch(void *do_not_use, GIOCondition cond,
@@ -316,6 +356,7 @@ static uint64_t usart_read(void *opaque, hwaddr offset, unsigned size)
         r = s->rx_fifo;
         s->rx_pending = false;
         usart_update_irq(s);
+        usart_update_dma_requests(s);
         qemu_chr_fe_accept_input(&s->chr);
         return r;
     case US_BRGR:  return s->brgr;
@@ -369,6 +410,7 @@ static void usart_write(void *opaque, hwaddr offset, uint64_t value,
             timer_del(s->rx_timeout);
         }
         usart_update_irq(s);
+        usart_update_dma_requests(s);
         break;
     case US_MR:    s->mr = value; break;
     case US_IER:   s->imr |= value;  usart_update_irq(s); break;
@@ -379,6 +421,7 @@ static void usart_write(void *opaque, hwaddr offset, uint64_t value,
             s->tx_pending = true;
             trace_at91_usart_tx(s->tx_fifo);
             usart_transmit(s);
+            usart_rearm_tx_request(s);
         } else {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "at91-usart: THR write while TXRDY is clear\n");
@@ -481,6 +524,7 @@ static void usart_receive(void *opaque, const uint8_t *buf, int size)
     s->rx_fifo = buf[0];
     s->rx_pending = true;
     usart_update_irq(s);
+    usart_update_dma_requests(s);
 }
 
 static void usart_reset(DeviceState *dev)
@@ -499,7 +543,12 @@ static void usart_reset(DeviceState *dev)
     if (s->rx_timeout) {
         timer_del(s->rx_timeout);
     }
+    s->tx_request_rearm = false;
+    if (s->tx_request_bh) {
+        qemu_bh_cancel(s->tx_request_bh);
+    }
     usart_update_irq(s);
+    usart_update_dma_requests(s);
 }
 
 static void usart_realize(DeviceState *dev, Error **errp)
@@ -519,6 +568,11 @@ static void usart_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &usart_ops, s, "at91-usart", 0x200);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->tx_request,
+                             AT91_USART_TX_DMA_REQUEST, 1);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->rx_request,
+                             AT91_USART_RX_DMA_REQUEST, 1);
+    s->tx_request_bh = qemu_bh_new(usart_tx_request_bh, s);
 }
 
 static const Property usart_properties[] = {
@@ -535,12 +589,16 @@ static int usart_post_load(void *opaque, int version_id)
         usart_transmit(s);
     }
     usart_update_irq(s);
+    usart_update_dma_requests(s);
+    if (s->tx_request_rearm) {
+        qemu_bh_schedule(s->tx_request_bh);
+    }
     return 0;
 }
 
 static const VMStateDescription vmstate_at91_usart = {
     .name = "at91-usart",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = usart_post_load,
     .fields = (const VMStateField[]) {
@@ -555,6 +613,7 @@ static const VMStateDescription vmstate_at91_usart = {
         VMSTATE_BOOL(tx_enabled, AT91UsartState),
         VMSTATE_UINT8_V(tx_fifo, AT91UsartState, 2),
         VMSTATE_BOOL_V(tx_pending, AT91UsartState, 2),
+        VMSTATE_BOOL_V(tx_request_rearm, AT91UsartState, 3),
         VMSTATE_UINT32(rpr, AT91UsartState),
         VMSTATE_UINT32(rcr, AT91UsartState),
         VMSTATE_UINT32(tpr, AT91UsartState),
