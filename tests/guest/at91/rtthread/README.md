@@ -216,6 +216,11 @@ The registry currently contains 47 cases:
   nested interrupt clobbers spsr_irq (BSP limitation; AIC-side nesting
   semantics belong to qtest).
 - Core: the 1 kHz scheduler runs and switches tasks for at least ten seconds.
+- Network (run-g45-network.py, separate runner): boots the
+  network-lwip-threadsafe profile against a slirp backend on a
+  192.168.1.0/24 subnet and proves the full MACB driver+lwip stack:
+  PHY link negotiation, a DHCP lease acquired through the model
+  (broadcast RX included) and ICMP echo replies from the gateway.
 
 The D1 suite performs 340,206 checks. It first found three deterministic bugs in
 the local QEMU HDMAC model: missing CHSR EMPTY reset bits, missing global-enable
