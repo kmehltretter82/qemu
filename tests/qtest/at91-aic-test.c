@@ -24,6 +24,12 @@
 #define AIC_EOICR       (AIC_BASE + 0x130)
 #define AIC_SPU         (AIC_BASE + 0x134)
 
+#define AIC_FVR         (AIC_BASE + 0x104)
+#define AIC_FFER        (AIC_BASE + 0x140)
+#define AIC_FFDR        (AIC_BASE + 0x144)
+#define AIC_FFSR        (AIC_BASE + 0x148)
+
+#define CISR_NFIQ       (1u << 0)
 #define CISR_NIRQ       (1u << 1)
 
 #define SMR_EDGE        (1u << 5)   /* SRCTYPE: positive edge */
@@ -139,11 +145,69 @@ static void test_priority_nesting(void)
     qtest_quit(qts);
 }
 
+static void test_fiq_edge_dispatch(void)
+{
+    QTestState *qts = aic_start();
+
+    qtest_writel(qts, AIC_SVR(0), 0xf1f00000);
+    qtest_writel(qts, AIC_SMR(0), SMR_EDGE);
+    qtest_writel(qts, AIC_IECR, 1u << 0);
+
+    /* Source 0 raises nFIQ only, never nIRQ. */
+    qtest_writel(qts, AIC_ISCR, 1u << 0);
+    g_assert_cmphex(qtest_readl(qts, AIC_CISR), ==, CISR_NFIQ);
+    g_assert_cmphex(qtest_readl(qts, AIC_IPR) & 1u, ==, 1u);
+
+    /* The FVR read is the acknowledgement for an edge fast interrupt. */
+    g_assert_cmphex(qtest_readl(qts, AIC_FVR), ==, 0xf1f00000);
+    g_assert_cmphex(qtest_readl(qts, AIC_IPR) & 1u, ==, 0);
+    g_assert_cmphex(qtest_readl(qts, AIC_CISR) & CISR_NFIQ, ==, 0);
+
+    aic_teardown(qts, 0);
+    qtest_quit(qts);
+}
+
+static void test_fast_forcing(void)
+{
+    QTestState *qts = aic_start();
+
+    qtest_writel(qts, AIC_SPU, 0x5b0b0b0b);
+    qtest_writel(qts, AIC_SVR(SRC_MID), 0xaa550000 + SRC_MID);
+    qtest_writel(qts, AIC_SMR(SRC_MID), SMR_EDGE | 3);
+    qtest_writel(qts, AIC_IECR, 1u << SRC_MID);
+
+    /* Fast-forced: the source now raises nFIQ instead of nIRQ... */
+    qtest_writel(qts, AIC_FFER, 1u << SRC_MID);
+    g_assert_cmphex(qtest_readl(qts, AIC_FFSR), ==, 1u << SRC_MID);
+    qtest_writel(qts, AIC_ISCR, 1u << SRC_MID);
+    g_assert_cmphex(qtest_readl(qts, AIC_CISR), ==, CISR_NFIQ);
+
+    /* ...and the IVR must not serve it: this read is spurious. */
+    g_assert_cmphex(qtest_readl(qts, AIC_IVR), ==, 0x5b0b0b0b);
+    qtest_writel(qts, AIC_EOICR, 0);
+
+    qtest_writel(qts, AIC_ICCR, 1u << SRC_MID);
+    g_assert_cmphex(qtest_readl(qts, AIC_CISR), ==, 0);
+
+    /* Disabling fast forcing restores normal nIRQ routing. */
+    qtest_writel(qts, AIC_FFDR, 1u << SRC_MID);
+    g_assert_cmphex(qtest_readl(qts, AIC_FFSR), ==, 0);
+    qtest_writel(qts, AIC_ISCR, 1u << SRC_MID);
+    g_assert_cmphex(qtest_readl(qts, AIC_CISR), ==, CISR_NIRQ);
+    g_assert_cmphex(qtest_readl(qts, AIC_IVR), ==, 0xaa550000 + SRC_MID);
+    qtest_writel(qts, AIC_EOICR, 0);
+
+    aic_teardown(qts, SRC_MID);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/at91-aic/g45/vectored-dispatch", test_vectored_dispatch);
     qtest_add_func("/at91-aic/g45/spurious-vector", test_spurious_vector);
     qtest_add_func("/at91-aic/g45/priority-nesting", test_priority_nesting);
+    qtest_add_func("/at91-aic/g45/fiq-edge-dispatch", test_fiq_edge_dispatch);
+    qtest_add_func("/at91-aic/g45/fast-forcing", test_fast_forcing);
     return g_test_run();
 }
