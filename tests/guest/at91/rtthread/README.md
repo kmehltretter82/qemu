@@ -276,8 +276,12 @@ playback chain at the 48 kHz default rate with read-to-clear ENDTX and
 the late-next promotion. The campaign count is 27 local QEMU behaviors
 (18 HDMAC, 3 USART, 3 PIO, 2 SSC, 1 AC97). The PDC current/next
 promotion contract is now pinned across all three PDC-bearing device
-classes. Later phases cover storage, rings, continuous fetch, cyclic
-streams, Linux companion tests, errors and soak.
+classes. D4 has opened with its first storage row: pio-vs-dma-media
+reads the same card block via the CPU path (DMAEN clear, RDR polling)
+and via the DMA route, requiring byte-for-byte equality with identical
+completed controller status. Later phases cover the remaining storage
+vectors, rings, continuous fetch, cyclic streams, Linux companion
+tests, errors and soak.
 
 Run the same payload on a physical SAM9M10-G45-EK when available. A QEMU pass
 is not evidence that cache maintenance or ordering is correct on non-coherent
