@@ -152,6 +152,7 @@ static uint64_t twi_read(void *opaque, hwaddr offset, unsigned size)
     case TWI_SR:
         r = s->sr;
         s->sr &= ~SR_NACK;          /* NACK is cleared by reading SR */
+        twi_update_irq(s);
         return r;
     case TWI_RHR:
         r = s->rhr;
