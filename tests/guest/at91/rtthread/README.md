@@ -223,7 +223,13 @@ The registry currently contains 47 cases:
   (broadcast RX included) and ICMP echo replies from the gateway,
   then a link-change torture: QMP set_link drops the backend, the PHY
   and driver must report link down, and after restoration traffic must
-  recover with fresh echo replies.
+  recover with fresh echo replies; then a 1400-byte UDP echo (the
+  full multi-buffer MSS frame class). The overlay's g45udp command
+  echoes exact-size datagrams for frame-size bisection; g45tcp and
+  g45tcpself reproduce a suspected RT-Thread lwip-port heap
+  double-free under streaming TCP (G45_NET_TCP=1 to include it; the
+  UDP matrix at every size 64-1472 exonerates the MACB model's data
+  path - see AGENTS.md).
 
 The D1 suite performs 340,206 checks. It first found three deterministic bugs in
 the local QEMU HDMAC model: missing CHSR EMPTY reset bits, missing global-enable
