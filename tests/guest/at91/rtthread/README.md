@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 32 cases:
+The registry currently contains 33 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -141,9 +141,13 @@ The registry currently contains 32 cases:
   interrupt, proven via AIC_IPR with the line masked and the PIT enable
   parked, and dropping on SCCR clear; RTT prescaler increments, clear-on-
   read status, level IRQ follow-down, monotonic VR and a VR+3 alarm; and
-  GPBR read/write persistence. Cases that assert the shared system IRQ
-  isolate it at the AIC and bound all waits with the free-running RTT
-  value instead of the (frozen) scheduler tick.
+  GPBR read/write persistence; and the TRNG's key-protected
+  enable/disable (wrong keys ignored in both directions), DATRDY while
+  enabled, quiet ISR/ODATA while disabled, an eight-word
+  distinctness/nonzero health check and the single-bit MR mask. Cases
+  that assert the shared system IRQ isolate it at the AIC and bound all
+  waits with the free-running RTT value instead of the (frozen)
+  scheduler tick.
 - Core: the 1 kHz scheduler runs and switches tasks for at least ten seconds.
 
 The D1 suite performs 340,206 checks. It first found three deterministic bugs in

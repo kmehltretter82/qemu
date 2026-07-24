@@ -26,6 +26,9 @@
 #define G45_RTC_BASE    0xfffffdb0U
 #define G45_AIC_BASE    0xfffff000U
 #define G45_PIT_BASE    0xfffffd30U
+#define G45_TRNG_BASE   0xfffcc000U
+#define G45_PMC_PCER    0xfffffc10U
+#define G45_TRNG_PID    6U
 
 #define RTC_CR          0x00U
 #define RTC_CR_UPDTIM   (1U << 0)
@@ -66,6 +69,14 @@
 
 #define PIT_MR          0x00U
 #define PIT_MR_PITIEN   (1U << 25)
+
+#define TRNG_CR         0x00U
+#define TRNG_MR         0x04U
+#define TRNG_ISR        0x1cU
+#define TRNG_ODATA      0x50U
+#define TRNG_KEY        0x524e4700U
+#define TRNG_CR_ENABLE  (1U << 0)
+#define TRNG_ISR_DATRDY (1U << 0)
 
 /* RTPRES for a ~1 ms RTT unit: 32 slow-clock cycles / 32768 Hz. */
 #define RTT_FAST_PRES   0x20U
@@ -380,6 +391,73 @@ void g45test_r4_rtt_increment_alarm(struct g45test_result *result)
 
     rt_kprintf("G45TEST DATA case=r4.rtt-increment-alarm sr=0x%08x "
                "vr=%u\n", sr, v2);
+}
+
+void g45test_r4_trng(struct g45test_result *result)
+{
+    rt_uint32_t words[8];
+    rt_uint32_t distinct = 0;
+    rt_uint32_t nonzero = 0;
+    rt_uint32_t i;
+
+    *(volatile rt_uint32_t *)G45_PMC_PCER = 1U << G45_TRNG_PID;
+
+    /* Correct-key disable first: a known-quiet starting state. */
+    *g45_reg(G45_TRNG_BASE, TRNG_CR) = TRNG_KEY;
+    g45test_check(result, *g45_reg(G45_TRNG_BASE, TRNG_ISR) == 0U,
+                  0, *g45_reg(G45_TRNG_BASE, TRNG_ISR), 0);
+    g45test_check(result, *g45_reg(G45_TRNG_BASE, TRNG_ODATA) == 0U,
+                  0, *g45_reg(G45_TRNG_BASE, TRNG_ODATA), 1);
+
+    /* The enable is key-protected: a wrong key must be ignored. */
+    *g45_reg(G45_TRNG_BASE, TRNG_CR) = 0x12345600U | TRNG_CR_ENABLE;
+    g45test_check(result, *g45_reg(G45_TRNG_BASE, TRNG_ISR) == 0U,
+                  0, *g45_reg(G45_TRNG_BASE, TRNG_ISR), 2);
+
+    *g45_reg(G45_TRNG_BASE, TRNG_CR) = TRNG_KEY | TRNG_CR_ENABLE;
+    g45test_check(result,
+                  (*g45_reg(G45_TRNG_BASE, TRNG_ISR) & TRNG_ISR_DATRDY)
+                  != 0U,
+                  TRNG_ISR_DATRDY, *g45_reg(G45_TRNG_BASE, TRNG_ISR), 3);
+
+    /*
+     * Health check, not a statistical proof: eight words must not all
+     * be identical and must not all be zero.
+     */
+    for (i = 0; i < 8U; i++) {
+        words[i] = *g45_reg(G45_TRNG_BASE, TRNG_ODATA);
+        if (words[i] != words[0]) {
+            distinct = 1;
+        }
+        if (words[i] != 0U) {
+            nonzero = 1;
+        }
+    }
+    g45test_check(result, distinct == 1U, 1, distinct, 4);
+    g45test_check(result, nonzero == 1U, 1, nonzero, 5);
+
+    /* A wrong-key disable must be ignored too... */
+    *g45_reg(G45_TRNG_BASE, TRNG_CR) = 0x00000100U;
+    g45test_check(result,
+                  (*g45_reg(G45_TRNG_BASE, TRNG_ISR) & TRNG_ISR_DATRDY)
+                  != 0U,
+                  TRNG_ISR_DATRDY, *g45_reg(G45_TRNG_BASE, TRNG_ISR), 6);
+
+    /* ...and the correct-key disable silences data and status. */
+    *g45_reg(G45_TRNG_BASE, TRNG_CR) = TRNG_KEY;
+    g45test_check(result, *g45_reg(G45_TRNG_BASE, TRNG_ISR) == 0U,
+                  0, *g45_reg(G45_TRNG_BASE, TRNG_ISR), 7);
+    g45test_check(result, *g45_reg(G45_TRNG_BASE, TRNG_ODATA) == 0U,
+                  0, *g45_reg(G45_TRNG_BASE, TRNG_ODATA), 8);
+
+    /* MR keeps only the half-rate bit. */
+    *g45_reg(G45_TRNG_BASE, TRNG_MR) = 0xffffffffU;
+    g45test_check(result, *g45_reg(G45_TRNG_BASE, TRNG_MR) == 1U,
+                  1, *g45_reg(G45_TRNG_BASE, TRNG_MR), 9);
+    *g45_reg(G45_TRNG_BASE, TRNG_MR) = 0U;
+
+    rt_kprintf("G45TEST DATA case=r4.trng w0=0x%08x w1=0x%08x\n",
+               words[0], words[1]);
 }
 
 void g45test_r4_gpbr(struct g45test_result *result)
