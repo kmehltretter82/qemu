@@ -76,6 +76,7 @@
 #define TC_CMR_LDRA(cmr)    (((cmr) >> 16) & 3)
 #define TC_CMR_LDRB(cmr)    (((cmr) >> 18) & 3)
 #define TC_CMR_ACTION(cmr, shift) (((cmr) >> (shift)) & 3)
+#define TC_CMR_ACPC(cmr)    (((cmr) >> 18) & 3)
 
 #define TC_WAVSEL_UP        0
 #define TC_WAVSEL_UPDOWN    1
@@ -157,6 +158,26 @@ static inline uint32_t tc_top(const AT91TcChan *c)
 
 /* Input clock in Hz for a channel; 0 if unmodelled (external XC input
  * other than the TIOA0 chain). */
+/*
+ * Ticks of channel 0 per full TIOA0 period as seen by the XC1 chain.
+ * With channel 0 in waveform UP_RC and ACPC toggling TIOA at each RC
+ * (the tcb_clksrc shape and the natural silicon configuration), TIOA0
+ * completes one period every 2*RC channel-0 ticks - RC = 0x8000 gives
+ * exactly the historical 65536.  Unrecognized shapes keep the 65536
+ * fallback rather than guessing at edge behaviour.
+ */
+static uint64_t tc_chain_divider(AT91TcState *s)
+{
+    const AT91TcChan *c0 = &s->ch[0];
+
+    if ((c0->cmr & TC_CMR_WAVE) &&
+        TC_CMR_WAVSEL(c0->cmr) == TC_WAVSEL_UP_RC &&
+        TC_CMR_ACPC(c0->cmr) == TC_ACT_TOGGLE && c0->rc != 0) {
+        return 2ull * c0->rc;
+    }
+    return 65536;
+}
+
 static uint64_t tc_rate(AT91TcState *s, int n)
 {
     static const uint32_t mck_div[4] = { 2, 8, 32, 128 };
@@ -169,9 +190,10 @@ static uint64_t tc_rate(AT91TcState *s, int n)
         return s->slck_freq;
     }
     /* XC inputs: model only XC1 = TIOA0 (the tcb_clksrc 16-bit chain):
-     * channel 0 produces one TIOA0 period per 65536 of its own ticks. */
+     * channel 0 produces one TIOA0 period per tc_chain_divider() of its
+     * own ticks. */
     if (n == 1 && tcclks == 6 && TC_BMR_TC1XC1S(s->bmr) == TC_XC1S_TIOA0) {
-        return tc_rate(s, 0) >> 16;
+        return tc_rate(s, 0) / tc_chain_divider(s);
     }
     return 0;
 }
@@ -194,7 +216,7 @@ static uint64_t tc_ticks(AT91TcState *s, int n, int64_t now)
         uint64_t delta = low_ticks >= s->ch[n].chain_origin ?
                          low_ticks - s->ch[n].chain_origin : 0;
 
-        return s->ch[n].ext_ticks + (delta >> 16);
+        return s->ch[n].ext_ticks + delta / tc_chain_divider(s);
     }
     return s->ch[n].ext_ticks +
            muldiv64(now - s->ch[n].epoch, rate, NANOSECONDS_PER_SECOND);
