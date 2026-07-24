@@ -9,6 +9,7 @@
 
 #define G45_HSMCI0_BASE       0xfff80000
 #define G45_HSMCI0_PATH       "/machine/hsmci0"
+#define G35_HSMCI0_BASE       0xf0008000
 #define G45_AIC_BASE          0xfffff000
 #define G45_AIC_IPR           0x10c
 #define G45_AIC_HSMCI0        (1u << 11)
@@ -146,7 +147,7 @@ static void test_g45_card_enumeration(void)
 
 static void test_g35_card_enumeration(void)
 {
-    run_card_enumeration("sam9g35ek", 0xf0008000);
+    run_card_enumeration("sam9g35ek", G35_HSMCI0_BASE);
 }
 
 static void test_write_protection_and_reset(void)
@@ -298,7 +299,12 @@ static void test_sdio_byte_tail_and_status(void)
     qtest_quit(qts);
 }
 
-static void test_active_command_migration(void)
+/*
+ * A command still counting down its CLKDIV=255 period must resume with the
+ * remaining time intact.  Both boards clock the controller from the same
+ * 132 MHz reset MCK, so only the controller base differs.
+ */
+static void run_active_command_migration(const char *machine, uint64_t base)
 {
     g_autofree char *state_path = NULL;
     g_autofree char *uri = NULL;
@@ -309,13 +315,15 @@ static void test_active_command_migration(void)
     g_assert_cmpint(fd, >=, 0);
     close(fd);
 
-    src = qtest_init("-machine sam9m10g45ek -S");
+    src = qtest_initf("-machine %s -S", machine);
     qtest_qmp_assert_success(src, "{ 'execute': 'cont' }");
-    hsmci_write(src, HSMCI_CR, HSMCI_CR_MCIEN);
-    hsmci_write(src, HSMCI_MR, 0xff);
-    hsmci_start_norsp(src, 0);
+    qtest_writel(src, base + HSMCI_CR, HSMCI_CR_MCIEN);
+    qtest_writel(src, base + HSMCI_MR, 0xff);
+    qtest_writel(src, base + HSMCI_ARGR, 0);
+    qtest_writel(src, base + HSMCI_CMDR, 0);
     qtest_clock_step(src, 50000);
-    g_assert_cmphex(hsmci_read(src, HSMCI_SR) & HSMCI_SR_CMDRDY, ==, 0);
+    g_assert_cmphex(qtest_readl(src, base + HSMCI_SR) & HSMCI_SR_CMDRDY,
+                    ==, 0);
 
     uri = g_strdup_printf("file:%s", state_path);
     qtest_qmp_assert_success(src,
@@ -323,17 +331,29 @@ static void test_active_command_migration(void)
     wait_for_migration_complete(src);
     qtest_quit(src);
 
-    dst = qtest_initf("-machine sam9m10g45ek -S -incoming %s", uri);
+    dst = qtest_initf("-machine %s -S -incoming %s", machine, uri);
     wait_for_migration_complete(dst);
-    g_assert_cmphex(hsmci_read(dst, HSMCI_SR) & HSMCI_SR_CMDRDY, ==, 0);
+    g_assert_cmphex(qtest_readl(dst, base + HSMCI_SR) & HSMCI_SR_CMDRDY,
+                    ==, 0);
     qtest_qmp_assert_success(dst, "{ 'execute': 'cont' }");
     qtest_clock_step(dst, CMD_CLKDIV255_NS - 50000 - 1);
-    g_assert_cmphex(hsmci_read(dst, HSMCI_SR) & HSMCI_SR_CMDRDY, ==, 0);
+    g_assert_cmphex(qtest_readl(dst, base + HSMCI_SR) & HSMCI_SR_CMDRDY,
+                    ==, 0);
     qtest_clock_step(dst, 1);
-    g_assert_cmphex(hsmci_read(dst, HSMCI_SR) & HSMCI_SR_CMDRDY, ==,
-                    HSMCI_SR_CMDRDY);
+    g_assert_cmphex(qtest_readl(dst, base + HSMCI_SR) & HSMCI_SR_CMDRDY,
+                    ==, HSMCI_SR_CMDRDY);
     qtest_quit(dst);
     unlink(state_path);
+}
+
+static void test_active_command_migration(void)
+{
+    run_active_command_migration("sam9m10g45ek", G45_HSMCI0_BASE);
+}
+
+static void test_g35_active_command_migration(void)
+{
+    run_active_command_migration("sam9g35ek", G35_HSMCI0_BASE);
 }
 
 /*
@@ -469,6 +489,8 @@ int main(int argc, char **argv)
                    test_g45_card_enumeration);
     qtest_add_func("/at91-hsmci/g35/card-enumeration",
                    test_g35_card_enumeration);
+    qtest_add_func("/at91-hsmci/g35/active-command-migration",
+                   test_g35_active_command_migration);
     qtest_add_func("/at91-hsmci/write-protection-reset",
                    test_write_protection_and_reset);
     qtest_add_func("/at91-hsmci/sdio-interrupt", test_sdio_interrupt);

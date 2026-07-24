@@ -173,7 +173,7 @@ static void test_watchdog_reset_action(void)
     qtest_quit(qts);
 }
 
-static void test_active_timer_migration(void)
+static void run_active_timer_migration(const char *machine, uint64_t base)
 {
     g_autofree char *state_path = NULL;
     g_autofree char *uri = NULL;
@@ -186,8 +186,8 @@ static void test_active_timer_migration(void)
     g_assert_cmpint(fd, >=, 0);
     close(fd);
 
-    src = qtest_init("-machine sam9m10g45ek -watchdog-action none -S");
-    qtest_writel(src, G45_WDT_BASE + WDT_MR, mr);
+    src = qtest_initf("-machine %s -watchdog-action none -S", machine);
+    qtest_writel(src, base + WDT_MR, mr);
     clock_step_to(src, 0, 3 * WDT_TICK_NS);
 
     uri = g_strdup_printf("file:%s", state_path);
@@ -196,26 +196,36 @@ static void test_active_timer_migration(void)
     wait_for_migration_complete(src);
     qtest_quit(src);
 
-    dst = qtest_initf("-machine sam9m10g45ek -watchdog-action none "
-                      "-S -incoming %s", uri);
+    dst = qtest_initf("-machine %s -watchdog-action none "
+                      "-S -incoming %s", machine, uri);
     wait_for_migration_complete(dst);
-    g_assert_cmphex(qtest_readl(dst, G45_WDT_BASE + WDT_MR), ==, mr);
+    g_assert_cmphex(qtest_readl(dst, base + WDT_MR), ==, mr);
     qtest_qmp_assert_success(dst, "{ 'execute': 'cont' }");
     target_clock = 5 * WDT_TICK_NS - 1;
     destination_clock = 0;
     destination_clock = clock_step_to(dst, destination_clock, target_clock);
-    g_assert_cmphex(qtest_readl(dst, G45_WDT_BASE + WDT_SR), ==, 0);
+    g_assert_cmphex(qtest_readl(dst, base + WDT_SR), ==, 0);
     clock_step_to(dst, destination_clock, target_clock + 1);
     g_assert_cmphex(qtest_readl(dst, AIC_BASE + AIC_IPR) & AIC_SYS_IRQ,
                     ==, AIC_SYS_IRQ);
-    g_assert_cmphex(qtest_readl(dst, G45_WDT_BASE + WDT_SR), ==,
-                    WDT_SR_WDUNF);
+    g_assert_cmphex(qtest_readl(dst, base + WDT_SR), ==, WDT_SR_WDUNF);
 
     /* The write-once lock is migration state too. */
-    qtest_writel(dst, G45_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
-    g_assert_cmphex(qtest_readl(dst, G45_WDT_BASE + WDT_MR), ==, mr);
+    qtest_writel(dst, base + WDT_MR, WDT_MR_WDDIS);
+    g_assert_cmphex(qtest_readl(dst, base + WDT_MR), ==, mr);
     qtest_quit(dst);
     unlink(state_path);
+}
+
+static void test_active_timer_migration(void)
+{
+    run_active_timer_migration("sam9m10g45ek", G45_WDT_BASE);
+}
+
+/* Same running-counter and write-once state at the SAM9x5 WDT base. */
+static void test_g35_active_timer_migration(void)
+{
+    run_active_timer_migration("sam9g35ek", G35_WDT_BASE);
 }
 
 static void test_g35_interrupt_wiring(void)
@@ -247,6 +257,8 @@ int main(int argc, char **argv)
                    test_active_timer_migration);
     qtest_add_func("/at91-wdt/g35/interrupt-wiring",
                    test_g35_interrupt_wiring);
+    qtest_add_func("/at91-wdt/g35/active-timer-migration",
+                   test_g35_active_timer_migration);
 
     return g_test_run();
 }

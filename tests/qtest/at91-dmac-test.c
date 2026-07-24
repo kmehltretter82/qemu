@@ -3938,19 +3938,27 @@ static void test_hsmci_dma_wait_migration(void)
     unlink(state_path);
 }
 
-static void test_dmac_software_request_migration(void)
+/*
+ * A suspended channel with a byte resident in the conversion FIFO and a
+ * software request already queued must resume exactly where it stopped.
+ * Parameterized so the same contract can be checked on a SAM9x5 board's
+ * second DMA controller instance.
+ */
+static void run_software_request_migration(const char *machine,
+                                           uint64_t dmac_base,
+                                           uint64_t sdram_base)
 {
     g_autofree char *state_path = NULL;
     g_autofree char *uri = NULL;
-    const uint64_t src_addr = G45_SDRAM_BASE + 0x14000;
-    const uint64_t dst_addr = G45_SDRAM_BASE + 0x15000;
+    const uint64_t src_addr = sdram_base + 0x14000;
+    const uint64_t dst_addr = sdram_base + 0x15000;
     const uint32_t ctrla = DMAC_CTRLA_BTSIZE(4) |
                            DMAC_CTRLA_SCSIZE(1) |
                            DMAC_CTRLA_DST_WIDTH_4;
     const uint32_t ctrlb = DMAC_CTRLB_FC_PER2MEM |
                            DMAC_CTRLB_SRC_DSCR_DIS |
                            DMAC_CTRLB_DST_DSCR_DIS;
-    const uint64_t channel_base = G45_DMAC_BASE + DMAC_CH0_BASE;
+    const uint64_t channel_base = dmac_base + DMAC_CH0_BASE;
     QTestState *src, *dst;
     uint32_t status;
     int fd;
@@ -3995,33 +4003,46 @@ static void test_dmac_software_request_migration(void)
     wait_for_migration_complete(src);
     qtest_quit(src);
 
-    dst = qtest_initf("-machine sam9m10g45ek -S -incoming %s", uri);
+    dst = qtest_initf("-machine %s -S -incoming %s", machine, uri);
     wait_for_migration_complete(dst);
-    status = qtest_readl(dst, G45_DMAC_BASE + DMAC_CHSR);
+    status = qtest_readl(dst, dmac_base + DMAC_CHSR);
     g_assert_cmphex(status & (DMAC_ENA(0) | DMAC_SUSP(0) | DMAC_EMPTY(0)),
                     ==, DMAC_ENA(0) | DMAC_SUSP(0));
-    g_assert_cmphex(qtest_readl(dst, G45_DMAC_BASE + DMAC_CREQ), ==,
+    g_assert_cmphex(qtest_readl(dst, dmac_base + DMAC_CREQ), ==,
                     DMAC_SCREQ(0));
     g_assert_cmphex(qtest_readl(dst, channel_base + DMAC_SADDR), ==,
                     src_addr + 1);
     g_assert_cmphex(qtest_readl(dst, channel_base + DMAC_DADDR), ==,
                     dst_addr);
     g_assert_cmphex(qtest_readl(dst, channel_base + DMAC_CTRLA) & 0xffff,
-                    ==, 3);
+                    ==, 1);
     g_assert_cmphex(qtest_readl(dst, dst_addr), ==, 0xdeadbeef);
 
-    qtest_writel(dst, G45_DMAC_BASE + DMAC_CHDR, DMAC_RES(0));
+    qtest_writel(dst, dmac_base + DMAC_CHDR, DMAC_RES(0));
     qtest_clock_step(dst, 1);
     g_assert_cmphex(qtest_readl(dst, dst_addr), ==, 0x44332211);
-    g_assert_cmphex(qtest_readl(dst, G45_DMAC_BASE + DMAC_CREQ), ==, 0);
-    g_assert_cmphex(qtest_readl(dst, G45_DMAC_BASE + DMAC_CHSR) &
+    g_assert_cmphex(qtest_readl(dst, dmac_base + DMAC_CREQ), ==, 0);
+    g_assert_cmphex(qtest_readl(dst, dmac_base + DMAC_CHSR) &
                     (DMAC_ENA(0) | DMAC_SUSP(0) | DMAC_EMPTY(0)), ==,
                     DMAC_EMPTY(0));
-    g_assert_cmphex(qtest_readl(dst, G45_DMAC_BASE + DMAC_EBCISR), ==,
+    g_assert_cmphex(qtest_readl(dst, dmac_base + DMAC_EBCISR), ==,
                     DMAC_BTC(0));
     qtest_quit(dst);
 
     unlink(state_path);
+}
+
+static void test_dmac_software_request_migration(void)
+{
+    run_software_request_migration("sam9m10g45ek", G45_DMAC_BASE,
+                                   G45_SDRAM_BASE);
+}
+
+/* The SAM9x5 board's second controller carries its own migration state. */
+static void test_g35_dmac1_software_request_migration(void)
+{
+    run_software_request_migration("sam9g35ek", G35_DMAC1_BASE,
+                                   G35_SDRAM_BASE);
 }
 
 static void test_dmac_pending_irq_migration(void)
@@ -4241,6 +4262,8 @@ int main(int argc, char **argv)
                    test_hsmci_active_request_migration);
     qtest_add_func("/at91-dmac/g45/software-request-migration",
                    test_dmac_software_request_migration);
+    qtest_add_func("/at91-dmac/g35/dmac1/software-request-migration",
+                   test_g35_dmac1_software_request_migration);
     qtest_add_func("/at91-dmac/g45/pending-irq-migration",
                    test_dmac_pending_irq_migration);
     qtest_add_func("/at91-dmac/g45/picture-in-picture-migration",
