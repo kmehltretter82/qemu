@@ -53,6 +53,7 @@
 #include "hw/ssi/ssi.h"
 #include "hw/i2c/at91_twi.h"
 #include "hw/misc/at91_pwm.h"
+#include "hw/usb/at91_udphs.h"
 #include "hw/misc/unimp.h"
 #include "qom/object.h"
 #include "target/arm/cpu-qom.h"
@@ -114,6 +115,8 @@
 #define SAM9X5_PWM_BASE       0xF8034000
 #define SAM9X5_RTT_BASE       0xFFFFFE20
 #define SAM9X5_GPBR_BASE      0xFFFFFE60
+#define SAM9X5_UDPHS_FIFO     0x00500000   /* USB device endpoint FIFO aperture */
+#define SAM9X5_UDPHS_BASE     0xF803C000
 
 /* Debug Unit chip identification (SAM9x5 base CIDR + G35 extension ID). */
 #define SAM9X5_CIDR           0x819A05A1
@@ -139,6 +142,7 @@
 #define SAM9X5_IRQ_DMA0       20
 #define SAM9X5_IRQ_DMA1       21
 #define SAM9X5_IRQ_UHPHS      22   /* USB host (OHCI + EHCI share this) */
+#define SAM9X5_IRQ_UDPHS      23
 #define SAM9X5_IRQ_MACB0      24
 #define SAM9X5_IRQ_HSMCI1     26
 #define SAM9X5_IRQ_SSC        28
@@ -391,6 +395,17 @@ static void sam9g35ek_init(MachineState *machine)
     /* PWM controller (register-level model). */
     sysbus_create_simple(TYPE_AT91_PWM, SAM9X5_PWM_BASE,
                          qdev_get_gpio_in(aic, SAM9X5_IRQ_PWM));
+
+    /* USB device port (UDPHS registers + endpoint FIFO aperture). */
+    {
+        DeviceState *udphs = qdev_new(TYPE_AT91_UDPHS);
+
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(udphs), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(udphs), 0, SAM9X5_UDPHS_FIFO);
+        sysbus_mmio_map(SYS_BUS_DEVICE(udphs), 1, SAM9X5_UDPHS_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(udphs), 0,
+                           qdev_get_gpio_in(aic, SAM9X5_IRQ_UDPHS));
+    }
 
     /* Battery-backed RTT (shared system interrupt) and GPBR. */
     {
