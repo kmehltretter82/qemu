@@ -76,6 +76,27 @@
 #define G45_ADC_PID     20U
 #define G45_TWI1_BASE   0xfff88000U
 #define G45_TWI1_PID    13U
+#define G45_SPI1_BASE   0xfffa8000U
+#define G45_SPI1_PID    15U
+
+#define SPI_CR          0x00U
+#define SPI_CR_SPIEN    (1U << 0)
+#define SPI_CR_SPIDIS   (1U << 1)
+#define SPI_CR_SWRST    (1U << 7)
+#define SPI_MR          0x04U
+#define SPI_MR_MSTR     (1U << 0)
+#define SPI_RDR         0x08U
+#define SPI_TDR         0x0cU
+#define SPI_SPSR        0x10U
+#define SPI_SR_RDRF     (1U << 0)
+#define SPI_SR_TDRE     (1U << 1)
+#define SPI_SR_OVRES    (1U << 3)
+#define SPI_SR_TXEMPTY  (1U << 9)
+#define SPI_SR_SPIENS   (1U << 16)
+#define SPI_IER         0x14U
+#define SPI_IDR         0x18U
+#define SPI_IMR         0x1cU
+#define SPI_CSR0        0x30U
 
 #define TWI_CR          0x00U
 #define TWI_CR_START    (1U << 0)
@@ -787,6 +808,97 @@ void g45test_r4_twi(struct g45test_result *result)
     *g45_reg(G45_TWI1_BASE, TWI_CR) = TWI_CR_SWRST;
 
     rt_kprintf("G45TEST DATA case=r4.twi sr_after_nack=0x%08x\n", sr);
+    g45ctrl_clock_stop();
+}
+
+/*
+ * SPI1 controller status and error mechanics.  Received data is never
+ * asserted (SPI1's MISO floats on the EK), only the status machine:
+ * RDRF/TDRE/TXEMPTY, the overrun from a second transfer completing
+ * with RDR unread, OVRES clear-on-SR-read with the interrupt line
+ * following (the r4 pattern that caught the TWI stale-NACK defect),
+ * and enable/disable status.  MODF is unmodelled - noted, not checked.
+ */
+void g45test_r4_spi(struct g45test_result *result)
+{
+    rt_uint32_t sr;
+
+    g45ctrl_clock_start();
+    *(volatile rt_uint32_t *)G45_PMC_PCER = 1U << G45_SPI1_PID;
+
+    *g45_reg(G45_SPI1_BASE, SPI_CR) = SPI_CR_SWRST;
+    sr = *g45_reg(G45_SPI1_BASE, SPI_SPSR);
+    g45test_check(result,
+                  (sr & (SPI_SR_TDRE | SPI_SR_TXEMPTY)) ==
+                  (SPI_SR_TDRE | SPI_SR_TXEMPTY),
+                  SPI_SR_TDRE | SPI_SR_TXEMPTY,
+                  sr & (SPI_SR_TDRE | SPI_SR_TXEMPTY), 0);
+    g45test_check(result, (sr & SPI_SR_SPIENS) == 0U,
+                  0, sr & SPI_SR_SPIENS, 1);
+
+    /* Master mode, 8-bit, a legal nonzero clock divider. */
+    *g45_reg(G45_SPI1_BASE, SPI_MR) = SPI_MR_MSTR;
+    *g45_reg(G45_SPI1_BASE, SPI_CSR0) = 0x00000102U;
+    *g45_reg(G45_SPI1_BASE, SPI_CR) = SPI_CR_SPIEN;
+    g45test_check(result,
+                  (*g45_reg(G45_SPI1_BASE, SPI_SPSR) & SPI_SR_SPIENS)
+                  != 0U,
+                  SPI_SR_SPIENS,
+                  *g45_reg(G45_SPI1_BASE, SPI_SPSR) & SPI_SR_SPIENS, 2);
+
+    /* One transfer fills RDR. */
+    *g45_reg(G45_SPI1_BASE, SPI_TDR) = 0xa5U;
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_SPI1_BASE, SPI_SPSR),
+                               SPI_SR_RDRF, RT_TRUE, 100U),
+                  SPI_SR_RDRF,
+                  *g45_reg(G45_SPI1_BASE, SPI_SPSR) & SPI_SR_RDRF, 3);
+
+    /* A second transfer with RDR unread must latch the overrun. */
+    *g45_reg(G45_SPI1_BASE, SPI_TDR) = 0x5aU;
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_SPI1_BASE, SPI_SPSR),
+                               SPI_SR_OVRES, RT_TRUE, 100U),
+                  SPI_SR_OVRES,
+                  *g45_reg(G45_SPI1_BASE, SPI_SPSR) & SPI_SR_OVRES, 4);
+
+    /* Rearm OVRES with the interrupt enabled and watch the AIC line. */
+    (void)*g45_reg(G45_SPI1_BASE, SPI_RDR);
+    (void)*g45_reg(G45_SPI1_BASE, SPI_SPSR);
+    *g45_reg(G45_SPI1_BASE, SPI_IER) = SPI_SR_OVRES;
+    g45test_check(result, *g45_reg(G45_SPI1_BASE, SPI_IMR) == SPI_SR_OVRES,
+                  SPI_SR_OVRES, *g45_reg(G45_SPI1_BASE, SPI_IMR), 5);
+    *g45_reg(G45_SPI1_BASE, SPI_TDR) = 0x11U;
+    g45ctrl_wait(g45_reg(G45_SPI1_BASE, SPI_SPSR), SPI_SR_RDRF,
+                 RT_TRUE, 100U);
+    *g45_reg(G45_SPI1_BASE, SPI_TDR) = 0x22U;
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_AIC_BASE, AIC_IPR),
+                               1U << G45_SPI1_PID, RT_TRUE, 100U),
+                  1U << G45_SPI1_PID,
+                  *g45_reg(G45_AIC_BASE, AIC_IPR) & (1U << G45_SPI1_PID),
+                  6);
+
+    /* Servicing the overrun by reading SR must drop the line. */
+    sr = *g45_reg(G45_SPI1_BASE, SPI_SPSR);
+    g45test_check(result, (sr & SPI_SR_OVRES) != 0U, SPI_SR_OVRES, sr, 7);
+    g45test_check(result,
+                  g45ctrl_wait(g45_reg(G45_AIC_BASE, AIC_IPR),
+                               1U << G45_SPI1_PID, RT_FALSE, 100U),
+                  0, *g45_reg(G45_AIC_BASE, AIC_IPR) & (1U << G45_SPI1_PID),
+                  8);
+
+    /* Drain and disable. */
+    (void)*g45_reg(G45_SPI1_BASE, SPI_RDR);
+    *g45_reg(G45_SPI1_BASE, SPI_IDR) = 0xffffffffU;
+    *g45_reg(G45_SPI1_BASE, SPI_CR) = SPI_CR_SPIDIS;
+    g45test_check(result,
+                  (*g45_reg(G45_SPI1_BASE, SPI_SPSR) & SPI_SR_SPIENS)
+                  == 0U,
+                  0, *g45_reg(G45_SPI1_BASE, SPI_SPSR) & SPI_SR_SPIENS, 9);
+    *g45_reg(G45_SPI1_BASE, SPI_CR) = SPI_CR_SWRST;
+
+    rt_kprintf("G45TEST DATA case=r4.spi sr=0x%08x\n", sr);
     g45ctrl_clock_stop();
 }
 

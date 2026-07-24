@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 36 cases:
+The registry currently contains 37 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -161,7 +161,11 @@ The registry currently contains 36 cases:
   read of reserved address 0x03 on the empty TWI1 bus with the
   interrupt observed pending and dropping at the AIC, and mask
   bookkeeping — its pending-line check found the model's stale-NACK
-  interrupt defect (fixed in c025cf5568). Cases
+  interrupt defect (fixed in c025cf5568). The SPI case runs the same
+  pattern on SPI1's status machine — idle flags, SPIENS, RDRF, overrun
+  from an unread RDR, OVRES pending/dropping at the AIC on SR read —
+  without asserting received data (MISO floats on the EK); it pinned
+  the matching stale-OVRES defect (fixed in 0548510ff0). Cases
   that assert the shared system IRQ isolate it at the AIC and bound all
   waits with the free-running RTT value instead of the (frozen)
   scheduler tick.
