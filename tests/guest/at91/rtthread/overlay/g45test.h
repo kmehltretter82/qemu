@@ -73,6 +73,7 @@ void g45test_irq_tc_oneshot(struct g45test_result *result);
 void g45test_irq_tc_chain(struct g45test_result *result);
 void g45test_irq_clock_ratios(struct g45test_result *result);
 void g45test_irq_random_inject(struct g45test_result *result);
+void g45test_irq_mck_mdiv(struct g45test_result *result);
 void g45test_r4_trng(struct g45test_result *result);
 void g45test_r4_gpbr(struct g45test_result *result);
 

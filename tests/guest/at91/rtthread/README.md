@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 47 cases:
+The registry currently contains 48 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -211,7 +211,12 @@ The registry currently contains 47 cases:
   CPU masked: a random pair of the three armable sources asserts, the
   IVR must serve the higher priority, a third source injects between
   IVR and EOI, and every subsequent IVR must present the highest
-  remaining until quiescence. nested preemption is descoped at
+  remaining until quiescence. The live master-clock case switches MDIV from /3
+  to /4 mid-run (documented MCKR-then-MCKRDY order), requires the
+  private PIT's measured rate to drop to about three quarters against
+  the MCK-independent RTT window, restores, and requires recovery -
+  console-silent while shifted, since a real board's UART baud rides
+  MCK. nested preemption is descoped at
   guest level - the ARM926 vector_irq never saves SPSR at entry, so a
   nested interrupt clobbers spsr_irq (BSP limitation; AIC-side nesting
   semantics belong to qtest).

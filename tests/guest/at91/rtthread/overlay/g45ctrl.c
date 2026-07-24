@@ -839,6 +839,10 @@ void g45test_irq_wired_or(struct g45test_result *result)
 
 #define G45_TCB0_BASE   0xfff7c000U
 #define G45_TCB_PID     18U
+#define G45_PMC_BASE    0xfffffc00U
+#define PMC_MCKR        0x30U
+#define PMC_SR          0x68U
+#define PMC_SR_MCKRDY   (1U << 3)
 
 #define TC_CCR          0x00U
 #define TC_CCR_CLKEN    (1U << 0)
@@ -933,6 +937,67 @@ void g45test_irq_pit_ack(struct g45test_result *result)
 
     rt_kprintf("G45TEST DATA case=irq.pit-ack picnt=0x%03x\n",
                PIT_PICNT(v1));
+    g45ctrl_clock_stop();
+}
+
+/* Count private-PIT intervals over an RTT-bounded window (~window ms). */
+static rt_uint32_t g45ctrl_pit_rate(rt_uint32_t window_ms)
+{
+    rt_uint32_t start;
+
+    (void)*g45_reg(G45_PIT_BASE, PIT_PIVR);
+    start = g45ctrl_clock_ms();
+    while (g45ctrl_clock_ms() - start < window_ms) {
+    }
+    return PIT_PICNT(*g45_reg(G45_PIT_BASE, PIT_PIIR));
+}
+
+/*
+ * Live master-clock change propagation: the PIT counts MCK/16 while
+ * the RTT window is slow-clock-derived and MCK-independent.  Switching
+ * MDIV from /3 to /4 must scale the measured PIT rate to ~75% and
+ * restoring must bring it back.  The case stays console-silent while
+ * the clock is shifted - on silicon the UART baud rides MCK and would
+ * garble - and follows the documented order (write MCKR, poll MCKRDY).
+ */
+void g45test_irq_mck_mdiv(struct g45test_result *result)
+{
+    rt_uint32_t pit_mr, mckr, r1, r2, r3;
+
+    g45ctrl_clock_start();
+    *g45_reg(G45_AIC_BASE, AIC_IDCR) = AIC_SYS;
+    pit_mr = *g45_reg(G45_PIT_BASE, PIT_MR);
+    mckr = *g45_reg(G45_PMC_BASE, PMC_MCKR);
+    *g45_reg(G45_PIT_BASE, PIT_MR) = 8249U | PIT_MR_PITEN;
+
+    r1 = g45ctrl_pit_rate(20U);
+
+    /* MDIV /3 (idx 3) -> /4 (idx 2): MCK drops to three quarters. */
+    *g45_reg(G45_PMC_BASE, PMC_MCKR) = (mckr & ~(3U << 8)) | (2U << 8);
+    g45ctrl_wait(g45_reg(G45_PMC_BASE, PMC_SR), PMC_SR_MCKRDY,
+                 RT_TRUE, 100U);
+    r2 = g45ctrl_pit_rate(20U);
+
+    *g45_reg(G45_PMC_BASE, PMC_MCKR) = mckr;
+    g45ctrl_wait(g45_reg(G45_PMC_BASE, PMC_SR), PMC_SR_MCKRDY,
+                 RT_TRUE, 100U);
+    r3 = g45ctrl_pit_rate(20U);
+
+    *g45_reg(G45_PIT_BASE, PIT_MR) = pit_mr;
+    (void)*g45_reg(G45_PIT_BASE, PIT_PIVR);
+    *g45_reg(G45_AIC_BASE, AIC_ICCR) = AIC_SYS;
+    *g45_reg(G45_AIC_BASE, AIC_IECR) = AIC_SYS;
+
+    g45test_check(result, r1 >= 12U && r1 <= 30U, 20U, r1, 0);
+    /* three-quarter rate, generous bands */
+    g45test_check(result,
+                  r2 * 100U >= r1 * 55U && r2 * 100U <= r1 * 92U,
+                  (r1 * 3U) / 4U, r2, 1);
+    g45test_check(result,
+                  r3 * 100U >= r1 * 80U && r3 * 100U <= r1 * 120U,
+                  r1, r3, 2);
+    rt_kprintf("G45TEST DATA case=irq.mck-mdiv r1=%u r2=%u r3=%u\n",
+               r1, r2, r3);
     g45ctrl_clock_stop();
 }
 

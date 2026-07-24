@@ -495,6 +495,7 @@ static const struct g45test_case g45test_cases[] = {
     { "irq.tc-chain", "irq", "IRQ", g45test_irq_tc_chain },
     { "irq.clock-ratios", "irq", "IRQ", g45test_irq_clock_ratios },
     { "irq.random-inject", "irq", "IRQ", g45test_irq_random_inject },
+    { "irq.mck-mdiv", "irq", "IRQ", g45test_irq_mck_mdiv },
     { "r4.trng", "r4", "R4", g45test_r4_trng },
     { "r4.gpbr", "r4", "R4", g45test_r4_gpbr },
     { "core.scheduler", "core", "CORE", g45test_core_scheduler },
