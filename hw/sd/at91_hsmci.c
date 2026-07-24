@@ -980,7 +980,14 @@ static void hsmci_finalize(Object *obj)
     timer_free(s->command_timer);
     timer_free(s->transfer_timer);
     timer_free(s->timeout_timer);
-    qemu_bh_delete(s->dma_request_bh);
+    /*
+     * An instance that was never realized - QMP device-list-properties
+     * creates one - has no bottom half yet, and qemu_bh_delete() is not
+     * NULL-tolerant the way timer_free() is.
+     */
+    if (s->dma_request_bh) {
+        qemu_bh_delete(s->dma_request_bh);
+    }
 }
 
 static int hsmci_pre_save(void *opaque)
