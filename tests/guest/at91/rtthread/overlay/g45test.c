@@ -491,6 +491,7 @@ static const struct g45test_case g45test_cases[] = {
     { "irq.wired-or", "irq", "IRQ", g45test_irq_wired_or },
     { "irq.priority-order", "irq", "IRQ", g45test_irq_priority_order },
     { "irq.pit-ack", "irq", "IRQ", g45test_irq_pit_ack },
+    { "irq.tc-oneshot", "irq", "IRQ", g45test_irq_tc_oneshot },
     { "r4.trng", "r4", "R4", g45test_r4_trng },
     { "r4.gpbr", "r4", "R4", g45test_r4_gpbr },
     { "core.scheduler", "core", "CORE", g45test_core_scheduler },

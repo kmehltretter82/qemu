@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 43 cases:
+The registry currently contains 44 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -195,8 +195,14 @@ The registry currently contains 43 cases:
   RTT-bounded interval counts, PIIR observing without acknowledging,
   and the PIVR read-clear of PICNT and PITS proven with interval
   generation frozen first (PICNT saturate-versus-wrap at 0xfff is
-  deliberately unasserted pending a datasheet check). The randomized
-  IVR/EOI-injection and nested-preemption variants remain future work.
+  deliberately unasserted pending a datasheet check). The TC one-shot case
+  runs channel 0 in UP_RC on the slow clock with CPCDIS: CPCS latches
+  and reaches the shared TCB AIC source, the stopped clock makes the
+  clear-on-read proof race-free by construction, and a fresh
+  CLKEN+SWTRG re-fires — XC/TIOA chaining is deliberately unasserted
+  (the model divides by the fixed tcb_clksrc 65536 shape instead of
+  counting TIOA edges). The randomized IVR/EOI-injection and
+  nested-preemption variants remain future work.
 - Core: the 1 kHz scheduler runs and switches tasks for at least ten seconds.
 
 The D1 suite performs 340,206 checks. It first found three deterministic bugs in
