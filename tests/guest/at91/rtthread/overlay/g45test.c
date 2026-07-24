@@ -475,6 +475,13 @@ static const struct g45test_case g45test_cases[] = {
     { "d1.irq-mask", "d1", "D1", g45test_d1_irq_mask },
     { "d2.subbuffer-arbitration", "d2", "D2",
       g45test_d2_subbuffer_arbitration },
+    { "r4.rtc-update-protocol", "r4", "R4",
+      g45test_r4_rtc_update_protocol },
+    { "r4.rtc-leap-rollover", "r4", "R4", g45test_r4_rtc_leap_rollover },
+    { "r4.rtc-alarm-irq", "r4", "R4", g45test_r4_rtc_alarm_irq },
+    { "r4.rtt-increment-alarm", "r4", "R4",
+      g45test_r4_rtt_increment_alarm },
+    { "r4.gpbr", "r4", "R4", g45test_r4_gpbr },
     { "core.scheduler", "core", "CORE", g45test_core_scheduler },
 };
 

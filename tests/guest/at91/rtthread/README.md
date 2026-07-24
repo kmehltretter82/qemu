@@ -107,7 +107,7 @@ check number, expected and actual values, and byte/register offset.
 
 ## Current coverage
 
-The registry currently contains 27 cases:
+The registry currently contains 32 cases:
 
 - D0: guarded patterns, boundary/alignment copies, canary self-tests,
   deterministic PRNG/CRC32, and the ARM926 drain-write-buffer barrier.
@@ -133,6 +133,17 @@ The registry currently contains 27 cases:
   at chunk granularity so the long channel's tail lands last, while fixed
   priority drains the lower channel first so the short channel's word lands
   last, independent of the starting cursor.
+- R4 (control peripherals, g45ctrl.c): the RTC update protocol
+  (ACKUPD handshake, CR readback, frozen counter while stopped, restart
+  after set); leap-day rollover through the real BCD calendar (2028-02-28
+  to 02-29, 2027-02-28 to 03-01) with coherent double-reads; the RTC
+  second-match alarm latching SR and asserting the wired-OR system
+  interrupt, proven via AIC_IPR with the line masked and the PIT enable
+  parked, and dropping on SCCR clear; RTT prescaler increments, clear-on-
+  read status, level IRQ follow-down, monotonic VR and a VR+3 alarm; and
+  GPBR read/write persistence. Cases that assert the shared system IRQ
+  isolate it at the AIC and bound all waits with the free-running RTT
+  value instead of the (frozen) scheduler tick.
 - Core: the 1 kHz scheduler runs and switches tasks for at least ten seconds.
 
 The D1 suite performs 340,206 checks. It first found three deterministic bugs in

@@ -55,4 +55,10 @@ void g45test_d1_mixed_software_requests(struct g45test_result *result);
 void g45test_d1_irq(struct g45test_result *result);
 void g45test_d1_irq_mask(struct g45test_result *result);
 
+void g45test_r4_rtc_update_protocol(struct g45test_result *result);
+void g45test_r4_rtc_leap_rollover(struct g45test_result *result);
+void g45test_r4_rtc_alarm_irq(struct g45test_result *result);
+void g45test_r4_rtt_increment_alarm(struct g45test_result *result);
+void g45test_r4_gpbr(struct g45test_result *result);
+
 #endif /* G45TEST_H */
