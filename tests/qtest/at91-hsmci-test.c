@@ -92,6 +92,63 @@ static void hsmci_start_norsp(QTestState *qts, uint32_t extra)
     hsmci_write(qts, HSMCI_CMDR, extra);
 }
 
+/*
+ * Full card enumeration at a given board's HSMCI base: the identify
+ * sequence a real driver runs (CMD0, ACMD41, CMD2, CMD3) must yield a
+ * nonzero RCA.  Shared between the G45 and the SAM9x5-family G35 so a
+ * board-wiring regression (missing card, broken bus routing) surfaces
+ * here rather than as a silent Linux mount timeout.
+ */
+static void run_card_enumeration(const char *machine, uint64_t base)
+{
+    g_autofree char *image_path = NULL;
+    QTestState *qts;
+    uint32_t rca;
+    int fd;
+
+    fd = g_file_open_tmp("at91-hsmci-enum-XXXXXX", &image_path, NULL);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, 4 * 1024 * 1024), ==, 0);
+    close(fd);
+
+    qts = qtest_initf("-machine %s -S "
+                      "-drive if=sd,index=0,format=raw,file=%s",
+                      machine, image_path);
+    qtest_qmp_assert_success(qts, "{ 'execute': 'cont' }");
+
+    qtest_writel(qts, base + HSMCI_CR, HSMCI_CR_MCIEN);
+    qtest_writel(qts, base + HSMCI_ARGR, 0);
+    qtest_writel(qts, base + HSMCI_CMDR, 0);
+    qtest_clock_step(qts, 4000);
+    qtest_writel(qts, base + HSMCI_ARGR, 0);
+    qtest_writel(qts, base + HSMCI_CMDR, 55 | (1u << 6));
+    qtest_clock_step(qts, 4000);
+    qtest_writel(qts, base + HSMCI_ARGR, 0x00ff8000);
+    qtest_writel(qts, base + HSMCI_CMDR, 41 | (1u << 6));
+    qtest_clock_step(qts, 4000);
+    qtest_writel(qts, base + HSMCI_ARGR, 0);
+    qtest_writel(qts, base + HSMCI_CMDR, 2 | (2u << 6));
+    qtest_clock_step(qts, 4000);
+    qtest_writel(qts, base + HSMCI_ARGR, 0);
+    qtest_writel(qts, base + HSMCI_CMDR, 3 | (1u << 6));
+    qtest_clock_step(qts, 4000);
+
+    rca = qtest_readl(qts, base + 0x20) & 0xffff0000;
+    g_assert_cmphex(rca, !=, 0);
+    qtest_quit(qts);
+    unlink(image_path);
+}
+
+static void test_g45_card_enumeration(void)
+{
+    run_card_enumeration("sam9m10g45ek", G45_HSMCI0_BASE);
+}
+
+static void test_g35_card_enumeration(void)
+{
+    run_card_enumeration("sam9g35ek", 0xf0008000);
+}
+
 static void test_write_protection_and_reset(void)
 {
     QTestState *qts = qtest_init("-machine sam9m10g45ek -S");
@@ -408,6 +465,10 @@ int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
 
+    qtest_add_func("/at91-hsmci/g45/card-enumeration",
+                   test_g45_card_enumeration);
+    qtest_add_func("/at91-hsmci/g35/card-enumeration",
+                   test_g35_card_enumeration);
     qtest_add_func("/at91-hsmci/write-protection-reset",
                    test_write_protection_and_reset);
     qtest_add_func("/at91-hsmci/sdio-interrupt", test_sdio_interrupt);

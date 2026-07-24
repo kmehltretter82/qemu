@@ -446,6 +446,7 @@ static void sam9g35ek_init(MachineState *machine)
             { SAM9X5_PIOA_BASE, false, 0 }, { SAM9X5_PIOB_BASE, false, 1 },
             { SAM9X5_PIOC_BASE, true,  0 }, { SAM9X5_PIOD_BASE, true,  1 },
         };
+        DeviceState *piod = NULL;
         int i;
 
         for (i = 0; i < ARRAY_SIZE(pio); i++) {
@@ -457,7 +458,19 @@ static void sam9g35ek_init(MachineState *machine)
             sysbus_connect_irq(SYS_BUS_DEVICE(p), 0,
                                qdev_get_gpio_in(pio[i].cd ? piocd_or : pioab_or,
                                                 pio[i].line));
+            if (pio[i].base == SAM9X5_PIOD_BASE) {
+                piod = p;
+            }
         }
+
+        /* SD card-detect switches: mmc0 on PD15, mmc1 on PD14.  The
+         * at91sam9x5ek.dtsi writes GPIO_ACTIVE_HIGH into cd-gpios, but
+         * the atmel_mci driver's legacy slot binding IGNORES that flag -
+         * polarity comes only from a (here absent) "cd-inverted"
+         * property, so the driver treats the switch as active-low: a
+         * present card holds the pin LOW, exactly as on the G45 board. */
+        pio_set_reset_input(piod, 15, drive_get(IF_SD, 0, 0) == NULL);
+        pio_set_reset_input(piod, 14, drive_get(IF_SD, 0, 1) == NULL);
     }
 
     /* Ethernet (10/100 EMAC, Cadence "macb"). */
