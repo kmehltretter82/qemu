@@ -933,6 +933,65 @@ void g45test_irq_pit_ack(struct g45test_result *result)
 }
 
 /*
+ * Clock-tree rate cross-measurement, no live changes: the PIT counts
+ * MCK/16, TC channel 0 and the RTT both derive from the 32.768 kHz
+ * slow clock (TIMER_CLOCK5 and /32 prescale).  All three run over one
+ * RTT-bounded ~50 ms window and their pairwise ratios must land in
+ * tolerant bands - proving the modeled master-versus-slow clock tree
+ * is coherent.  Live PMC changes mid-flight stay future work.  Nested
+ * interrupt preemption is formally descoped at guest level: the
+ * RT-Thread ARM926 vector_irq never saves SPSR at entry, so a nested
+ * IRQ clobbers spsr_irq and the outer return corrupts CPSR.
+ */
+void g45test_irq_clock_ratios(struct g45test_result *result)
+{
+    rt_uint32_t pit_mr, picnt, cv, ms, start;
+
+    g45ctrl_clock_start();
+    *(volatile rt_uint32_t *)G45_PMC_PCER = 1U << G45_TCB_PID;
+    *g45_reg(G45_AIC_BASE, AIC_IDCR) = AIC_SYS;
+    pit_mr = *g45_reg(G45_PIT_BASE, PIT_MR);
+
+    /* Private ~1 ms PIT, free-running slow-clock TC channel 0. */
+    *g45_reg(G45_PIT_BASE, PIT_MR) = 8249U | PIT_MR_PITEN;
+    (void)*g45_reg(G45_PIT_BASE, PIT_PIVR);
+    *g45_reg(G45_TCB0_BASE, TC_CCR) = TC_CCR_CLKDIS;
+    *g45_reg(G45_TCB0_BASE, TC_CMR) = 4U | (1U << 15);   /* slck, WAVE UP */
+    *g45_reg(G45_TCB0_BASE, TC_CCR) = TC_CCR_CLKEN | TC_CCR_SWTRG;
+
+    start = g45ctrl_clock_ms();
+    while (g45ctrl_clock_ms() - start < 50U) {
+    }
+    ms = g45ctrl_clock_ms() - start;
+    picnt = PIT_PICNT(*g45_reg(G45_PIT_BASE, PIT_PIIR));
+    cv = *g45_reg(G45_TCB0_BASE, TC_CV);
+
+    /* PIT intervals track RTT milliseconds (both ~1 ms units). */
+    g45test_check(result,
+                  picnt * 10U >= ms * 6U && picnt * 10U <= ms * 14U,
+                  ms, picnt, 0);
+    /* TC slow-clock ticks: 32 per RTT unit (RTPRES 0x20). */
+    g45test_check(result,
+                  cv >= ms * 20U && cv <= ms * 45U,
+                  ms * 32U, cv, 1);
+    /* Cross ratio: TC ticks per PIT interval about 32.768/1.000. */
+    g45test_check(result,
+                  cv >= picnt * 20U && cv <= picnt * 48U,
+                  picnt * 33U, cv, 2);
+
+    *g45_reg(G45_TCB0_BASE, TC_CCR) = TC_CCR_CLKDIS;
+    (void)*g45_reg(G45_TCB0_BASE, TC_SR);
+    *g45_reg(G45_PIT_BASE, PIT_MR) = pit_mr;
+    (void)*g45_reg(G45_PIT_BASE, PIT_PIVR);
+    *g45_reg(G45_AIC_BASE, AIC_ICCR) = AIC_SYS;
+    *g45_reg(G45_AIC_BASE, AIC_IECR) = AIC_SYS;
+
+    rt_kprintf("G45TEST DATA case=irq.clock-ratios ms=%u picnt=%u cv=%u\n",
+               ms, picnt, cv);
+    g45ctrl_clock_stop();
+}
+
+/*
  * TC0 channel 0 one-shot: WAVSEL=UP_RC on the 32.768 kHz slow clock
  * with CPCDIS, RC = 33 (~1 ms).  The RC compare must latch CPCS, stop
  * the clock (so the clear-on-read proof is race-free by construction),
