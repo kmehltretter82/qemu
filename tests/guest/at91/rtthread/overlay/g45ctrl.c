@@ -850,6 +850,13 @@ void g45test_irq_wired_or(struct g45test_result *result)
 #define TC_IMR          0x2cU
 /* TIMER_CLOCK5 | WAVE | WAVSEL=UP_RC | CPCDIS */
 #define TC_CMR_ONESHOT  (4U | (1U << 15) | (2U << 13) | (1U << 7))
+#define TC_CH1          0x40U
+#define TC_BMR          0xc4U
+/* TIMER_CLOCK5 | WAVE | WAVSEL=UP_RC | ACPC=toggle */
+#define TC_CMR_TIOAGEN  (4U | (1U << 15) | (2U << 13) | (3U << 18))
+/* XC1 | WAVE | WAVSEL=UP (free-running on the chained input) */
+#define TC_CMR_XC1UP    (6U | (1U << 15))
+#define TC_BMR_XC1_TIOA0 (2U << 2)
 
 #define PIT_SR          0x04U
 #define PIT_PIVR        0x08U
@@ -986,6 +993,56 @@ void g45test_irq_tc_oneshot(struct g45test_result *result)
     *g45_reg(G45_AIC_BASE, AIC_ICCR) = 1U << G45_TCB_PID;
 
     rt_kprintf("G45TEST DATA case=irq.tc-oneshot cv=%u\n", cv);
+    g45ctrl_clock_stop();
+}
+
+/*
+ * Chained channels: channel 0 toggles TIOA0 at each RC=16 compare on
+ * the slow clock (full period 32 ticks = 1024 Hz) and channel 1 counts
+ * XC1 = TIOA0 periods.  On silicon XC1 clocks on the rising edge, once
+ * per full period - the same rate the generalized model divider
+ * (2*RC) produces.  Counts are tolerant and RTT-bounded.
+ */
+void g45test_irq_tc_chain(struct g45test_result *result)
+{
+    rt_uint32_t bmr, cv1, start;
+
+    g45ctrl_clock_start();
+    *(volatile rt_uint32_t *)G45_PMC_PCER = 1U << G45_TCB_PID;
+
+    bmr = *g45_reg(G45_TCB0_BASE, TC_BMR);
+    *g45_reg(G45_TCB0_BASE, TC_BMR) = TC_BMR_XC1_TIOA0;
+
+    *g45_reg(G45_TCB0_BASE, TC_CCR) = TC_CCR_CLKDIS;
+    *g45_reg(G45_TCB0_BASE, TC_CH1 + TC_CCR) = TC_CCR_CLKDIS;
+    *g45_reg(G45_TCB0_BASE, TC_CMR) = TC_CMR_TIOAGEN;
+    *g45_reg(G45_TCB0_BASE, TC_RC) = 16U;
+    *g45_reg(G45_TCB0_BASE, TC_CH1 + TC_CMR) = TC_CMR_XC1UP;
+
+    *g45_reg(G45_TCB0_BASE, TC_CCR) = TC_CCR_CLKEN | TC_CCR_SWTRG;
+    *g45_reg(G45_TCB0_BASE, TC_CH1 + TC_CCR) = TC_CCR_CLKEN | TC_CCR_SWTRG;
+
+    start = g45ctrl_clock_ms();
+    while (g45ctrl_clock_ms() - start < 40U) {
+    }
+    cv1 = *g45_reg(G45_TCB0_BASE, TC_CH1 + TC_CV);
+    g45test_check(result, cv1 >= 15U && cv1 <= 90U, 41U, cv1, 0);
+
+    /* The chained counter keeps advancing. */
+    start = g45ctrl_clock_ms();
+    while (g45ctrl_clock_ms() - start < 20U) {
+    }
+    g45test_check(result,
+                  *g45_reg(G45_TCB0_BASE, TC_CH1 + TC_CV) > cv1,
+                  cv1, *g45_reg(G45_TCB0_BASE, TC_CH1 + TC_CV), 1);
+
+    *g45_reg(G45_TCB0_BASE, TC_CCR) = TC_CCR_CLKDIS;
+    *g45_reg(G45_TCB0_BASE, TC_CH1 + TC_CCR) = TC_CCR_CLKDIS;
+    (void)*g45_reg(G45_TCB0_BASE, TC_SR);
+    (void)*g45_reg(G45_TCB0_BASE, TC_CH1 + TC_SR);
+    *g45_reg(G45_TCB0_BASE, TC_BMR) = bmr;
+
+    rt_kprintf("G45TEST DATA case=irq.tc-chain cv1=%u\n", cv1);
     g45ctrl_clock_stop();
 }
 
