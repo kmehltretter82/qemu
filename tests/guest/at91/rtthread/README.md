@@ -58,6 +58,28 @@ The ELF is written to:
 build/rtthread-g45/5.2.2/artifacts/baseline/rtthread-at91sam9g45.elf
 ```
 
+### The SAM9G35 variant
+
+RT-Thread ships no SAM9x5 BSP, so `--board g35` builds the same BSP as a
+compile-time variant (patch `0005-…-add-sam9x5-board-select`): the platform
+header's affected bases and peripheral ids are overridden, the MMU table and
+linker script follow the SAM9x5 RAM window at `0x20000000`, and the overlay
+reaches for board constants through `overlay/at91board.h`.
+
+```sh
+tests/guest/at91/rtthread/build-rtthread-g45.sh --board g35 --profile baseline
+python3 tests/guest/at91/rtthread/run-g45-tests.py \
+  --machine sam9g35ek \
+  --elf build/rtthread-g45/5.2.2/artifacts/baseline-g35/rtthread-at91sam9g45.elf \
+  --suite core.scheduler
+```
+
+Switching boards rebuilds from scratch (every object changes). The G35 image
+boots to `msh />`, disables the watchdog at the SAM9x5 address and passes the
+scheduler suite including live migration. The DMA and control suites still
+address G45 peripherals directly, so they are G45-only until their overlays
+move onto `at91board.h` too.
+
 Run the default D0, D1, and ten-second scheduler suites, then migrate the live
 guest to a new QEMU process and rerun deterministic D0/D1 cases:
 
