@@ -11,6 +11,7 @@
 #include <rtthread.h>
 #include <finsh.h>
 
+#include "at91board.h"
 #include "g45test.h"
 
 #define G45TEST_PROTOCOL          1U
@@ -18,7 +19,7 @@
 #define G45TEST_GUARD_SIZE        32U
 #define G45TEST_DATA_SIZE         1040U
 #define G45TEST_TRANSFER_SIZE     1024U
-#define G45TEST_WDT_MR            0xfffffd44U
+#define G45TEST_WDT_MR            AT91BOARD_WDT_MR
 #define G45TEST_WDT_MR_WDDIS      (1U << 15)
 #define G45TEST_SCHEDULER_TICKS   (10U * RT_TICK_PER_SECOND)
 

@@ -10,7 +10,8 @@ jobs="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}"
 
 usage()
 {
-    echo "usage: $0 [--clean] [--profile PROFILE] [--version VERSION]" >&2
+    echo "usage: $0 [--clean] [--profile PROFILE] [--version VERSION]" \
+         "[--board g45|g35]" >&2
     echo "" >&2
     echo "Environment overrides:" >&2
     echo "  RTTHREAD_VERSION     release to build (default: 5.2.2)" >&2
@@ -22,11 +23,20 @@ usage()
 
 clean=0
 profile="baseline"
+board="g45"
 version="${RTTHREAD_VERSION:-5.2.2}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --clean)
             clean=1
+            ;;
+        --board)
+            if [[ $# -lt 2 ]]; then
+                usage
+                exit 2
+            fi
+            board="$2"
+            shift
             ;;
         --profile)
             if [[ $# -lt 2 ]]; then
@@ -76,7 +86,23 @@ if [[ ! -f "${profile_fragment}" ]]; then
     echo "unknown RT-Thread profile: ${profile}" >&2
     exit 2
 fi
-artifacts_dir="${build_root}/artifacts/${profile}"
+case "${board}" in
+    g45)
+        board_env=""
+        board_suffix=""
+        ;;
+    g35)
+        # The SAM9x5 board select is a compile-time variant of the same BSP.
+        board_env="sam9x5"
+        board_suffix="-g35"
+        ;;
+    *)
+        echo "unsupported board: ${board}" >&2
+        exit 2
+        ;;
+esac
+
+artifacts_dir="${build_root}/artifacts/${profile}${board_suffix}"
 profile_stamp="${source_root}/.g45-profile"
 
 if [[ ! -f "${archive}" ]]; then
@@ -100,7 +126,7 @@ case "${build_root}" in
         ;;
 esac
 
-if [[ -f "${profile_stamp}" && $(<"${profile_stamp}") != "${profile}" ]]; then
+if [[ -f "${profile_stamp}" && $(<"${profile_stamp}") != "${profile}/${board}" ]]; then
     clean=1
 fi
 if [[ ${clean} -eq 1 && -d "${source_dir}" ]]; then
@@ -139,6 +165,11 @@ if [[ ${version} == "5.2.2" ]] && \
         "${script_dir}/patches/0003-at91sam9g45-use-arm9-barrier-v5.2.2.patch"
 fi
 if [[ ${version} == "5.2.2" ]] && \
+        ! grep -q 'RT_BOARD_SAM9X5' "${bsp_dir}/rtconfig.py"; then
+    patch -d "${source_dir}" -p1 < \
+        "${script_dir}/patches/0005-at91sam9g45-add-sam9x5-board-select-v5.2.2.patch"
+fi
+if [[ ${version} == "5.2.2" ]] && \
         ! grep -q 'LWIP_NETIF_LOOPBACK' \
         "${source_dir}/components/net/lwip/port/lwipopts.h"; then
     patch -d "${source_dir}" -p1 < \
@@ -149,7 +180,7 @@ fi
     --source "${source_dir}" \
     --fragment "${profile_fragment}" \
     --packages "${script_dir}/profiles/empty-packages"
-printf '%s\n' "${profile}" > "${profile_stamp}"
+printf '%s\n' "${profile}/${board}" > "${profile_stamp}"
 
 declare -a scons_command
 if [[ -n ${SCONS:-} ]]; then
@@ -175,6 +206,7 @@ for tool in arm-none-eabi-gcc arm-none-eabi-objcopy arm-none-eabi-size; do
 done
 
 build_log="${artifacts_dir}/build.log"
+export RTT_BOARD="${board_env}"
 (
     cd -- "${bsp_dir}"
     "${scons_command[@]}" --useconfig=.config
@@ -200,6 +232,7 @@ install -m 0644 "${bsp_dir}/rtthread_at91sam9g45.map" \
 {
     echo "rtthread_version=${version}"
     echo "profile=${profile}"
+    echo "board=${board}"
     echo "rtthread_archive=${archive}"
     echo "rtthread_archive_sha256=${archive_sha256}"
     echo "overlay_sha256=$(sha256sum "${script_dir}"/overlay/*.[ch] | sha256sum | awk '{print $1}')"
