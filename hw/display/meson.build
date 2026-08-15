@@ -28,6 +28,7 @@ system_ss.add(when: 'CONFIG_EXYNOS4', if_true: files('exynos4210_fimd.c'))
 system_ss.add(when: 'CONFIG_FRAMEBUFFER', if_true: files('framebuffer.c'))
 
 system_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2835_fb.c'))
+system_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2835_v3d.c'))
 system_ss.add(when: 'CONFIG_SM501', if_true: files('sm501.c'))
 system_ss.add(when: 'CONFIG_TCX', if_true: files('tcx.c'))
 system_ss.add(when: 'CONFIG_CG3', if_true: files('cg3.c'))

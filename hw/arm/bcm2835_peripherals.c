@@ -153,6 +153,9 @@ static void raspi_peripherals_base_init(Object *obj)
     /* DWC2 */
     object_initialize_child(obj, "dwc2", &s->dwc2, TYPE_DWC2_USB);
 
+    /* VideoCore IV 3D (V3D) GPU */
+    object_initialize_child(obj, "v3d", &s->v3d, TYPE_BCM2835_V3D);
+
     /* CPRMAN clock manager */
     object_initialize_child(obj, "cprman", &s->cprman, TYPE_BCM2835_CPRMAN);
 
@@ -525,7 +528,17 @@ void bcm_soc_peripherals_common_realize(DeviceState *dev, Error **errp)
     create_unimp(s, &s->bscsl, "bcm2835-spis", BSC_SL_OFFSET, 0x100);
     create_unimp(s, &s->dbus, "bcm2835-dbus", DBUS_OFFSET, 0x8000);
     create_unimp(s, &s->ave0, "bcm2835-ave0", AVE0_OFFSET, 0x8000);
-    create_unimp(s, &s->v3d, "bcm2835-v3d", V3D_OFFSET, 0x1000);
+
+    /* VideoCore IV 3D (V3D) GPU */
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->v3d), errp)) {
+        return;
+    }
+    memory_region_add_subregion(&s->peri_mr, V3D_OFFSET,
+                sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->v3d), 0));
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->v3d), 0,
+            qdev_get_gpio_in_named(DEVICE(&s->ic), BCM2835_IC_GPU_IRQ,
+                                   INTERRUPT_3D));
+
     create_unimp(s, &s->sdramc, "bcm2835-sdramc", SDRAMC_OFFSET, 0x100);
 }
 
