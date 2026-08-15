@@ -31,6 +31,7 @@
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
 #include "hw/display/bcm2835_v3d.h"
+#include "hw/display/vc4_qpu.h"
 #include "hw/core/irq.h"
 #include "system/address-spaces.h"
 #include "system/dma.h"
@@ -375,6 +376,112 @@ static void v3d_parse_shader_record(V3DCLWalker *w)
 }
 
 /*
+ * Shader decode probe.
+ *
+ * The QPU interpreter is in place but the pipeline around it -- the VPM that
+ * feeds the coordinate and vertex shaders, the TMU, the tile buffer -- is not,
+ * so shaders cannot yet be run *as part of* the pipeline.  What the model does
+ * instead, when the bin list points at a shader record, is decode and execute
+ * each of the three programs on their own: the uniform stream is served from
+ * guest memory (as the hardware streams it), writes to registers outside the
+ * shader core are counted and dropped, and anything the interpreter does not
+ * implement stops that program and is named in the trace.
+ *
+ * This produces no rendering.  It validates the decoder against the shaders
+ * the guest actually submitted, and says exactly which feature the next phase
+ * has to supply.
+ */
+#define V3D_SHADER_INST_LIMIT 4096
+
+typedef struct V3DShaderProbe {
+    BCM2835V3DState *s;
+    uint32_t uniform_addr;
+    unsigned uniform_reads;
+    unsigned special_writes;
+} V3DShaderProbe;
+
+static bool v3d_shader_fetch(void *opaque, uint32_t addr, uint64_t *inst)
+{
+    V3DShaderProbe *p = opaque;
+    uint8_t buf[8];
+
+    if (!bcm2835_v3d_dma_read(p->s, addr, buf, sizeof(buf))) {
+        return false;
+    }
+    *inst = ldq_le_p(buf);
+    return true;
+}
+
+/* The uniform FIFO streams 32-bit words from the address in the shader
+ * record, one per read, broadcast to every lane. */
+static bool v3d_shader_read_special(void *opaque, unsigned raddr, bool file_b,
+                                    uint32_t lanes[VC4_QPU_LANES])
+{
+    V3DShaderProbe *p = opaque;
+    uint32_t value;
+    unsigned i;
+
+    if (raddr != VC4_QPU_RADDR_UNIF) {
+        return false;
+    }
+    if (!v3d_read_u32(p->s, p->uniform_addr + p->uniform_reads * 4, &value)) {
+        return false;
+    }
+    p->uniform_reads++;
+    for (i = 0; i < VC4_QPU_LANES; i++) {
+        lanes[i] = value;
+    }
+    return true;
+}
+
+static void v3d_shader_write_special(void *opaque, unsigned waddr, bool file_b,
+                                     const uint32_t lanes[VC4_QPU_LANES],
+                                     uint16_t mask)
+{
+    V3DShaderProbe *p = opaque;
+
+    /* VPM, TMU and tile-buffer writes land here.  Counting them is all this
+     * phase can do with them. */
+    p->special_writes++;
+}
+
+static const V3DQPUOps v3d_shader_ops = {
+    .fetch = v3d_shader_fetch,
+    .read_special = v3d_shader_read_special,
+    .write_special = v3d_shader_write_special,
+    /* No signal_load: a shader that waits on a TMU or colour load stops, and
+     * the trace names it. */
+};
+
+static void v3d_probe_shader(BCM2835V3DState *s, const char *which,
+                             uint32_t code, uint32_t uniforms)
+{
+    V3DShaderProbe probe = {
+        .s = s,
+        .uniform_addr = uniforms,
+    };
+    V3DQPUState q;
+    V3DQPUResult r;
+
+    if (!code) {
+        return;
+    }
+
+    vc4_qpu_init(&q, &v3d_shader_ops, &probe);
+    r = vc4_qpu_run(&q, code, V3D_SHADER_INST_LIMIT);
+
+    s->shader_probes++;
+    s->shader_instructions += q.instructions;
+    if (r != V3D_QPU_DONE) {
+        s->shader_incomplete++;
+    }
+    trace_bcm2835_v3d_shader_probe(which, code, q.instructions,
+                                   probe.uniform_reads, probe.special_writes,
+                                   vc4_qpu_result_name(r),
+                                   q.unsupported ? q.unsupported : "-");
+}
+
+/*
  * Fetch one vertex through the VCD: every attribute of the current shader
  * record contributes size bytes at addr + index * stride.  A stride of zero
  * means every vertex reads the same element (which is why the validator skips
@@ -619,6 +726,15 @@ static void v3d_dispatch_bin(V3DCLWalker *w, uint8_t op)
                                        s->shader_record_extended ?
                                        " (extended)" : "");
         v3d_parse_shader_record(w);
+        if (s->shader_record_valid) {
+            /* Decode each program the record points at.  The coordinate
+             * shader is the one the binner really runs at this point; the
+             * other two are probed here because this phase has nowhere else
+             * to run them. */
+            v3d_probe_shader(s, "cs", s->cs_code_addr, s->cs_uniforms_addr);
+            v3d_probe_shader(s, "vs", s->vs_code_addr, s->vs_uniforms_addr);
+            v3d_probe_shader(s, "fs", s->fs_code_addr, s->fs_uniforms_addr);
+        }
         break;
 
     case VC4_PACKET_GL_ARRAY_PRIMITIVE:
@@ -1072,6 +1188,9 @@ static void bcm2835_v3d_reset(DeviceState *dev)
     s->ib_reads = 0;
     s->ib_bytes = 0;
     s->cl_errors = 0;
+    s->shader_probes = 0;
+    s->shader_incomplete = 0;
+    s->shader_instructions = 0;
     s->tmu_fetches = 0;
     s->tmu_faults = 0;
     s->int_status = 0;
@@ -1119,7 +1238,7 @@ static int bcm2835_v3d_post_load(void *opaque, int version_id)
 
 static const VMStateDescription bcm2835_v3d_vmstate = {
     .name = "bcm2835_v3d",
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .post_load = bcm2835_v3d_post_load,
     .fields = (const VMStateField[]) {
@@ -1162,6 +1281,9 @@ static const VMStateDescription bcm2835_v3d_vmstate = {
         VMSTATE_UINT32_V(ib_reads, BCM2835V3DState, 3),
         VMSTATE_UINT64_V(ib_bytes, BCM2835V3DState, 3),
         VMSTATE_UINT32_V(cl_errors, BCM2835V3DState, 3),
+        VMSTATE_UINT32_V(shader_probes, BCM2835V3DState, 4),
+        VMSTATE_UINT32_V(shader_incomplete, BCM2835V3DState, 4),
+        VMSTATE_UINT64_V(shader_instructions, BCM2835V3DState, 4),
         VMSTATE_END_OF_LIST()
     }
 };

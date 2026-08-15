@@ -109,6 +109,11 @@ struct BCM2835V3DState {
     uint64_t ib_bytes;
     uint32_t cl_errors;
 
+    /* QPU shader decode probe (no rendering yet; see v3d_probe_shader). */
+    uint32_t shader_probes;
+    uint32_t shader_incomplete;
+    uint64_t shader_instructions;
+
     /* Narrow B5 texture-fetch probe (not a general TMU implementation). */
     uint32_t tmu_fetches;
     uint32_t tmu_faults;
