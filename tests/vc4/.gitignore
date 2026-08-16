@@ -1,0 +1,4 @@
+# Cross-compiled guest binaries and everything a run generates.
+/guest/vc4_p1_draw
+/guest/vc4_p5_clear
+/out/
