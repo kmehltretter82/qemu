@@ -24,6 +24,7 @@
 #define HW_DISPLAY_BCM2835_V3D_H
 
 #include "hw/core/sysbus.h"
+#include "hw/display/vc4_vpm.h"
 #include "qom/object.h"
 
 #define TYPE_BCM2835_V3D "bcm2835-v3d"
@@ -134,6 +135,13 @@ struct BCM2835V3DState {
     uint32_t shader_probes;
     uint32_t shader_incomplete;
     uint64_t shader_instructions;
+
+    /* Vertex Pipe Memory: where the vertex fetch deposits attribute data and
+     * where the coordinate and vertex shaders read it from.  Rebuilt for every
+     * batch of vertices, so it is not migrated. */
+    V3DVPM vpm;
+    uint32_t vpm_rows;      /* rows the current batch filled */
+    uint32_t vpm_batches;
 
     /* Narrow B5 texture-fetch probe (not a general TMU implementation). */
     uint32_t tmu_fetches;

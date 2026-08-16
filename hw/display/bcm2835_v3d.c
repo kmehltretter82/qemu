@@ -33,6 +33,7 @@
 #include "hw/display/bcm2835_v3d.h"
 #include "hw/display/vc4_qpu.h"
 #include "hw/display/vc4_tiling.h"
+#include "hw/display/vc4_vpm.h"
 #include "hw/core/irq.h"
 #include "system/address-spaces.h"
 #include "system/dma.h"
@@ -533,6 +534,8 @@ static void v3d_tlb_transfer(BCM2835V3DState *s, uint32_t addr, bool store,
  * has to supply.
  */
 #define V3D_SHADER_INST_LIMIT 4096
+/* Cap the coordinate-shader runs one job can ask for (one per 16 vertices). */
+#define V3D_MAX_SHADER_BATCHES 64
 
 typedef struct V3DShaderProbe {
     BCM2835V3DState *s;
@@ -553,8 +556,18 @@ static bool v3d_shader_fetch(void *opaque, uint32_t addr, uint64_t *inst)
     return true;
 }
 
-/* The uniform FIFO streams 32-bit words from the address in the shader
- * record, one per read, broadcast to every lane. */
+/* Special registers the environment serves.  The VPM ones are real; the rest
+ * are counted and dropped. */
+#define V3D_QPU_RADDR_VPM       48
+#define V3D_QPU_WADDR_VPM       48
+#define V3D_QPU_WADDR_VPM_SETUP 49
+#define V3D_QPU_WADDR_VPM_ADDR  50
+
+/*
+ * The uniform FIFO streams 32-bit words from the address in the shader record,
+ * one per read, broadcast to every lane.  A VPM read hands each lane one dword
+ * of its own vertex.
+ */
 static bool v3d_shader_read_special(void *opaque, unsigned raddr, bool file_b,
                                     uint32_t lanes[VC4_QPU_LANES])
 {
@@ -562,6 +575,9 @@ static bool v3d_shader_read_special(void *opaque, unsigned raddr, bool file_b,
     uint32_t value;
     unsigned i;
 
+    if (raddr == V3D_QPU_RADDR_VPM) {
+        return vc4_vpm_read(&p->s->vpm, lanes);
+    }
     if (raddr != VC4_QPU_RADDR_UNIF) {
         return false;
     }
@@ -581,8 +597,33 @@ static void v3d_shader_write_special(void *opaque, unsigned waddr, bool file_b,
 {
     V3DShaderProbe *p = opaque;
 
-    /* VPM, TMU and tile-buffer writes land here.  Counting them is all this
-     * phase can do with them. */
+    switch (waddr) {
+    case V3D_QPU_WADDR_VPM:
+        vc4_vpm_write(&p->s->vpm, lanes);
+        break;
+
+    case V3D_QPU_WADDR_VPM_SETUP:
+        /* Regfile A configures reads, regfile B configures writes. */
+        if (file_b) {
+            vc4_vpm_setup_write(&p->s->vpm, lanes[0]);
+        } else {
+            vc4_vpm_setup_read(&p->s->vpm, lanes[0]);
+        }
+        break;
+
+    case V3D_QPU_WADDR_VPM_ADDR:
+        /* The VPM DMA trigger.  No shader the guest can submit reaches this:
+         * the kernel's validator rejects it outright ("General VPM DMA
+         * unsupported"), which is why the DMA half of the block is not
+         * modelled at all. */
+        qemu_log_mask(LOG_UNIMP, "bcm2835-v3d: VPM DMA is not modelled\n");
+        break;
+
+    default:
+        /* TMU and tile-buffer writes land here.  Counting them is all this
+         * phase can do with them. */
+        break;
+    }
     p->special_writes++;
 }
 
@@ -632,14 +673,16 @@ static void v3d_probe_shader(BCM2835V3DState *s, const char *which,
  * reads are real, so they hit exactly the guest memory the hardware would
  * touch (and fault the same way if the driver programmed something bogus).
  */
-static void v3d_vcd_fetch_vertex(V3DCLWalker *w, uint32_t index)
+static void v3d_vcd_fetch_vertex(V3DCLWalker *w, uint32_t index, unsigned lane)
 {
     BCM2835V3DState *s = w->s;
     uint8_t buf[256];
+    unsigned row = 0;
     unsigned i;
 
     for (i = 0; i < s->attr_count; i++) {
         const V3DVertexAttr *a = &s->attrs[i];
+        unsigned off;
 
         if (w->dma_left < a->size) {
             v3d_walk_stop(w, "vertex fetch budget exhausted", false);
@@ -653,7 +696,42 @@ static void v3d_vcd_fetch_vertex(V3DCLWalker *w, uint32_t index)
         w->dma_left -= a->size;
         s->vcd_reads++;
         s->vcd_bytes += a->size;
+
+        /* Lay the vertex out for the shaders: row r, lane l is dword r of
+         * vertex l, so one VPM read hands all 16 vertices in flight the same
+         * dword of their own attribute data. */
+        for (off = 0; off + 4 <= a->size; off += 4) {
+            vc4_vpm_load_vertex(&s->vpm, row++, lane, ldl_le_p(buf + off));
+        }
     }
+    if (row > s->vpm_rows) {
+        s->vpm_rows = row;
+    }
+}
+
+/*
+ * A batch of up to 16 vertices is now sitting in the VPM, which is when the
+ * binner runs the coordinate shader over it.  (The vertex and fragment shaders
+ * are decoded at shader-record time instead -- there is nowhere faithful to run
+ * them until primitive setup and the rasterizer exist.)
+ */
+static void v3d_vcd_flush_batch(V3DCLWalker *w, unsigned lanes)
+{
+    BCM2835V3DState *s = w->s;
+
+    if (!lanes) {
+        return;
+    }
+    trace_bcm2835_v3d_vpm_load(s->vpm_rows, lanes);
+    s->vpm_batches++;
+
+    /* Bound the work a single job can ask for. */
+    if (s->vpm_batches <= V3D_MAX_SHADER_BATCHES) {
+        v3d_probe_shader(s, "cs", s->cs_code_addr, s->cs_uniforms_addr);
+    }
+
+    vc4_vpm_reset(&s->vpm);
+    s->vpm_rows = 0;
 }
 
 /* Clamp a primitive's vertex count to the per-job limit, tracing if it bites. */
@@ -679,9 +757,13 @@ static void v3d_fetch_array(V3DCLWalker *w, uint32_t base, uint32_t count)
 
     count = v3d_clamp_count(w, count);
     while (fetched < count && !w->stop) {
-        v3d_vcd_fetch_vertex(w, base + fetched);
+        v3d_vcd_fetch_vertex(w, base + fetched, fetched % VC4_VPM_LANES);
         fetched++;
+        if (fetched % VC4_VPM_LANES == 0) {
+            v3d_vcd_flush_batch(w, VC4_VPM_LANES);
+        }
     }
+    v3d_vcd_flush_batch(w, fetched % VC4_VPM_LANES);
     trace_bcm2835_v3d_vcd_fetch(fetched, s->attr_count);
 }
 
@@ -724,10 +806,14 @@ static void v3d_fetch_indexed(V3DCLWalker *w, uint32_t addr, uint32_t count,
         for (i = 0; i < chunk && !w->stop; i++) {
             uint32_t index = index_size == 2 ? lduw_le_p(indices + i * 2)
                                              : indices[i];
-            v3d_vcd_fetch_vertex(w, index);
+            v3d_vcd_fetch_vertex(w, index, (done + i) % VC4_VPM_LANES);
+            if ((done + i + 1) % VC4_VPM_LANES == 0) {
+                v3d_vcd_flush_batch(w, VC4_VPM_LANES);
+            }
         }
         done += chunk;
     }
+    v3d_vcd_flush_batch(w, done % VC4_VPM_LANES);
     trace_bcm2835_v3d_vcd_fetch(done, s->attr_count);
 }
 
@@ -868,11 +954,10 @@ static void v3d_dispatch_bin(V3DCLWalker *w, uint8_t op)
                                        " (extended)" : "");
         v3d_parse_shader_record(w);
         if (s->shader_record_valid) {
-            /* Decode each program the record points at.  The coordinate
-             * shader is the one the binner really runs at this point; the
-             * other two are probed here because this phase has nowhere else
-             * to run them. */
-            v3d_probe_shader(s, "cs", s->cs_code_addr, s->cs_uniforms_addr);
+            /* The coordinate shader runs per batch of vertices once the VPM
+             * holds their data (see v3d_vcd_flush_batch).  These two have
+             * nowhere faithful to run until primitive setup and the
+             * rasterizer exist, so they are only decoded. */
             v3d_probe_shader(s, "vs", s->vs_code_addr, s->vs_uniforms_addr);
             v3d_probe_shader(s, "fs", s->fs_code_addr, s->fs_uniforms_addr);
         }
@@ -1067,6 +1152,9 @@ static void v3d_run_cl(BCM2835V3DState *s, unsigned thread)
     if (thread == 0) {
         s->shader_record_valid = false;
         s->attr_count = 0;
+        vc4_vpm_reset(&s->vpm);
+        s->vpm_rows = 0;
+        s->vpm_batches = 0;
     }
     trace_bcm2835_v3d_cl_begin(thread, thread ? "render" : "bin", w.ca, w.ea);
 
@@ -1356,6 +1444,9 @@ static void bcm2835_v3d_reset(DeviceState *dev)
     s->shader_probes = 0;
     s->shader_incomplete = 0;
     s->shader_instructions = 0;
+    vc4_vpm_reset(&s->vpm);
+    s->vpm_rows = 0;
+    s->vpm_batches = 0;
     memset(s->tile_color, 0, sizeof(s->tile_color));
     s->clear_color[0] = 0;
     s->clear_color[1] = 0;
