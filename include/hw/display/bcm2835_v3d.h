@@ -35,6 +35,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(BCM2835V3DState, BCM2835_V3D)
 /* A GL shader record carries at most 8 vertex attributes. */
 #define BCM2835_V3D_MAX_ATTRS 8
 
+/* The VC4 renders into an on-chip tile buffer and stores it to memory one
+ * tile at a time.  A non-multisampled tile is 64x64 pixels. */
+#define BCM2835_V3D_TILE_W 64
+#define BCM2835_V3D_TILE_H 64
+#define BCM2835_V3D_TILE_PIXELS (BCM2835_V3D_TILE_W * BCM2835_V3D_TILE_H)
+
 typedef struct AddressSpace AddressSpace;
 
 /* One vertex attribute as programmed in the relocated GL shader record. */
@@ -97,6 +103,21 @@ struct BCM2835V3DState {
     uint32_t render_width;
     uint32_t render_height;
     uint32_t render_bits;
+
+    /* The tile buffer and the state the render list sets up around it.  The
+     * buffer holds one tile of 32-bit colour; it is filled by a clear (and,
+     * once there is a rasterizer, by fragments) and written to memory by the
+     * tile store packets.  It never holds state between jobs, so like the
+     * parsed attributes it is not migrated. */
+    uint32_t tile_color[BCM2835_V3D_TILE_PIXELS];
+    uint32_t clear_color[2];
+    uint32_t clear_z;
+    uint32_t clear_stencil;
+    uint32_t tile_x;
+    uint32_t tile_y;
+    uint32_t tlb_stores;
+    uint32_t tlb_loads;
+    uint64_t tlb_pixels;
 
     /* Cumulative interpreter statistics. */
     uint32_t bin_packets;

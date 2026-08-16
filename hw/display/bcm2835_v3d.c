@@ -32,6 +32,7 @@
 #include "qemu/main-loop.h"
 #include "hw/display/bcm2835_v3d.h"
 #include "hw/display/vc4_qpu.h"
+#include "hw/display/vc4_tiling.h"
 #include "hw/core/irq.h"
 #include "system/address-spaces.h"
 #include "system/dma.h"
@@ -151,6 +152,22 @@ enum {
 
 /* Low bits of the address word of the tile buffer load/store packets. */
 #define VC4_LOADSTORE_TILE_BUFFER_EOF   (1u << 3)
+
+/* Fields of the u16 in LOAD/STORE_TILE_BUFFER_GENERAL.  The memory layout
+ * values are the VC4_TILING_* ones from vc4_tiling.h. */
+#define VC4_LOADSTORE_BUFFER(bits)  ((bits) & 0x7)
+#define VC4_LOADSTORE_TILING(bits)  (((bits) >> 4) & 0x3)
+#define VC4_LOADSTORE_FORMAT(bits)  (((bits) >> 8) & 0x3)
+#define VC4_LOADSTORE_BUFFER_NONE   0
+#define VC4_LOADSTORE_BUFFER_COLOR  1
+#define VC4_LOADSTORE_TILE_BUFFER_RGBA8888  0
+#define VC4_STORE_TILE_BUFFER_DISABLE_COLOR_CLEAR (1u << 13)
+
+/* Fields of the u16 in TILE_RENDERING_MODE_CONFIG.  Note the colour format
+ * encoding differs from the load/store packets above. */
+#define VC4_RENDER_CONFIG_FORMAT(bits)        (((bits) >> 2) & 0x3)
+#define VC4_RENDER_CONFIG_MEMORY_FORMAT(bits) (((bits) >> 6) & 0x3)
+#define VC4_RENDER_CONFIG_FORMAT_RGBA8888     1
 /* Bits 4:3 of the TILE_BINNING_MODE_CONFIG flags select the size of the
  * initial per-tile list block: 32 << n bytes. */
 #define VC4_BIN_CONFIG_INIT_BLOCK_SHIFT 3
@@ -373,6 +390,130 @@ static void v3d_parse_shader_record(V3DCLWalker *w)
                                       s->attrs[i].stride);
     }
     s->shader_record_valid = true;
+}
+
+/*
+ * The tile buffer and the tile load/store (TLB) path.
+ *
+ * The VC4 renders into an on-chip buffer one 64x64 tile at a time and the
+ * render control list moves that buffer to and from memory.  A store also
+ * clears the buffer for the next tile unless the packet disables it, which is
+ * how a clear reaches the framebuffer: the driver sets the clear colour, does a
+ * store in "none" mode to trigger the clear, then stores the cleared buffer for
+ * every tile.
+ *
+ * Only 32-bit colour is handled.  The 565 formats and T tiling are declined
+ * out loud rather than guessed at, since a wrong channel order or tile order
+ * would be a silently incorrect image.
+ */
+
+/* The two packet families encode the colour format differently, so normalise
+ * to one enum before acting on it. */
+typedef enum V3DPixelFormat {
+    V3D_FMT_RGBA8888,
+    V3D_FMT_BGR565,
+} V3DPixelFormat;
+
+static V3DPixelFormat v3d_loadstore_format(uint32_t bits)
+{
+    return VC4_LOADSTORE_FORMAT(bits) == VC4_LOADSTORE_TILE_BUFFER_RGBA8888
+         ? V3D_FMT_RGBA8888 : V3D_FMT_BGR565;
+}
+
+static V3DPixelFormat v3d_render_format(uint32_t bits)
+{
+    return VC4_RENDER_CONFIG_FORMAT(bits) == VC4_RENDER_CONFIG_FORMAT_RGBA8888
+         ? V3D_FMT_RGBA8888 : V3D_FMT_BGR565;
+}
+
+static void v3d_tile_clear(BCM2835V3DState *s)
+{
+    unsigned i;
+
+    /* The two clear colour words are the halves of the 64-bit tile buffer
+     * word; for a 32-bit format the driver sets both to the same pixel. */
+    for (i = 0; i < BCM2835_V3D_TILE_PIXELS; i++) {
+        s->tile_color[i] = s->clear_color[0];
+    }
+}
+
+/*
+ * Move the colour tile buffer to or from memory.  The tile's position comes
+ * from the last TILE_COORDINATES packet and its extent is clipped to the
+ * framebuffer the render config declared.
+ */
+static void v3d_tlb_transfer(BCM2835V3DState *s, uint32_t addr, bool store,
+                             V3DPixelFormat format, unsigned tiling)
+{
+    const unsigned cpp = 4;
+    unsigned aligned_width;
+    uint32_t px, py;
+    uint64_t pixels = 0;
+
+    if (format != V3D_FMT_RGBA8888) {
+        qemu_log_mask(LOG_UNIMP,
+                      "bcm2835-v3d: tile buffer format %u not implemented\n",
+                      (unsigned)format);
+        return;
+    }
+    if (!vc4_tiling_supported(tiling)) {
+        qemu_log_mask(LOG_UNIMP,
+                      "bcm2835-v3d: tile memory layout %u not implemented\n",
+                      tiling);
+        return;
+    }
+    if (!s->render_width || !s->render_height) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "bcm2835-v3d: tile store with no render config\n");
+        s->cl_errors++;
+        return;
+    }
+
+    aligned_width = vc4_aligned_width(tiling, cpp, s->render_width);
+
+    for (py = 0; py < BCM2835_V3D_TILE_H; py++) {
+        uint32_t y = s->tile_y * BCM2835_V3D_TILE_H + py;
+
+        if (y >= s->render_height) {
+            break;
+        }
+        for (px = 0; px < BCM2835_V3D_TILE_W; px++) {
+            uint32_t x = s->tile_x * BCM2835_V3D_TILE_W + px;
+            uint32_t *pixel = &s->tile_color[py * BCM2835_V3D_TILE_W + px];
+            uint8_t buf[4];
+            uint32_t offset;
+
+            if (x >= s->render_width) {
+                break;
+            }
+            if (!vc4_tiling_offset(tiling, cpp, aligned_width, x, y,
+                                   &offset)) {
+                return;
+            }
+
+            if (store) {
+                stl_le_p(buf, *pixel);
+                if (!bcm2835_v3d_dma_write(s, addr + offset, buf, cpp)) {
+                    return;
+                }
+            } else {
+                if (!bcm2835_v3d_dma_read(s, addr + offset, buf, cpp)) {
+                    return;
+                }
+                *pixel = ldl_le_p(buf);
+            }
+            pixels++;
+        }
+    }
+
+    s->tlb_pixels += pixels;
+    if (store) {
+        s->tlb_stores++;
+    } else {
+        s->tlb_loads++;
+    }
+    trace_bcm2835_v3d_tlb_transfer(store ? "store" : "load", addr, s->tile_x,
+                                   s->tile_y, pixels, tiling);
 }
 
 /*
@@ -809,6 +950,8 @@ static void v3d_dispatch_render(V3DCLWalker *w, uint8_t op)
             v3d_walk_stop(w, "tile coordinates unreadable", true);
             return;
         }
+        s->tile_x = payload[0];
+        s->tile_y = payload[1];
         trace_bcm2835_v3d_tile_coords(payload[0], payload[1]);
         break;
 
@@ -817,9 +960,12 @@ static void v3d_dispatch_render(V3DCLWalker *w, uint8_t op)
             v3d_walk_stop(w, "clear colors unreadable", true);
             return;
         }
-        trace_bcm2835_v3d_clear_colors(ldl_le_p(payload + 0),
-                                       ldl_le_p(payload + 4),
-                                       ldl_le_p(payload + 8), payload[12]);
+        s->clear_color[0] = ldl_le_p(payload + 0);
+        s->clear_color[1] = ldl_le_p(payload + 4);
+        s->clear_z = ldl_le_p(payload + 8);
+        s->clear_stencil = payload[12];
+        trace_bcm2835_v3d_clear_colors(s->clear_color[0], s->clear_color[1],
+                                       s->clear_z, s->clear_stencil);
         break;
 
     case VC4_PACKET_STORE_TILE_BUFFER_GENERAL:
@@ -833,14 +979,30 @@ static void v3d_dispatch_render(V3DCLWalker *w, uint8_t op)
         }
         if (op == VC4_PACKET_LOAD_TILE_BUFFER_GENERAL) {
             trace_bcm2835_v3d_tile_load(addr & ~0xfu, bits);
-        } else {
-            s->render_stores++;
-            trace_bcm2835_v3d_tile_store(addr & ~0xfu, bits,
-                                         addr & VC4_LOADSTORE_TILE_BUFFER_EOF ?
-                                         " EOF" : "");
-            if (addr & VC4_LOADSTORE_TILE_BUFFER_EOF)
-                v3d_walk_stop(w, "end of frame", false);
+            if (VC4_LOADSTORE_BUFFER(bits) == VC4_LOADSTORE_BUFFER_COLOR) {
+                v3d_tlb_transfer(s, addr & ~0xfu, false,
+                                 v3d_loadstore_format(bits),
+                                 VC4_LOADSTORE_TILING(bits));
+            }
+            break;
         }
+
+        s->render_stores++;
+        trace_bcm2835_v3d_tile_store(addr & ~0xfu, bits,
+                                     addr & VC4_LOADSTORE_TILE_BUFFER_EOF ?
+                                     " EOF" : "");
+        if (VC4_LOADSTORE_BUFFER(bits) == VC4_LOADSTORE_BUFFER_COLOR) {
+            v3d_tlb_transfer(s, addr & ~0xfu, true, v3d_loadstore_format(bits),
+                             VC4_LOADSTORE_TILING(bits));
+        }
+        /* A store is also what clears the tile buffer for the next tile.
+         * The driver relies on this: it triggers the clear with a store in
+         * "none" mode before the first real tile. */
+        if (!(bits & VC4_STORE_TILE_BUFFER_DISABLE_COLOR_CLEAR)) {
+            v3d_tile_clear(s);
+        }
+        if (addr & VC4_LOADSTORE_TILE_BUFFER_EOF)
+            v3d_walk_stop(w, "end of frame", false);
         break;
 
     case VC4_PACKET_STORE_FULL_RES_TILE_BUFFER:
@@ -859,12 +1021,15 @@ static void v3d_dispatch_render(V3DCLWalker *w, uint8_t op)
 
     case VC4_PACKET_STORE_MS_TILE_BUFFER:
     case VC4_PACKET_STORE_MS_TILE_BUFFER_AND_EOF:
-        /* The multisample store writes the tile buffer to the address the
-         * render config gave us; producing those pixels needs the rasterizer. */
+        /* Writes the tile buffer to the surface the render config named. */
         s->render_stores++;
         trace_bcm2835_v3d_tile_store(s->render_fb_addr, s->render_bits,
                                      op == VC4_PACKET_STORE_MS_TILE_BUFFER_AND_EOF ?
                                      " EOF" : "");
+        v3d_tlb_transfer(s, s->render_fb_addr, true,
+                         v3d_render_format(s->render_bits),
+                         VC4_RENDER_CONFIG_MEMORY_FORMAT(s->render_bits));
+        v3d_tile_clear(s);
         if (op == VC4_PACKET_STORE_MS_TILE_BUFFER_AND_EOF)
             v3d_walk_stop(w, "end of frame", false);
         break;
@@ -1191,6 +1356,16 @@ static void bcm2835_v3d_reset(DeviceState *dev)
     s->shader_probes = 0;
     s->shader_incomplete = 0;
     s->shader_instructions = 0;
+    memset(s->tile_color, 0, sizeof(s->tile_color));
+    s->clear_color[0] = 0;
+    s->clear_color[1] = 0;
+    s->clear_z = 0;
+    s->clear_stencil = 0;
+    s->tile_x = 0;
+    s->tile_y = 0;
+    s->tlb_stores = 0;
+    s->tlb_loads = 0;
+    s->tlb_pixels = 0;
     s->tmu_fetches = 0;
     s->tmu_faults = 0;
     s->int_status = 0;
@@ -1238,7 +1413,7 @@ static int bcm2835_v3d_post_load(void *opaque, int version_id)
 
 static const VMStateDescription bcm2835_v3d_vmstate = {
     .name = "bcm2835_v3d",
-    .version_id = 4,
+    .version_id = 5,
     .minimum_version_id = 1,
     .post_load = bcm2835_v3d_post_load,
     .fields = (const VMStateField[]) {
@@ -1284,6 +1459,14 @@ static const VMStateDescription bcm2835_v3d_vmstate = {
         VMSTATE_UINT32_V(shader_probes, BCM2835V3DState, 4),
         VMSTATE_UINT32_V(shader_incomplete, BCM2835V3DState, 4),
         VMSTATE_UINT64_V(shader_instructions, BCM2835V3DState, 4),
+        VMSTATE_UINT32_ARRAY_V(clear_color, BCM2835V3DState, 2, 5),
+        VMSTATE_UINT32_V(clear_z, BCM2835V3DState, 5),
+        VMSTATE_UINT32_V(clear_stencil, BCM2835V3DState, 5),
+        VMSTATE_UINT32_V(tile_x, BCM2835V3DState, 5),
+        VMSTATE_UINT32_V(tile_y, BCM2835V3DState, 5),
+        VMSTATE_UINT32_V(tlb_stores, BCM2835V3DState, 5),
+        VMSTATE_UINT32_V(tlb_loads, BCM2835V3DState, 5),
+        VMSTATE_UINT64_V(tlb_pixels, BCM2835V3DState, 5),
         VMSTATE_END_OF_LIST()
     }
 };

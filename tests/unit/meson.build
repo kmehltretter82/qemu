@@ -42,6 +42,7 @@ tests = {
   'test-bitcnt': [],
   # the VideoCore IV QPU interpreter has no device dependencies
   'test-vc4-qpu': ['../../hw/display/vc4_qpu.c'],
+  'test-vc4-tiling': ['../../hw/display/vc4_tiling.c'],
   'test-qgraph': ['../qtest/libqos/qgraph.c'],
   'check-qom-interface': [qom],
   'check-qom-proplist': [qom],
