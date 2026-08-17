@@ -17,8 +17,14 @@
  * can be unit tested on its own (tests/unit/test-vc4-qpu.c).
  *
  * Not modelled yet, and reported as V3D_QPU_UNSUPPORTED rather than quietly
- * computing the wrong answer: pack/unpack modes other than NOP, the mul-ALU
- * vector rotations (small immediates 48-63), and the SFU.
+ * computing the wrong answer: pack/unpack modes other than NOP and the mul-ALU
+ * vector rotations (small immediates 48-63).
+ *
+ * The special-function unit is modelled functionally: reciprocal, reciprocal
+ * square root, exp2 and log2 are computed at host float precision.  Real
+ * hardware uses a lookup table good for about twelve bits of mantissa, so
+ * nothing here is bit-exact with silicon -- deliberately, as it is for the
+ * ALUs.
  */
 
 #ifndef HW_DISPLAY_VC4_QPU_H
@@ -32,6 +38,9 @@
 /* Program end is followed by two delay slots, a branch by three. */
 #define VC4_QPU_END_DELAY   2
 #define VC4_QPU_BRANCH_DELAY 3
+
+/* A special-function result reaches r4 three instructions after it starts. */
+#define VC4_QPU_SFU_LATENCY 3
 
 /* Read address of the uniform FIFO: the one special register nearly every
  * caller has to serve. */
@@ -91,6 +100,13 @@ typedef struct V3DQPUState {
     int end_delay;
     int branch_delay;
     uint32_t branch_target;
+
+    /* A special-function result on its way to r4.  The unit takes three
+     * instructions, which is the latency Mesa's scheduler assigns it and the
+     * window in which it refuses to read r4 (vc4_qpu_schedule.c). */
+    uint32_t sfu_result[VC4_QPU_LANES];
+    uint16_t sfu_mask;
+    int sfu_delay;
 
     uint64_t instructions;  /* retired this run */
 

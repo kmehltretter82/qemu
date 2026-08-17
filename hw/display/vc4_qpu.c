@@ -429,6 +429,55 @@ static uint16_t qpu_cond_mask(const V3DQPUState *q, unsigned cond)
     }
 }
 
+/*
+ * Start a special function.  The unit takes one operand per lane and delivers
+ * its result to r4 three instructions later, which is the latency Mesa's
+ * scheduler assigns it: it will not read r4 while
+ * tick - last_sfu_write_tick <= 2 (vc4_qpu_schedule.c).
+ *
+ * The functions are computed at host float precision.  The real unit is a
+ * lookup table accurate to roughly twelve mantissa bits, so this is a
+ * functional model rather than a bit-exact one -- as it is for the ALUs.
+ */
+static void qpu_sfu_start(V3DQPUState *q, unsigned waddr,
+                          const V3DQPUVec value, uint16_t mask)
+{
+    unsigned i;
+
+    for (i = 0; i < VC4_QPU_LANES; i++) {
+        float x = u2f(value[i]);
+
+        switch (waddr) {
+        case QPU_W_SFU_RECIP:
+            q->sfu_result[i] = f2u(1.0f / x);
+            break;
+        case QPU_W_SFU_RECIPSQRT:
+            q->sfu_result[i] = f2u(1.0f / sqrtf(x));
+            break;
+        case QPU_W_SFU_EXP:
+            q->sfu_result[i] = f2u(exp2f(x));
+            break;
+        default:
+            q->sfu_result[i] = f2u(log2f(x));
+            break;
+        }
+    }
+    q->sfu_mask = mask;
+    q->sfu_delay = VC4_QPU_SFU_LATENCY;
+}
+
+/* Deliver a finished special function into r4. */
+static void qpu_sfu_retire(V3DQPUState *q)
+{
+    unsigned i;
+
+    for (i = 0; i < VC4_QPU_LANES; i++) {
+        if (q->sfu_mask & (1u << i)) {
+            q->acc[4][i] = q->sfu_result[i];
+        }
+    }
+}
+
 static void qpu_write_reg(V3DQPUState *q, unsigned waddr, bool file_b,
                           const V3DQPUVec value, uint16_t mask)
 {
@@ -457,7 +506,7 @@ static void qpu_write_reg(V3DQPUState *q, unsigned waddr, bool file_b,
     }
 
     if (waddr >= QPU_W_SFU_RECIP && waddr <= QPU_W_SFU_LOG) {
-        qpu_unsupported(q, "SFU");
+        qpu_sfu_start(q, waddr, value, mask);
         return;
     }
 
@@ -790,6 +839,12 @@ V3DQPUResult vc4_qpu_step(V3DQPUState *q)
 
     q->pc += 8;
 
+    /* A special function lands in r4 three instructions after it was started,
+     * so the two instructions in between still see the old r4. */
+    if (q->sfu_delay > 0 && --q->sfu_delay == 0) {
+        qpu_sfu_retire(q);
+    }
+
     /* Delay slots retire after the instruction that follows them. */
     if (q->branch_delay >= 0 && q->branch_delay-- == 0) {
         q->pc = q->branch_target;
@@ -807,6 +862,7 @@ V3DQPUResult vc4_qpu_run(V3DQPUState *q, uint32_t pc, uint64_t max_inst)
     q->pc = pc;
     q->end_delay = -1;
     q->branch_delay = -1;
+    q->sfu_delay = 0;
     q->unsupported = NULL;
     q->instructions = 0;
 

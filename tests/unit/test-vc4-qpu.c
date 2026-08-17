@@ -83,6 +83,10 @@
 #define W_HOST_INT  38
 #define W_NOP       39
 #define W_VPM       48
+#define W_SFU_RECIP     52
+#define W_SFU_RECIPSQRT 53
+#define W_SFU_EXP       54
+#define W_SFU_LOG       55
 #define W_TMU0_S    56
 
 /* Load-immediate variants. */
@@ -791,6 +795,94 @@ static void test_plain_nop_writes_nothing(void)
     g_assert_cmpuint(e.write_count, ==, 0);
 }
 
+/*
+ * The special-function unit takes an operand and delivers its result to r4
+ * three instructions later -- the latency Mesa's scheduler assigns it, and the
+ * window in which it refuses to read r4.
+ */
+static void test_sfu_recip(void)
+{
+    uint64_t p[] = {
+        set_r0(fbits(4.0f)),
+        /* Start the reciprocal. */
+        alu((AluInst){ ALU_DEFAULTS, .op_add = A_OR, .waddr_add = W_SFU_RECIP,
+                       .add_a = MUX_R0, .add_b = MUX_R0 }),
+        /* Two instructions where r4 is still the old value. */
+        alu((AluInst){ ALU_DEFAULTS, .op_add = A_OR, .waddr_add = 1,
+                       .add_a = MUX_R4, .add_b = MUX_R4 }),
+        alu((AluInst){ ALU_DEFAULTS, .op_add = A_OR, .waddr_add = 2,
+                       .add_a = MUX_R4, .add_b = MUX_R4 }),
+        /* The third instruction after the write sees the result. */
+        alu((AluInst){ ALU_DEFAULTS, .op_add = A_OR, .waddr_add = 3,
+                       .add_a = MUX_R4, .add_b = MUX_R4 }),
+        prog_end(), nop_inst(), nop_inst(),
+    };
+    V3DQPUState q;
+    TestEnv e = { 0 };
+
+    g_assert_cmpint(run_prog(&q, &e, p, ARRAY_SIZE(p)), ==, V3D_QPU_DONE);
+    assert_all_lanes(q.ra[1], 0);               /* too early */
+    assert_all_lanes(q.ra[2], 0);               /* still too early */
+    assert_all_lanes(q.ra[3], fbits(0.25f));    /* 1/4 */
+}
+
+static void test_sfu_functions(void)
+{
+    struct {
+        unsigned waddr;
+        float in;
+        float out;
+    } cases[] = {
+        { W_SFU_RECIP,     8.0f,  0.125f },
+        { W_SFU_RECIPSQRT, 4.0f,  0.5f   },
+        { W_SFU_EXP,       3.0f,  8.0f   },
+        { W_SFU_LOG,       8.0f,  3.0f   },
+    };
+    unsigned i;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        uint64_t p[] = {
+            set_r0(fbits(cases[i].in)),
+            alu((AluInst){ ALU_DEFAULTS, .op_add = A_OR,
+                           .waddr_add = cases[i].waddr,
+                           .add_a = MUX_R0, .add_b = MUX_R0 }),
+            nop_inst(), nop_inst(),
+            alu((AluInst){ ALU_DEFAULTS, .op_add = A_OR, .waddr_add = 0,
+                           .add_a = MUX_R4, .add_b = MUX_R4 }),
+            prog_end(), nop_inst(), nop_inst(),
+        };
+        V3DQPUState q;
+        TestEnv e = { 0 };
+
+        g_assert_cmpint(run_prog(&q, &e, p, ARRAY_SIZE(p)), ==, V3D_QPU_DONE);
+        assert_all_lanes(q.ra[0], fbits(cases[i].out));
+    }
+}
+
+/* A condition code on the SFU write decides which lanes take the result. */
+static void test_sfu_respects_condition(void)
+{
+    uint64_t p[] = {
+        set_r0(fbits(2.0f)),
+        set_r1(0),
+        /* Set Z in every lane so COND_ZC lets nothing through. */
+        alu((AluInst){ ALU_DEFAULTS, .sf = true, .op_add = A_OR,
+                       .waddr_add = W_NOP, .add_a = MUX_R1, .add_b = MUX_R1 }),
+        alu((AluInst){ ALU_DEFAULTS, .cond_add = COND_ZC, .op_add = A_OR,
+                       .waddr_add = W_SFU_RECIP,
+                       .add_a = MUX_R0, .add_b = MUX_R0 }),
+        nop_inst(), nop_inst(),
+        alu((AluInst){ ALU_DEFAULTS, .op_add = A_OR, .waddr_add = 4,
+                       .add_a = MUX_R4, .add_b = MUX_R4 }),
+        prog_end(), nop_inst(), nop_inst(),
+    };
+    V3DQPUState q;
+    TestEnv e = { 0 };
+
+    g_assert_cmpint(run_prog(&q, &e, p, ARRAY_SIZE(p)), ==, V3D_QPU_DONE);
+    assert_all_lanes(q.ra[4], 0);   /* no lane took the result */
+}
+
 static void test_pack_is_refused(void)
 {
     uint64_t p[] = {
@@ -837,6 +929,9 @@ int main(int argc, char **argv)
     g_test_add_func("/vc4-qpu/write-with-nop-alu", test_write_with_nop_alu);
     g_test_add_func("/vc4-qpu/plain-nop-writes-nothing",
                     test_plain_nop_writes_nothing);
+    g_test_add_func("/vc4-qpu/sfu-recip", test_sfu_recip);
+    g_test_add_func("/vc4-qpu/sfu-functions", test_sfu_functions);
+    g_test_add_func("/vc4-qpu/sfu-condition", test_sfu_respects_condition);
     g_test_add_func("/vc4-qpu/pack-refused", test_pack_is_refused);
 
     return g_test_run();
