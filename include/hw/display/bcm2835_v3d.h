@@ -51,6 +51,10 @@ typedef struct AddressSpace AddressSpace;
 /* Varyings the model interpolates per vertex: four vec4s worth. */
 #define BCM2835_V3D_MAX_VARYINGS 16
 
+/* Draws one job may collect.  Each carries its own state, because a control
+ * list can change shader, culling or depth between primitives. */
+#define BCM2835_V3D_MAX_DRAWS 32
+
 /*
  * A vertex after the coordinate shader has run, read back out of the VPM.
  * Mesa's coordinate shader writes four clip coordinates and then the screen
@@ -66,6 +70,27 @@ typedef struct V3DShadedVertex {
      * shader to interpolate. */
     float vary[BCM2835_V3D_MAX_VARYINGS];
 } V3DShadedVertex;
+
+/*
+ * One primitive packet's worth of geometry, with the state that was in effect
+ * when it was issued.  The model rasterizes at the point the render list
+ * branches to a tile, by which time later packets may have changed the shader
+ * or the depth function, so each draw has to remember its own.
+ */
+typedef struct V3DDraw {
+    uint32_t first;             /* index into shaded[] */
+    uint32_t count;
+    uint32_t prim_mode;
+    uint32_t fs_code_addr;
+    uint32_t fs_uniforms_addr;
+    uint32_t vary_count;
+    bool cfg_valid;
+    bool cfg_enable_front;
+    bool cfg_enable_back;
+    bool cfg_cw_front;
+    uint32_t cfg_depth_func;
+    bool cfg_depth_update;
+} V3DDraw;
 
 /* One vertex attribute as programmed in the relocated GL shader record. */
 typedef struct V3DVertexAttr {
@@ -134,6 +159,8 @@ struct BCM2835V3DState {
      * tile store packets.  It never holds state between jobs, so like the
      * parsed attributes it is not migrated. */
     uint32_t tile_color[BCM2835_V3D_TILE_PIXELS];
+    /* Depth, kept as a float in [0,1]; the packets carry 24-bit integers. */
+    float tile_depth[BCM2835_V3D_TILE_PIXELS];
     uint32_t clear_color[2];
     uint32_t clear_z;
     uint32_t clear_stencil;
@@ -172,6 +199,8 @@ struct BCM2835V3DState {
     uint32_t shaded_count;
     uint32_t shaded_dropped;
     uint32_t vary_count;    /* varyings per vertex the vertex shader wrote */
+    V3DDraw draws[BCM2835_V3D_MAX_DRAWS];
+    uint32_t draw_count;
 
     /* Screen position the shaded coordinates are relative to, from
      * VC4_PACKET_VIEWPORT_OFFSET, in the same 12.4 fixed point. */
@@ -189,6 +218,10 @@ struct BCM2835V3DState {
     bool cfg_enable_front;
     bool cfg_enable_back;
     bool cfg_cw_front;
+    /* Depth test, from byte 1 of the same packet. */
+    uint32_t cfg_depth_func;
+    bool cfg_depth_update;
+    uint32_t frag_zfailed;
 
     /* Narrow B5 texture-fetch probe (not a general TMU implementation). */
     uint32_t tmu_fetches;

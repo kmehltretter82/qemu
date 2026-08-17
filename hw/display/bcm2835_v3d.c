@@ -435,8 +435,12 @@ static void v3d_tile_clear(BCM2835V3DState *s)
 
     /* The two clear colour words are the halves of the 64-bit tile buffer
      * word; for a 32-bit format the driver sets both to the same pixel. */
+    /* The clear depth arrives as a 24-bit integer. */
+    float depth = (float)(s->clear_z & 0xffffff) / (float)0xffffff;
+
     for (i = 0; i < BCM2835_V3D_TILE_PIXELS; i++) {
         s->tile_color[i] = s->clear_color[0];
+        s->tile_depth[i] = depth;
     }
 }
 
@@ -976,6 +980,40 @@ static void v3d_bin_cap_tile_lists(V3DCLWalker *w)
 }
 
 /*
+ * Remember a primitive packet together with the state in force when it was
+ * issued: a control list can change shader, culling or depth between packets,
+ * and rasterization happens later, at the tile branch.
+ */
+static void v3d_record_draw(BCM2835V3DState *s, uint32_t first)
+{
+    V3DDraw *d;
+
+    if (s->shaded_count <= first) {
+        return;
+    }
+    if (s->draw_count >= BCM2835_V3D_MAX_DRAWS) {
+        qemu_log_mask(LOG_UNIMP, "bcm2835-v3d: more than %u draws in a job\n",
+                      BCM2835_V3D_MAX_DRAWS);
+        s->cl_errors++;
+        return;
+    }
+
+    d = &s->draws[s->draw_count++];
+    d->first = first;
+    d->count = s->shaded_count - first;
+    d->prim_mode = s->prim_mode;
+    d->fs_code_addr = s->fs_code_addr;
+    d->fs_uniforms_addr = s->fs_uniforms_addr;
+    d->vary_count = s->vary_count;
+    d->cfg_valid = s->cfg_valid;
+    d->cfg_enable_front = s->cfg_enable_front;
+    d->cfg_enable_back = s->cfg_enable_back;
+    d->cfg_cw_front = s->cfg_cw_front;
+    d->cfg_depth_func = s->cfg_depth_func;
+    d->cfg_depth_update = s->cfg_depth_update;
+}
+
+/*
  * Rasterization.
  *
  * A real binner sorts primitives into per-tile lists in the tile allocation
@@ -1134,11 +1172,12 @@ static const V3DQPUOps v3d_frag_ops = {
 };
 
 /* Shade one group of up to 16 covered pixels and put them in the tile. */
-static void v3d_shade_group(BCM2835V3DState *s, const V3DFragGroup *g)
+static void v3d_shade_group(BCM2835V3DState *s, const V3DDraw *d,
+                            const V3DFragGroup *g)
 {
     V3DFragmentRun run = {
         .s = s,
-        .uniform_addr = s->fs_uniforms_addr,
+        .uniform_addr = d->fs_uniforms_addr,
         .vary_count = g->vary_count,
         .group = g,
     };
@@ -1158,14 +1197,14 @@ static void v3d_shade_group(BCM2835V3DState *s, const V3DFragGroup *g)
     for (i = 0; i < VC4_QPU_LANES; i++) {
         q.ra[VC4_QPU_REG_FRAG_ZW][i] = v3d_bits(i < g->count ? g->w[i] : 1.0f);
     }
-    r = vc4_qpu_run(&q, s->fs_code_addr, V3D_SHADER_INST_LIMIT);
+    r = vc4_qpu_run(&q, d->fs_code_addr, V3D_SHADER_INST_LIMIT);
     s->shader_probes++;
     s->shader_instructions += q.instructions;
     if (r != V3D_QPU_DONE) {
         s->shader_incomplete++;
         if (!s->frag_reported) {
             s->frag_reported = true;
-            trace_bcm2835_v3d_shader_probe("fs (fragment)", s->fs_code_addr,
+            trace_bcm2835_v3d_shader_probe("fs (fragment)", d->fs_code_addr,
                                            q.instructions, run.uniform_reads,
                                            0, vc4_qpu_result_name(r),
                                            q.unsupported ? q.unsupported : "-");
@@ -1182,6 +1221,24 @@ static void v3d_shade_group(BCM2835V3DState *s, const V3DFragGroup *g)
     }
 }
 
+/*
+ * The depth comparison.  The function numbering is the PIPE_FUNC_* one, which
+ * is what VC4_PACKET_CONFIGURATION_BITS carries.
+ */
+static bool v3d_depth_passes(unsigned func, float src, float dst)
+{
+    switch (func) {
+    case 0:  return false;              /* never */
+    case 1:  return src <  dst;
+    case 2:  return src == dst;
+    case 3:  return src <= dst;
+    case 4:  return src >  dst;
+    case 5:  return src != dst;
+    case 6:  return src >= dst;
+    default: return true;               /* always */
+    }
+}
+
 /* Edge function: positive on one side of the line ab, negative on the other. */
 static float v3d_edge(const V3DShadedVertex *a, const V3DShadedVertex *b,
                       float x, float y)
@@ -1189,11 +1246,12 @@ static float v3d_edge(const V3DShadedVertex *a, const V3DShadedVertex *b,
     return (b->x - a->x) * (y - a->y) - (b->y - a->y) * (x - a->x);
 }
 
-static void v3d_raster_triangle(BCM2835V3DState *s, const V3DShadedVertex *a,
+static void v3d_raster_triangle(BCM2835V3DState *s, const V3DDraw *d,
+                                const V3DShadedVertex *a,
                                 const V3DShadedVertex *b,
                                 const V3DShadedVertex *c)
 {
-    V3DFragGroup g = { .vary_count = MIN(s->vary_count,
+    V3DFragGroup g = { .vary_count = MIN(d->vary_count,
                                          BCM2835_V3D_MAX_VARYINGS) };
     float minx, maxx, miny, maxy, area;
     int x0, x1, y0, y1, x, y;
@@ -1212,10 +1270,10 @@ static void v3d_raster_triangle(BCM2835V3DState *s, const V3DShadedVertex *a,
      * with a positive signed area here; VC4_CONFIG_BITS_CW_PRIMITIVES flips
      * which sense counts as the front.
      */
-    if (s->cfg_valid) {
-        bool front = (area > 0.0f) != s->cfg_cw_front;
+    if (d->cfg_valid) {
+        bool front = (area > 0.0f) != d->cfg_cw_front;
 
-        if (front ? !s->cfg_enable_front : !s->cfg_enable_back) {
+        if (front ? !d->cfg_enable_front : !d->cfg_enable_back) {
             s->frag_culled++;
             return;
         }
@@ -1260,13 +1318,34 @@ static void v3d_raster_triangle(BCM2835V3DState *s, const V3DShadedVertex *a,
                 continue;
             }
 
-            lane = g.count;
-            g.px[lane] = x - tile_x0;
-            g.py[lane] = y - tile_y0;
-
             l0 = w0 / area;
             l1 = w1 / area;
             l2 = w2 / area;
+
+            /*
+             * Depth.  Screen-space Z interpolates linearly, so this is the
+             * plain barycentric mix.  The test happens before shading, which
+             * is what the early-Z configuration asks for and costs nothing
+             * here; a shader that wrote its own depth would need late Z.
+             */
+            if (d->cfg_valid) {
+                unsigned idx = (y - tile_y0) * BCM2835_V3D_TILE_W +
+                               (x - tile_x0);
+                float z = l0 * a->z + l1 * b->z + l2 * c->z;
+
+                if (!v3d_depth_passes(d->cfg_depth_func, z,
+                                      s->tile_depth[idx])) {
+                    s->frag_zfailed++;
+                    continue;
+                }
+                if (d->cfg_depth_update) {
+                    s->tile_depth[idx] = z;
+                }
+            }
+
+            lane = g.count;
+            g.px[lane] = x - tile_x0;
+            g.py[lane] = y - tile_y0;
 
             /* 1/w interpolates linearly; W is what the shader multiplies by. */
             rcp_w = l0 * a->rcp_w + l1 * b->rcp_w + l2 * c->rcp_w;
@@ -1280,12 +1359,12 @@ static void v3d_raster_triangle(BCM2835V3DState *s, const V3DShadedVertex *a,
             }
 
             if (++g.count == VC4_QPU_LANES) {
-                v3d_shade_group(s, &g);
+                v3d_shade_group(s, d, &g);
                 g.count = 0;
             }
         }
     }
-    v3d_shade_group(s, &g);
+    v3d_shade_group(s, d, &g);
 }
 
 /*
@@ -1294,37 +1373,43 @@ static void v3d_raster_triangle(BCM2835V3DState *s, const V3DShadedVertex *a,
  */
 static void v3d_raster_tile(BCM2835V3DState *s)
 {
-    uint32_t i;
     uint32_t before = s->frag_shaded;
+    uint32_t n;
 
-    if (!s->shaded_count || !s->fs_code_addr || !s->render_width) {
+    if (!s->draw_count || !s->render_width) {
         return;
     }
 
-    switch (s->prim_mode) {
-    case 4:     /* triangles */
-        for (i = 0; i + 2 < s->shaded_count; i += 3) {
-            v3d_raster_triangle(s, &s->shaded[i], &s->shaded[i + 1],
-                                &s->shaded[i + 2]);
+    for (n = 0; n < s->draw_count; n++) {
+        const V3DDraw *d = &s->draws[n];
+        const V3DShadedVertex *v = &s->shaded[d->first];
+        uint32_t i;
+
+        if (!d->fs_code_addr) {
+            continue;
         }
-        break;
-    case 5:     /* triangle strip */
-        for (i = 0; i + 2 < s->shaded_count; i++) {
-            v3d_raster_triangle(s, &s->shaded[i], &s->shaded[i + 1],
-                                &s->shaded[i + 2]);
+        switch (d->prim_mode) {
+        case 4:     /* triangles */
+            for (i = 0; i + 2 < d->count; i += 3) {
+                v3d_raster_triangle(s, d, &v[i], &v[i + 1], &v[i + 2]);
+            }
+            break;
+        case 5:     /* triangle strip */
+            for (i = 0; i + 2 < d->count; i++) {
+                v3d_raster_triangle(s, d, &v[i], &v[i + 1], &v[i + 2]);
+            }
+            break;
+        case 6:     /* triangle fan */
+            for (i = 1; i + 1 < d->count; i++) {
+                v3d_raster_triangle(s, d, &v[0], &v[i], &v[i + 1]);
+            }
+            break;
+        default:
+            qemu_log_mask(LOG_UNIMP,
+                          "bcm2835-v3d: primitive mode %u not rasterized\n",
+                          d->prim_mode);
+            break;
         }
-        break;
-    case 6:     /* triangle fan */
-        for (i = 1; i + 1 < s->shaded_count; i++) {
-            v3d_raster_triangle(s, &s->shaded[0], &s->shaded[i],
-                                &s->shaded[i + 1]);
-        }
-        break;
-    default:
-        qemu_log_mask(LOG_UNIMP,
-                      "bcm2835-v3d: primitive mode %u not rasterized\n",
-                      s->prim_mode);
-        return;
     }
 
     trace_bcm2835_v3d_raster(s->tile_x, s->tile_y, s->shaded_count,
@@ -1450,7 +1535,12 @@ static void v3d_dispatch_bin(V3DCLWalker *w, uint8_t op)
         s->prim_mode = payload[0] & 0xf;
         trace_bcm2835_v3d_array_prim(payload[0], ldl_le_p(payload + 1),
                                      ldl_le_p(payload + 5));
-        v3d_fetch_array(w, ldl_le_p(payload + 5), ldl_le_p(payload + 1));
+        {
+            uint32_t first = s->shaded_count;
+
+            v3d_fetch_array(w, ldl_le_p(payload + 5), ldl_le_p(payload + 1));
+            v3d_record_draw(s, first);
+        }
         break;
 
     case VC4_PACKET_GL_INDEXED_PRIMITIVE: {
@@ -1467,8 +1557,13 @@ static void v3d_dispatch_bin(V3DCLWalker *w, uint8_t op)
         trace_bcm2835_v3d_indexed_prim(payload[0], ldl_le_p(payload + 1),
                                        ldl_le_p(payload + 5),
                                        ldl_le_p(payload + 9), index_size);
-        v3d_fetch_indexed(w, ldl_le_p(payload + 5), ldl_le_p(payload + 1),
-                          index_size);
+        {
+            uint32_t first = s->shaded_count;
+
+            v3d_fetch_indexed(w, ldl_le_p(payload + 5), ldl_le_p(payload + 1),
+                              index_size);
+            v3d_record_draw(s, first);
+        }
         break;
     }
 
@@ -1481,6 +1576,9 @@ static void v3d_dispatch_bin(V3DCLWalker *w, uint8_t op)
         s->cfg_enable_front = !!(payload[0] & (1u << 0));
         s->cfg_enable_back = !!(payload[0] & (1u << 1));
         s->cfg_cw_front = !!(payload[0] & (1u << 2));
+        /* Byte 1: the depth compare function and whether it writes back. */
+        s->cfg_depth_func = (payload[1] >> 4) & 0x7;
+        s->cfg_depth_update = !!(payload[1] & (1u << 7));
         s->cfg_valid = true;
         trace_bcm2835_v3d_config_bits(payload[0], payload[1], payload[2]);
         break;
@@ -1662,6 +1760,7 @@ static void v3d_run_cl(BCM2835V3DState *s, unsigned thread)
         s->vpm_batches = 0;
         s->shaded_count = 0;
         s->shaded_dropped = 0;
+        s->draw_count = 0;
         s->frag_reported = false;
     }
     trace_bcm2835_v3d_cl_begin(thread, thread ? "render" : "bin", w.ca, w.ea);
@@ -1957,12 +2056,15 @@ static void bcm2835_v3d_reset(DeviceState *dev)
     s->vpm_batches = 0;
     s->shaded_count = 0;
     s->shaded_dropped = 0;
+    s->draw_count = 0;
     s->viewport_x16 = 0;
     s->viewport_y16 = 0;
     s->prim_mode = 0;
     s->frag_shaded = 0;
     s->frag_culled = 0;
     s->cfg_valid = false;
+    s->frag_zfailed = 0;
+    memset(s->tile_depth, 0, sizeof(s->tile_depth));
     s->frag_reported = false;
     memset(s->tile_color, 0, sizeof(s->tile_color));
     s->clear_color[0] = 0;
