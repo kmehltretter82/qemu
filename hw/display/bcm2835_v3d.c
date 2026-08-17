@@ -710,6 +710,61 @@ static void v3d_vcd_fetch_vertex(V3DCLWalker *w, uint32_t index, unsigned lane)
 }
 
 /*
+ * Read back what the coordinate shader produced.
+ *
+ * Mesa's coordinate shader writes, per vertex, the four clip coordinates and
+ * then the screen position as two 12.4 fixed-point halves of one word, Zs, and
+ * 1/Wc (vc4_program.c:emit_coord_end).  With its VPM write setup those land in
+ * rows 0-3 and then 4, 5 and 6 -- so the screen position is row 4, packed X in
+ * the low half by 16A and Y in the high half by 16B.
+ */
+#define V3D_CS_OUT_XY_ROW   4
+#define V3D_CS_OUT_ZS_ROW   5
+#define V3D_CS_OUT_RCPW_ROW 6
+
+static float v3d_f32(uint32_t bits)
+{
+    float f;
+
+    memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+static void v3d_collect_shaded(BCM2835V3DState *s, unsigned lanes)
+{
+    unsigned i;
+
+    if (!s->shader_record_valid || s->vpm.declined) {
+        return;
+    }
+
+    for (i = 0; i < lanes; i++) {
+        uint32_t xy = s->vpm.mem[V3D_CS_OUT_XY_ROW][i];
+        V3DShadedVertex v;
+
+        if (s->shaded_count >= BCM2835_V3D_MAX_SHADED) {
+            s->shaded_dropped++;
+            return;
+        }
+        /* 12.4 fixed point, relative to the viewport centre the
+         * VIEWPORT_OFFSET packet supplies. */
+        int32_t x16 = (int16_t)(xy & 0xffff) + s->viewport_x16;
+        int32_t y16 = (int16_t)(xy >> 16) + s->viewport_y16;
+        uint32_t zbits = s->vpm.mem[V3D_CS_OUT_ZS_ROW][i];
+        uint32_t wbits = s->vpm.mem[V3D_CS_OUT_RCPW_ROW][i];
+
+        v.x = (float)x16 / 16.0f;
+        v.y = (float)y16 / 16.0f;
+        v.z = v3d_f32(zbits);
+        v.rcp_w = v3d_f32(wbits);
+
+        trace_bcm2835_v3d_shaded_vertex(s->shaded_count, x16, y16, zbits,
+                                        wbits);
+        s->shaded[s->shaded_count++] = v;
+    }
+}
+
+/*
  * A batch of up to 16 vertices is now sitting in the VPM, which is when the
  * binner runs the coordinate shader over it.  (The vertex and fragment shaders
  * are decoded at shader-record time instead -- there is nowhere faithful to run
@@ -728,6 +783,7 @@ static void v3d_vcd_flush_batch(V3DCLWalker *w, unsigned lanes)
     /* Bound the work a single job can ask for. */
     if (s->vpm_batches <= V3D_MAX_SHADER_BATCHES) {
         v3d_probe_shader(s, "cs", s->cs_code_addr, s->cs_uniforms_addr);
+        v3d_collect_shaded(s, lanes);
     }
 
     vc4_vpm_reset(&s->vpm);
@@ -991,6 +1047,18 @@ static void v3d_dispatch_bin(V3DCLWalker *w, uint8_t op)
                           index_size);
         break;
     }
+
+    case VC4_PACKET_VIEWPORT_OFFSET:
+        /* Two signed 12.4 fixed-point values: the screen position the shaded
+         * coordinates are relative to. */
+        if (!bcm2835_v3d_dma_read(s, w->pc + 1, payload, 4)) {
+            v3d_walk_stop(w, "viewport offset unreadable", true);
+            return;
+        }
+        s->viewport_x16 = (int16_t)lduw_le_p(payload);
+        s->viewport_y16 = (int16_t)lduw_le_p(payload + 2);
+        trace_bcm2835_v3d_viewport(s->viewport_x16, s->viewport_y16);
+        break;
 
     case VC4_PACKET_FLUSH:
     case VC4_PACKET_FLUSH_ALL:

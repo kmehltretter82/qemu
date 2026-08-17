@@ -44,6 +44,23 @@ OBJECT_DECLARE_SIMPLE_TYPE(BCM2835V3DState, BCM2835_V3D)
 
 typedef struct AddressSpace AddressSpace;
 
+/* How many shaded vertices one job may collect before the model stops
+ * recording them.  A real binner spills to the tile allocation area. */
+#define BCM2835_V3D_MAX_SHADED 1024
+
+/*
+ * A vertex after the coordinate shader has run, read back out of the VPM.
+ * Mesa's coordinate shader writes four clip coordinates and then the screen
+ * position as 12.4 fixed point, Zs and 1/Wc (vc4_program.c:emit_coord_end),
+ * which is rows 4, 5 and 6 of its VPM output.
+ */
+typedef struct V3DShadedVertex {
+    float x;        /* screen space, pixels */
+    float y;
+    float z;
+    float rcp_w;
+} V3DShadedVertex;
+
 /* One vertex attribute as programmed in the relocated GL shader record. */
 typedef struct V3DVertexAttr {
     uint32_t addr;      /* absolute DMA address of element 0 */
@@ -142,6 +159,17 @@ struct BCM2835V3DState {
     V3DVPM vpm;
     uint32_t vpm_rows;      /* rows the current batch filled */
     uint32_t vpm_batches;
+
+    /* Vertices the coordinate shader has shaded, in screen space, collected
+     * over the bin job so the render job can turn them into fragments. */
+    V3DShadedVertex shaded[BCM2835_V3D_MAX_SHADED];
+    uint32_t shaded_count;
+    uint32_t shaded_dropped;
+
+    /* Screen position the shaded coordinates are relative to, from
+     * VC4_PACKET_VIEWPORT_OFFSET, in the same 12.4 fixed point. */
+    int32_t viewport_x16;
+    int32_t viewport_y16;
 
     /* Narrow B5 texture-fetch probe (not a general TMU implementation). */
     uint32_t tmu_fetches;

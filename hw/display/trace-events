@@ -249,3 +249,5 @@ bcm2835_v3d_tile_store(uint32_t addr, uint32_t bits, const char *eof) "store til
 bcm2835_v3d_shader_probe(const char *which, uint32_t addr, uint64_t instructions, uint32_t uniforms, uint32_t special_writes, const char *result, const char *detail) "%s shader 0x%08x: %"PRIu64" instructions, %u uniforms, %u external writes -> %s (%s)"
 bcm2835_v3d_tlb_transfer(const char *dir, uint32_t addr, uint32_t tile_x, uint32_t tile_y, uint64_t pixels, uint32_t tiling) "tile buffer %s at 0x%08x, tile %u,%u: %"PRIu64" pixels, layout %u"
 bcm2835_v3d_vpm_load(uint32_t rows, uint32_t vertices) "VPM loaded %u rows for %u vertices"
+bcm2835_v3d_viewport(int32_t x16, int32_t y16) "viewport offset %d/16,%d/16 px"
+bcm2835_v3d_shaded_vertex(uint32_t i, int32_t x16, int32_t y16, uint32_t zbits, uint32_t wbits) "shaded vertex %u: screen %d/16,%d/16 px, z 0x%08x, 1/w 0x%08x"
