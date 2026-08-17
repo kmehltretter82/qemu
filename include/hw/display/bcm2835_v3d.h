@@ -90,6 +90,12 @@ typedef struct V3DDraw {
     bool cfg_cw_front;
     uint32_t cfg_depth_func;
     bool cfg_depth_update;
+    /* The clip window, which is what a GL scissor becomes. */
+    bool clip_valid;
+    uint32_t clip_x;
+    uint32_t clip_y;
+    uint32_t clip_w;
+    uint32_t clip_h;
 } V3DDraw;
 
 /* One vertex attribute as programmed in the relocated GL shader record. */
@@ -222,6 +228,13 @@ struct BCM2835V3DState {
     uint32_t cfg_depth_func;
     bool cfg_depth_update;
     uint32_t frag_zfailed;
+
+    /* VC4_PACKET_CLIP_WINDOW: left, bottom, width, height in pixels. */
+    bool clip_valid;
+    uint32_t clip_x;
+    uint32_t clip_y;
+    uint32_t clip_w;
+    uint32_t clip_h;
 
     /* Narrow B5 texture-fetch probe (not a general TMU implementation). */
     uint32_t tmu_fetches;

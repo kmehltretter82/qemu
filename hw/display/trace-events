@@ -254,3 +254,4 @@ bcm2835_v3d_shaded_vertex(uint32_t i, int32_t x16, int32_t y16, uint32_t zbits, 
 bcm2835_v3d_raster(uint32_t tile_x, uint32_t tile_y, uint32_t vertices, uint32_t fragments) "rasterized tile %u,%u: %u shaded vertices -> %u fragments"
 bcm2835_v3d_varyings(uint32_t count, uint32_t vertices) "vertex shader wrote %u varyings for %u vertices"
 bcm2835_v3d_config_bits(uint8_t b0, uint8_t b1, uint8_t b2) "configuration bits %02x %02x %02x"
+bcm2835_v3d_clip_window(uint32_t x, uint32_t y, uint32_t w, uint32_t h) "clip window %u,%u %ux%u"

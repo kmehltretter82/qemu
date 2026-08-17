@@ -1041,6 +1041,11 @@ static void v3d_record_draw(BCM2835V3DState *s, uint32_t first)
     d->cfg_cw_front = s->cfg_cw_front;
     d->cfg_depth_func = s->cfg_depth_func;
     d->cfg_depth_update = s->cfg_depth_update;
+    d->clip_valid = s->clip_valid;
+    d->clip_x = s->clip_x;
+    d->clip_y = s->clip_y;
+    d->clip_w = s->clip_w;
+    d->clip_h = s->clip_h;
 }
 
 /*
@@ -1458,6 +1463,14 @@ static void v3d_raster_triangle(BCM2835V3DState *s, const V3DDraw *d,
     y1 = MIN((int)ceilf(maxy), MIN(tile_y0 + BCM2835_V3D_TILE_H,
                                    (int)s->render_height));
 
+    /* ... and to the clip window, which is where a GL scissor arrives. */
+    if (d->clip_valid) {
+        x0 = MAX(x0, (int)d->clip_x);
+        x1 = MIN(x1, (int)(d->clip_x + d->clip_w));
+        y0 = MAX(y0, (int)d->clip_y);
+        y1 = MIN(y1, (int)(d->clip_y + d->clip_h));
+    }
+
     for (y = y0; y < y1; y++) {
         for (x = x0; x < x1; x++) {
             float cx = (float)x + 0.5f;
@@ -1722,6 +1735,22 @@ static void v3d_dispatch_bin(V3DCLWalker *w, uint8_t op)
         }
         break;
     }
+
+    case VC4_PACKET_CLIP_WINDOW:
+        /* Four u16s: left, bottom, width, height.  This is where a GL scissor
+         * ends up, and it clips fragments as well as primitives. */
+        if (!bcm2835_v3d_dma_read(s, w->pc + 1, payload, 8)) {
+            v3d_walk_stop(w, "clip window unreadable", true);
+            return;
+        }
+        s->clip_x = lduw_le_p(payload);
+        s->clip_y = lduw_le_p(payload + 2);
+        s->clip_w = lduw_le_p(payload + 4);
+        s->clip_h = lduw_le_p(payload + 6);
+        s->clip_valid = true;
+        trace_bcm2835_v3d_clip_window(s->clip_x, s->clip_y, s->clip_w,
+                                      s->clip_h);
+        break;
 
     case VC4_PACKET_CONFIGURATION_BITS:
         /* Byte 0 carries the face-culling controls (vc4_packet.h). */
@@ -2219,6 +2248,7 @@ static void bcm2835_v3d_reset(DeviceState *dev)
     s->frag_shaded = 0;
     s->frag_culled = 0;
     s->cfg_valid = false;
+    s->clip_valid = false;
     s->frag_zfailed = 0;
     memset(s->tile_depth, 0, sizeof(s->tile_depth));
     s->frag_reported = false;

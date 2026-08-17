@@ -692,6 +692,167 @@ int main(void)
         report("texture sampled", ok, detail);
     }
 
+    /*
+     * Stages 10-13 sweep paths the model has code for but has never actually
+     * been asked to run by a real driver: indexed drawing, the strip and fan
+     * primitive modes, more vertices than fit in one 16-lane batch, and the
+     * scissor rectangle.
+     */
+    {
+        /* A quad as four vertices, drawn three different ways. */
+        static const GLfloat quad4[] = {
+            -0.8f, -0.8f, 0.0f, 1.0f,
+             0.8f, -0.8f, 0.0f, 1.0f,
+            -0.8f,  0.8f, 0.0f, 1.0f,
+             0.8f,  0.8f, 0.0f, 1.0f,
+        };
+        static const GLushort strip_idx[] = { 0, 1, 2, 3 };
+        static const GLushort fan_idx[] = { 0, 1, 3, 2 };
+        GLuint qbo, ibo;
+        unsigned centre = ((H / 2) * W + W / 2) * 4;
+        char detail[128];
+
+        glUseProgram(prog);                     /* opaque red */
+        glDisableVertexAttribArray(1);
+        glGenBuffers(1, &qbo);
+        glBindBuffer(GL_ARRAY_BUFFER, qbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quad4), quad4, GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+
+        glGenBuffers(1, &ibo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+
+        /* Indexed triangle strip. */
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(strip_idx), strip_idx,
+                     GL_STATIC_DRAW);
+        glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_SHORT, 0);
+        glFinish();
+        memset(px, 0x5a, sizeof(px));
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        snprintf(detail, sizeof(detail), "centre %02x%02x%02x (want ff0000)",
+                 px[centre], px[centre + 1], px[centre + 2]);
+        report("indexed triangle strip",
+               px[centre] == 0xff && px[centre + 2] == 0x00, detail);
+
+        /* Indexed triangle fan over the same four vertices. */
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(fan_idx), fan_idx,
+                     GL_STATIC_DRAW);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawElements(GL_TRIANGLE_FAN, 4, GL_UNSIGNED_SHORT, 0);
+        glFinish();
+        memset(px, 0x5a, sizeof(px));
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        snprintf(detail, sizeof(detail), "centre %02x%02x%02x (want ff0000)",
+                 px[centre], px[centre + 1], px[centre + 2]);
+        report("indexed triangle fan",
+               px[centre] == 0xff && px[centre + 2] == 0x00, detail);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    }
+
+    /*
+     * More vertices than one 16-lane batch, so the model has to shade several
+     * batches and stitch the results together.
+     */
+    {
+        enum { STRIP_N = 42 };
+        GLfloat strip[STRIP_N * 4];
+        GLuint sbo;
+        unsigned i, red = 0;
+        char detail[96];
+
+        /* A horizontal band built from a long triangle strip. */
+        for (i = 0; i < STRIP_N; i++) {
+            float t = (float)(i / 2) / (float)(STRIP_N / 2 - 1);
+
+            strip[i * 4 + 0] = -1.0f + 2.0f * t;
+            strip[i * 4 + 1] = (i & 1) ? 0.6f : -0.6f;
+            strip[i * 4 + 2] = 0.0f;
+            strip[i * 4 + 3] = 1.0f;
+        }
+
+        glGenBuffers(1, &sbo);
+        glBindBuffer(GL_ARRAY_BUFFER, sbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(strip), strip, GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+
+        glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, STRIP_N);
+        glFinish();
+
+        memset(px, 0x5a, sizeof(px));
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        for (i = 0; i < W * H; i++) {
+            if (px[i * 4] == 0xff && px[i * 4 + 2] == 0x00) {
+                red++;
+            }
+        }
+        /* The band is 60% of the height across the full width. */
+        snprintf(detail, sizeof(detail), "%u vertices, %u/%u pixels covered",
+                 STRIP_N, red, W * H);
+        report("multi-batch strip",
+               red > (W * H) / 3 && red < (W * H) * 4 / 5, detail);
+    }
+
+    /* The scissor rectangle must keep a draw out of the rest of the surface. */
+    {
+        const unsigned char *inside, *outside;
+        char detail[96];
+
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+
+        glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(0, 0, W / 2, H);          /* left half only */
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glFinish();
+        glDisable(GL_SCISSOR_TEST);
+
+        memset(px, 0x5a, sizeof(px));
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        /* Two points the triangle covers, one each side of the scissor edge. */
+        inside = px + ((H / 4) * W + W / 2 - 2) * 4;
+        outside = px + ((H / 4) * W + W / 2 + 2) * 4;
+        snprintf(detail, sizeof(detail),
+                 "left half: in %02x%02x%02x, out %02x%02x%02x"
+                 " (out must stay blue)",
+                 inside[0], inside[1], inside[2],
+                 outside[0], outside[1], outside[2]);
+        report("scissor in x",
+               inside[0] == 0xff && outside[2] == 0xff && outside[0] == 0x00,
+               detail);
+
+        /*
+         * And again across the other axis, so the model cannot pass with the
+         * scissor's y origin upside down.  glReadPixels and glScissor share an
+         * origin, so scissoring the bottom half must keep the low rows.
+         */
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(0, 0, W, H / 2);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glFinish();
+        glDisable(GL_SCISSOR_TEST);
+
+        memset(px, 0x5a, sizeof(px));
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        /* The triangle is wide at the bottom, so a low row is covered. */
+        inside = px + (2 * W + W / 2) * 4;
+        outside = px + ((H - 3) * W + W / 2) * 4;
+        snprintf(detail, sizeof(detail),
+                 "bottom half: in %02x%02x%02x, out %02x%02x%02x"
+                 " (out must stay blue)",
+                 inside[0], inside[1], inside[2],
+                 outside[0], outside[1], outside[2]);
+        report("scissor in y",
+               inside[0] == 0xff && outside[2] == 0xff && outside[0] == 0x00,
+               detail);
+    }
+
 done:
     printf("GLES: %d stage(s) failed\n", failures);
     return failures ? 1 : 0;
