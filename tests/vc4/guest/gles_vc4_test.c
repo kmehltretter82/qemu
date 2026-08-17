@@ -23,6 +23,8 @@
 
 #define W 16
 #define H 16
+/* Bigger than one 64x64 tile, and not a whole number of them. */
+#define BIG 96
 #define GL_RGBA8_OES 0x8058
 
 static int failures;
@@ -248,6 +250,152 @@ int main(void)
                    red > (W * H) / 5 && red < (W * H) * 3 / 4 &&
                    tl[2] == 0xff && tr[2] == 0xff,
                    detail);
+        }
+    }
+
+    /*
+     * Stage 4: a surface bigger than one 64x64 tile, so the render list loops
+     * over several of them and the model has to place each tile's pixels
+     * correctly (and clip the partial ones at the edges).
+     */
+    {
+        GLuint big_fbo, big_rb;
+        unsigned char *big = malloc(BIG * BIG * 4);
+        unsigned x2, y2, red = 0, bad_corner = 0;
+
+        if (!big) {
+            report("multi-tile surface", 0, "out of memory");
+            goto done;
+        }
+        glGenFramebuffers(1, &big_fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, big_fbo);
+        glGenRenderbuffers(1, &big_rb);
+        glBindRenderbuffer(GL_RENDERBUFFER, big_rb);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8_OES, BIG, BIG);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_RENDERBUFFER, big_rb);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) !=
+            GL_FRAMEBUFFER_COMPLETE) {
+            report("multi-tile surface", 0, "framebuffer incomplete");
+            free(big);
+            goto done;
+        }
+
+        glViewport(0, 0, BIG, BIG);
+        glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glFinish();
+
+        memset(big, 0x5a, BIG * BIG * 4);
+        glReadPixels(0, 0, BIG, BIG, GL_RGBA, GL_UNSIGNED_BYTE, big);
+        for (y2 = 0; y2 < BIG; y2++) {
+            for (x2 = 0; x2 < BIG; x2++) {
+                const unsigned char *p = big + (y2 * BIG + x2) * 4;
+
+                if (p[0] == 0xff && p[1] == 0x00 && p[2] == 0x00) {
+                    red++;
+                }
+            }
+        }
+        /* The top two corners are outside the triangle whichever tile they
+         * fall in. */
+        if (big[2] != 0xff) {
+            bad_corner++;
+        }
+        if (big[((BIG - 1)) * 4 + 2] != 0xff) {
+            bad_corner++;
+        }
+        {
+            char detail[96];
+            unsigned total = BIG * BIG;
+
+            snprintf(detail, sizeof(detail),
+                     "%ux%u = %u tiles, %u/%u covered, %u bad corners",
+                     BIG, BIG, ((BIG + 63) / 64) * ((BIG + 63) / 64),
+                     red, total, bad_corner);
+            report("multi-tile triangle",
+                   red > total / 5 && red < total * 3 / 4 && !bad_corner,
+                   detail);
+        }
+        free(big);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glViewport(0, 0, W, H);
+    }
+
+    /*
+     * Stage 5: an interpolated varying.  Each vertex gets its own colour and
+     * the fragment shader reads the interpolated value, so the result has to
+     * change across the triangle rather than being flat.
+     */
+    {
+        static const char *vary_vs =
+            "attribute vec4 pos;\n"
+            "attribute vec4 col;\n"
+            "varying vec4 vcol;\n"
+            "void main() { gl_Position = pos; vcol = col; }\n";
+        static const char *vary_fs =
+            "precision mediump float;\n"
+            "varying vec4 vcol;\n"
+            "void main() { gl_FragColor = vcol; }\n";
+        static const GLfloat colours[] = {
+            1.0f, 0.0f, 0.0f, 1.0f,
+            0.0f, 1.0f, 0.0f, 1.0f,
+            0.0f, 0.0f, 1.0f, 1.0f,
+        };
+        GLuint vs2 = compile(GL_VERTEX_SHADER, vary_vs);
+        GLuint fs2 = compile(GL_FRAGMENT_SHADER, vary_fs);
+        GLuint prog2, cbo;
+        GLint linked2 = 0;
+
+        if (!vs2 || !fs2) {
+            report("varying shaders compile", 0, "see log above");
+            goto done;
+        }
+        prog2 = glCreateProgram();
+        glAttachShader(prog2, vs2);
+        glAttachShader(prog2, fs2);
+        glBindAttribLocation(prog2, 0, "pos");
+        glBindAttribLocation(prog2, 1, "col");
+        glLinkProgram(prog2);
+        glGetProgramiv(prog2, GL_LINK_STATUS, &linked2);
+        if (!linked2) {
+            char log[512] = { 0 };
+
+            glGetProgramInfoLog(prog2, sizeof(log) - 1, NULL, log);
+            report("varying shaders link", 0, log);
+            goto done;
+        }
+        glUseProgram(prog2);
+
+        glGenBuffers(1, &cbo);
+        glBindBuffer(GL_ARRAY_BUFFER, cbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(colours), colours,
+                     GL_STATIC_DRAW);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 0, 0);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glFinish();
+
+        memset(px, 0x5a, sizeof(px));
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        {
+            /* Near the bottom-left vertex it should lean red, near the
+             * bottom-right green: the colours must differ. */
+            const unsigned char *l = px + ((H - 4) * W + 3) * 4;
+            const unsigned char *r2 = px + ((H - 4) * W + (W - 4)) * 4;
+            char detail[96];
+            int differs = l[0] != r2[0] || l[1] != r2[1];
+
+            snprintf(detail, sizeof(detail),
+                     "left %02x%02x%02x, right %02x%02x%02x",
+                     l[0], l[1], l[2], r2[0], r2[1], r2[2]);
+            report("varying interpolated", differs, detail);
         }
     }
 

@@ -135,6 +135,10 @@ check_serial "GLSL links"                     "glsl link              PASS"
 check_serial "a real draw is submitted"       "draw submitted         PASS"
 check_serial "the triangle is rasterized"    "triangle rasterized    PASS"
 check_serial "and it has the right shape"    "triangle has a shape   PASS"
+check_serial "a multi-tile surface works"    "multi-tile triangle    PASS"
+# Reflects the guest's own tally, so a stage added to the test shows up here
+# without the runner having to learn about it.
+check_serial "every stage passed"            "GLES: 0 stage(s) failed"
 
 if grep -q "control list aborted" "$TRACE"; then
     echo "  FAIL : a control list was aborted"

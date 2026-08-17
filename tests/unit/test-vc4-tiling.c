@@ -86,14 +86,41 @@ static void test_lt_offsets(void)
     g_assert_cmpuint(off, ==, 4 * 64);
 }
 
-static void test_t_is_declined(void)
+/*
+ * T groups microtiles into 4 KB tiles of 8x8 (four 1 KB subtiles of 4x4).  Odd
+ * rows of 4 KB tiles run right to left and the subtiles are permuted, so these
+ * offsets come from Mesa's t_utile_address().  With 32-bit pixels a microtile
+ * is 4x4 px, a subtile 16x16 and a 4 KB tile 32x32.
+ */
+static void test_t_offsets(void)
 {
-    uint32_t off = 0xdeadbeef;
+    uint32_t off;
 
-    g_assert_false(vc4_tiling_supported(VC4_TILING_T));
-    g_assert_false(vc4_tiling_offset(VC4_TILING_T, 4, 32, 0, 0, &off));
-    /* Declining must not leave a plausible-looking offset behind. */
-    g_assert_cmpuint(off, ==, 0xdeadbeef);
+    g_assert_true(vc4_tiling_supported(VC4_TILING_T));
+
+    /* 64 px wide = 16 microtiles = two 4 KB tiles per row. */
+    g_assert_true(vc4_tiling_offset(VC4_TILING_T, 4, 64, 0, 0, &off));
+    g_assert_cmpuint(off, ==, 0);
+
+    /* Subtile 1 of tile 0 sits at 3 KB, not 1 KB: the even map is {0,3,1,2}. */
+    g_assert_true(vc4_tiling_offset(VC4_TILING_T, 4, 64, 16, 0, &off));
+    g_assert_cmpuint(off, ==, 3 * 1024);
+    g_assert_true(vc4_tiling_offset(VC4_TILING_T, 4, 64, 0, 16, &off));
+    g_assert_cmpuint(off, ==, 1 * 1024);
+    g_assert_true(vc4_tiling_offset(VC4_TILING_T, 4, 64, 16, 16, &off));
+    g_assert_cmpuint(off, ==, 2 * 1024);
+
+    /* The second 4 KB tile of the top row. */
+    g_assert_true(vc4_tiling_offset(VC4_TILING_T, 4, 64, 32, 0, &off));
+    g_assert_cmpuint(off, ==, 4096);
+
+    /* The second row of 4 KB tiles runs right to left, so x=0 lands in the
+     * last tile of that row. */
+    g_assert_true(vc4_tiling_offset(VC4_TILING_T, 4, 64, 0, 32, &off));
+    g_assert_cmpuint(off, ==, 4096 * (1 * 2 + 1) + 2 * 1024);
+
+    /* A width that is not a whole number of 4 KB tiles is refused. */
+    g_assert_false(vc4_tiling_offset(VC4_TILING_T, 4, 16, 0, 0, &off));
 }
 
 /*
@@ -104,9 +131,16 @@ static void check_bijection(unsigned tiling, unsigned cpp, unsigned width,
                             unsigned height)
 {
     unsigned aligned_width = vc4_aligned_width(tiling, cpp, width);
-    unsigned aligned_height = tiling == VC4_TILING_LINEAR
-                            ? height
-                            : ROUND_UP(height, vc4_utile_height(cpp));
+    unsigned aligned_height;
+
+    if (tiling == VC4_TILING_LINEAR) {
+        aligned_height = height;
+    } else if (tiling == VC4_TILING_T) {
+        /* T is a whole number of 4 KB tiles in both directions. */
+        aligned_height = ROUND_UP(height, vc4_utile_height(cpp) * 8);
+    } else {
+        aligned_height = ROUND_UP(height, vc4_utile_height(cpp));
+    }
     uint32_t size = aligned_width * aligned_height * cpp;
     uint8_t *seen = g_malloc0(size);
     unsigned x, y, i;
@@ -138,6 +172,15 @@ static void test_linear_bijection(void)
     check_bijection(VC4_TILING_LINEAR, 1, 7, 3);
 }
 
+static void test_t_bijection(void)
+{
+    check_bijection(VC4_TILING_T, 4, 64, 64);
+    check_bijection(VC4_TILING_T, 4, 96, 96);
+    check_bijection(VC4_TILING_T, 4, 33, 33);
+    check_bijection(VC4_TILING_T, 2, 70, 40);
+    check_bijection(VC4_TILING_T, 1, 100, 20);
+}
+
 static void test_lt_bijection(void)
 {
     check_bijection(VC4_TILING_LT, 4, 16, 16);
@@ -155,7 +198,8 @@ int main(int argc, char **argv)
     g_test_add_func("/vc4-tiling/aligned-width", test_aligned_width);
     g_test_add_func("/vc4-tiling/linear-offsets", test_linear_offsets);
     g_test_add_func("/vc4-tiling/lt-offsets", test_lt_offsets);
-    g_test_add_func("/vc4-tiling/t-declined", test_t_is_declined);
+    g_test_add_func("/vc4-tiling/t-offsets", test_t_offsets);
+    g_test_add_func("/vc4-tiling/t-bijection", test_t_bijection);
     g_test_add_func("/vc4-tiling/linear-bijection", test_linear_bijection);
     g_test_add_func("/vc4-tiling/lt-bijection", test_lt_bijection);
 
