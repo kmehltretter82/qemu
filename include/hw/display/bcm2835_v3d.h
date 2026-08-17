@@ -46,7 +46,10 @@ typedef struct AddressSpace AddressSpace;
 
 /* How many shaded vertices one job may collect before the model stops
  * recording them.  A real binner spills to the tile allocation area. */
-#define BCM2835_V3D_MAX_SHADED 1024
+#define BCM2835_V3D_MAX_SHADED 256
+
+/* Varyings the model interpolates per vertex: four vec4s worth. */
+#define BCM2835_V3D_MAX_VARYINGS 16
 
 /*
  * A vertex after the coordinate shader has run, read back out of the VPM.
@@ -59,6 +62,9 @@ typedef struct V3DShadedVertex {
     float y;
     float z;
     float rcp_w;
+    /* What the vertex shader wrote after the position, for the fragment
+     * shader to interpolate. */
+    float vary[BCM2835_V3D_MAX_VARYINGS];
 } V3DShadedVertex;
 
 /* One vertex attribute as programmed in the relocated GL shader record. */
@@ -165,6 +171,7 @@ struct BCM2835V3DState {
     V3DShadedVertex shaded[BCM2835_V3D_MAX_SHADED];
     uint32_t shaded_count;
     uint32_t shaded_dropped;
+    uint32_t vary_count;    /* varyings per vertex the vertex shader wrote */
 
     /* Screen position the shaded coordinates are relative to, from
      * VC4_PACKET_VIEWPORT_OFFSET, in the same 12.4 fixed point. */

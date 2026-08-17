@@ -252,3 +252,4 @@ bcm2835_v3d_vpm_load(uint32_t rows, uint32_t vertices) "VPM loaded %u rows for %
 bcm2835_v3d_viewport(int32_t x16, int32_t y16) "viewport offset %d/16,%d/16 px"
 bcm2835_v3d_shaded_vertex(uint32_t i, int32_t x16, int32_t y16, uint32_t zbits, uint32_t wbits) "shaded vertex %u: screen %d/16,%d/16 px, z 0x%08x, 1/w 0x%08x"
 bcm2835_v3d_raster(uint32_t tile_x, uint32_t tile_y, uint32_t vertices, uint32_t fragments) "rasterized tile %u,%u: %u shaded vertices -> %u fragments"
+bcm2835_v3d_varyings(uint32_t count, uint32_t vertices) "vertex shader wrote %u varyings for %u vertices"

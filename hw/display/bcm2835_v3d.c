@@ -732,6 +732,14 @@ static float v3d_f32(uint32_t bits)
     return f;
 }
 
+static uint32_t v3d_bits(float f)
+{
+    uint32_t u;
+
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
 static void v3d_collect_shaded(BCM2835V3DState *s, unsigned lanes)
 {
     unsigned i;
@@ -767,6 +775,38 @@ static void v3d_collect_shaded(BCM2835V3DState *s, unsigned lanes)
 }
 
 /*
+ * The vertex shader has run; its varyings sit in the VPM after the three rows
+ * of position data it writes first.
+ */
+#define V3D_VS_OUT_VARY_ROW 3
+
+static void v3d_collect_varyings(BCM2835V3DState *s, uint32_t first,
+                                 unsigned lanes)
+{
+    unsigned count, i, k;
+
+    if (s->vpm.declined || s->vpm.wr_row <= V3D_VS_OUT_VARY_ROW) {
+        return;
+    }
+
+    count = s->vpm.wr_row - V3D_VS_OUT_VARY_ROW;
+    if (count > BCM2835_V3D_MAX_VARYINGS) {
+        qemu_log_mask(LOG_UNIMP, "bcm2835-v3d: %u varyings, only %u kept\n",
+                      count, BCM2835_V3D_MAX_VARYINGS);
+        count = BCM2835_V3D_MAX_VARYINGS;
+    }
+    s->vary_count = count;
+
+    for (i = 0; i < lanes && first + i < s->shaded_count; i++) {
+        for (k = 0; k < count; k++) {
+            s->shaded[first + i].vary[k] =
+                v3d_f32(s->vpm.mem[V3D_VS_OUT_VARY_ROW + k][i]);
+        }
+    }
+    trace_bcm2835_v3d_varyings(count, lanes);
+}
+
+/*
  * A batch of up to 16 vertices is now sitting in the VPM, which is when the
  * binner runs the coordinate shader over it.  (The vertex and fragment shaders
  * are decoded at shader-record time instead -- there is nowhere faithful to run
@@ -784,8 +824,27 @@ static void v3d_vcd_flush_batch(V3DCLWalker *w, unsigned lanes)
 
     /* Bound the work a single job can ask for. */
     if (s->vpm_batches <= V3D_MAX_SHADER_BATCHES) {
+        uint32_t input[VC4_VPM_ROWS][VC4_VPM_LANES];
+        uint32_t first = s->shaded_count;
+
+        /* Both shaders read the fetched attributes, and each overwrites the
+         * VPM with its own output, so keep a copy of the input. */
+        memcpy(input, s->vpm.mem, sizeof(input));
+
         v3d_probe_shader(s, "cs", s->cs_code_addr, s->cs_uniforms_addr);
         v3d_collect_shaded(s, lanes);
+
+        /*
+         * The vertex shader writes the same position and then one row per
+         * varying, in the order the fragment shader reads them
+         * (vc4_program.c:emit_vert_end).  Run it for those.
+         */
+        if (s->vs_code_addr && s->shaded_count > first) {
+            vc4_vpm_reset(&s->vpm);
+            memcpy(s->vpm.mem, input, sizeof(input));
+            v3d_probe_shader(s, "vs", s->vs_code_addr, s->vs_uniforms_addr);
+            v3d_collect_varyings(s, first, lanes);
+        }
     }
 
     vc4_vpm_reset(&s->vpm);
@@ -942,7 +1001,29 @@ typedef struct V3DFragmentRun {
     unsigned uniform_reads;
     uint32_t color[VC4_QPU_LANES];
     uint16_t color_mask;
+
+    /*
+     * Interpolated varyings for the sixteen fragments in flight, and each
+     * varying's constant term.  The shader reads them in order and finishes
+     * the interpolation itself as vary * W + r5, so what goes in vary[] is
+     * (v - c) / w interpolated linearly, and c is the reference value.
+     */
+    float vary[BCM2835_V3D_MAX_VARYINGS][VC4_QPU_LANES];
+    float vary_c[BCM2835_V3D_MAX_VARYINGS];
+    unsigned vary_count;
+    unsigned vary_read;
 } V3DFragmentRun;
+
+/* One group of up to sixteen covered pixels, ready to shade. */
+typedef struct V3DFragGroup {
+    uint16_t px[VC4_QPU_LANES];
+    uint16_t py[VC4_QPU_LANES];
+    float w[VC4_QPU_LANES];
+    float vary[BCM2835_V3D_MAX_VARYINGS][VC4_QPU_LANES];
+    float vary_c[BCM2835_V3D_MAX_VARYINGS];
+    unsigned vary_count;
+    unsigned count;
+} V3DFragGroup;
 
 static bool v3d_frag_fetch(void *opaque, uint32_t addr, uint64_t *inst)
 {
@@ -995,29 +1076,56 @@ static void v3d_frag_write_special(void *opaque, unsigned waddr, bool file_b,
     f->color_mask |= mask;
 }
 
+/* Hand the shader the next varying, and its constant term for r5. */
+static bool v3d_frag_read_varying(void *opaque, uint32_t vary[VC4_QPU_LANES],
+                                  uint32_t c[VC4_QPU_LANES])
+{
+    V3DFragmentRun *f = opaque;
+    unsigned k = f->vary_read;
+    unsigned i;
+
+    if (k >= f->vary_count) {
+        return false;
+    }
+    for (i = 0; i < VC4_QPU_LANES; i++) {
+        vary[i] = v3d_bits(f->vary[k][i]);
+        c[i] = v3d_bits(f->vary_c[k]);
+    }
+    f->vary_read++;
+    return true;
+}
+
 static const V3DQPUOps v3d_frag_ops = {
     .fetch = v3d_frag_fetch,
     .read_special = v3d_frag_read_special,
     .write_special = v3d_frag_write_special,
+    .read_varying = v3d_frag_read_varying,
 };
 
 /* Shade one group of up to 16 covered pixels and put them in the tile. */
-static void v3d_shade_group(BCM2835V3DState *s, const uint16_t *px,
-                            const uint16_t *py, unsigned count)
+static void v3d_shade_group(BCM2835V3DState *s, const V3DFragGroup *g)
 {
     V3DFragmentRun run = {
         .s = s,
         .uniform_addr = s->fs_uniforms_addr,
+        .vary_count = g->vary_count,
     };
     V3DQPUState q;
     V3DQPUResult r;
     unsigned i;
 
-    if (!count) {
+    if (!g->count) {
         return;
     }
+    memcpy(run.vary, g->vary, sizeof(run.vary));
+    memcpy(run.vary_c, g->vary_c, sizeof(run.vary_c));
 
     vc4_qpu_init(&q, &v3d_frag_ops, &run);
+    /* The hardware hands the fragment shader its W in the payload register
+     * (regfile A 15); Mesa's shaders read it straight from there. */
+    for (i = 0; i < VC4_QPU_LANES; i++) {
+        q.ra[VC4_QPU_REG_FRAG_ZW][i] = v3d_bits(i < g->count ? g->w[i] : 1.0f);
+    }
     r = vc4_qpu_run(&q, s->fs_code_addr, V3D_SHADER_INST_LIMIT);
     s->shader_probes++;
     s->shader_instructions += q.instructions;
@@ -1033,9 +1141,10 @@ static void v3d_shade_group(BCM2835V3DState *s, const uint16_t *px,
         return;
     }
 
-    for (i = 0; i < count; i++) {
+    for (i = 0; i < g->count; i++) {
         if (run.color_mask & (1u << i)) {
-            s->tile_color[py[i] * BCM2835_V3D_TILE_W + px[i]] = run.color[i];
+            s->tile_color[g->py[i] * BCM2835_V3D_TILE_W + g->px[i]] =
+                run.color[i];
             s->frag_shaded++;
         }
     }
@@ -1052,12 +1161,28 @@ static void v3d_raster_triangle(BCM2835V3DState *s, const V3DShadedVertex *a,
                                 const V3DShadedVertex *b,
                                 const V3DShadedVertex *c)
 {
-    uint16_t gx[VC4_QPU_LANES], gy[VC4_QPU_LANES];
-    unsigned group = 0;
-    float minx, maxx, miny, maxy;
+    V3DFragGroup g = { .vary_count = MIN(s->vary_count,
+                                         BCM2835_V3D_MAX_VARYINGS) };
+    float minx, maxx, miny, maxy, area;
     int x0, x1, y0, y1, x, y;
     int tile_x0 = s->tile_x * BCM2835_V3D_TILE_W;
     int tile_y0 = s->tile_y * BCM2835_V3D_TILE_H;
+    unsigned k;
+
+    area = v3d_edge(a, b, c->x, c->y);
+    if (area == 0.0f) {
+        return;                 /* degenerate */
+    }
+
+    /*
+     * Perspective-correct interpolation, arranged the way the hardware hands
+     * it to the shader.  The shader computes vary * W + c, so with c taken as
+     * the value at the first vertex, vary has to be (v - c)/w interpolated
+     * linearly in screen space -- which it is, since both v/w and 1/w are.
+     */
+    for (k = 0; k < g.vary_count; k++) {
+        g.vary_c[k] = a->vary[k];
+    }
 
     minx = MIN(a->x, MIN(b->x, c->x));
     maxx = MAX(a->x, MAX(b->x, c->x));
@@ -1079,6 +1204,8 @@ static void v3d_raster_triangle(BCM2835V3DState *s, const V3DShadedVertex *a,
             float w0 = v3d_edge(b, c, cx, cy);
             float w1 = v3d_edge(c, a, cx, cy);
             float w2 = v3d_edge(a, b, cx, cy);
+            float l0, l1, l2, rcp_w;
+            unsigned lane;
 
             /* Accept either winding; culling is not modelled. */
             if (!((w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) ||
@@ -1086,15 +1213,32 @@ static void v3d_raster_triangle(BCM2835V3DState *s, const V3DShadedVertex *a,
                 continue;
             }
 
-            gx[group] = x - tile_x0;
-            gy[group] = y - tile_y0;
-            if (++group == VC4_QPU_LANES) {
-                v3d_shade_group(s, gx, gy, group);
-                group = 0;
+            lane = g.count;
+            g.px[lane] = x - tile_x0;
+            g.py[lane] = y - tile_y0;
+
+            l0 = w0 / area;
+            l1 = w1 / area;
+            l2 = w2 / area;
+
+            /* 1/w interpolates linearly; W is what the shader multiplies by. */
+            rcp_w = l0 * a->rcp_w + l1 * b->rcp_w + l2 * c->rcp_w;
+            g.w[lane] = rcp_w != 0.0f ? 1.0f / rcp_w : 0.0f;
+
+            for (k = 0; k < g.vary_count; k++) {
+                g.vary[k][lane] =
+                    l0 * (a->vary[k] - g.vary_c[k]) * a->rcp_w +
+                    l1 * (b->vary[k] - g.vary_c[k]) * b->rcp_w +
+                    l2 * (c->vary[k] - g.vary_c[k]) * c->rcp_w;
+            }
+
+            if (++g.count == VC4_QPU_LANES) {
+                v3d_shade_group(s, &g);
+                g.count = 0;
             }
         }
     }
-    v3d_shade_group(s, gx, gy, group);
+    v3d_shade_group(s, &g);
 }
 
 /*

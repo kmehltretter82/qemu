@@ -45,6 +45,12 @@
 /* Read address of the uniform FIFO: the one special register nearly every
  * caller has to serve. */
 #define VC4_QPU_RADDR_UNIF  32
+/* Read address of the varying FIFO.  Reading it also loads r5 with that
+ * varying's constant term, which is why it has its own hook below. */
+#define VC4_QPU_RADDR_VARY  35
+/* The fragment payload: regfile A register 15 is W, regfile B register 15 is
+ * Z (QPU_R_FRAG_PAYLOAD_ZW, "W for A file, Z for B file"). */
+#define VC4_QPU_REG_FRAG_ZW 15
 
 typedef enum V3DQPUResult {
     V3D_QPU_RUNNING,        /* stepped one instruction, more to come */
@@ -77,6 +83,15 @@ typedef struct V3DQPUOps {
     /* An instruction signalled a load into r4 (TMU, colour, coverage).
      * Return false if the environment cannot supply it. */
     bool (*signal_load)(void *env, unsigned sig, uint32_t r4[VC4_QPU_LANES]);
+
+    /*
+     * Read the next varying.  The hardware hands the shader an interpolated
+     * value and, at the same time, puts that varying's constant term in r5 --
+     * Mesa's fragment shaders finish the job themselves with
+     * FADD(FMUL(vary, W), r5).  Fill both; the core stores c into r5.
+     */
+    bool (*read_varying)(void *env, uint32_t vary[VC4_QPU_LANES],
+                         uint32_t c[VC4_QPU_LANES]);
 } V3DQPUOps;
 
 typedef struct V3DQPUState {
@@ -107,6 +122,12 @@ typedef struct V3DQPUState {
     uint32_t sfu_result[VC4_QPU_LANES];
     uint16_t sfu_mask;
     int sfu_delay;
+
+    /* A varying read loads r5 with that varying's constant term, but not in
+     * time for the same instruction's ALUs -- the shader reads the varying,
+     * multiplies, and only then adds r5. */
+    uint32_t vary_c[VC4_QPU_LANES];
+    bool vary_c_pending;
 
     uint64_t instructions;  /* retired this run */
 

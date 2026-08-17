@@ -385,17 +385,31 @@ int main(void)
         memset(px, 0x5a, sizeof(px));
         glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
         {
-            /* Near the bottom-left vertex it should lean red, near the
-             * bottom-right green: the colours must differ. */
-            const unsigned char *l = px + ((H - 4) * W + 3) * 4;
-            const unsigned char *r2 = px + ((H - 4) * W + (W - 4)) * 4;
-            char detail[96];
-            int differs = l[0] != r2[0] || l[1] != r2[1];
+            /*
+             * The triangle's wide edge runs along row 3 (its apex is at the
+             * opposite side), so both of these are inside it: one near the
+             * red vertex, one near the green one.  They must differ.
+             */
+            const unsigned char *l = px + (3 * W + 3) * 4;
+            const unsigned char *r2 = px + (3 * W + (W - 4)) * 4;
+            char detail[128];
+            /*
+             * "They differ" is too weak -- it passes for almost any wrong
+             * answer.  These two points are mirror images about the centre,
+             * so the left must lean red exactly as much as the right leans
+             * green, and both must carry the same little of the blue vertex.
+             */
+            int ok = l[0] > l[1] + 0x40 &&          /* left leans red   */
+                     r2[1] > r2[0] + 0x40 &&        /* right leans green */
+                     abs((int)l[0] - (int)r2[1]) <= 4 &&
+                     abs((int)l[1] - (int)r2[0]) <= 4 &&
+                     abs((int)l[2] - (int)r2[2]) <= 4 &&
+                     l[2] > 0x10 && l[2] < 0x60;    /* a little blue     */
 
             snprintf(detail, sizeof(detail),
-                     "left %02x%02x%02x, right %02x%02x%02x",
+                     "left %02x%02x%02x, right %02x%02x%02x (mirrored)",
                      l[0], l[1], l[2], r2[0], r2[1], r2[2]);
-            report("varying interpolated", differs, detail);
+            report("varying interpolated", ok, detail);
         }
     }
 

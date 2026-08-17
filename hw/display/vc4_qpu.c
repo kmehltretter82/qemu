@@ -120,6 +120,7 @@ enum {
 /* Read addresses handled here; the rest go to ops->read_special. */
 enum {
     QPU_R_UNIF = 32,
+    QPU_R_VARY = 35,
     QPU_R_ELEM_QPU = 38,
     QPU_R_NOP = 39,
 };
@@ -373,6 +374,23 @@ static void qpu_read_reg(V3DQPUState *q, unsigned raddr, bool file_b,
 
     if (raddr == QPU_R_NOP) {
         memset(out, 0, sizeof(V3DQPUVec));
+        return;
+    }
+
+    /* A varying read also loads r5 with that varying's constant term. */
+    if (raddr == QPU_R_VARY && q->ops->read_varying) {
+        V3DQPUVec c;
+
+        if (q->ops->read_varying(q->env, out, c)) {
+            /* r5 lands after this instruction, not during it: Mesa reads the
+             * varying, multiplies it by W, and adds r5 later.  Updating r5
+             * here would give that add the *next* varying's constant. */
+            memcpy(q->vary_c, c, sizeof(c));
+            q->vary_c_pending = true;
+            return;
+        }
+        memset(out, 0, sizeof(V3DQPUVec));
+        qpu_unsupported(q, "varying read");
         return;
     }
 
@@ -1037,6 +1055,12 @@ V3DQPUResult vc4_qpu_step(V3DQPUState *q)
 
     q->pc += 8;
 
+    /* A varying's constant term reaches r5 for the following instruction. */
+    if (q->vary_c_pending) {
+        memcpy(q->acc[5], q->vary_c, sizeof(q->vary_c));
+        q->vary_c_pending = false;
+    }
+
     /* A special function lands in r4 three instructions after it was started,
      * so the two instructions in between still see the old r4. */
     if (q->sfu_delay > 0 && --q->sfu_delay == 0) {
@@ -1061,6 +1085,7 @@ V3DQPUResult vc4_qpu_run(V3DQPUState *q, uint32_t pc, uint64_t max_inst)
     q->end_delay = -1;
     q->branch_delay = -1;
     q->sfu_delay = 0;
+    q->vary_c_pending = false;
     q->unsupported = NULL;
     q->instructions = 0;
 
