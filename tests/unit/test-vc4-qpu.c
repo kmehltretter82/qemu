@@ -883,11 +883,96 @@ static void test_sfu_respects_condition(void)
     assert_all_lanes(q.ra[4], 0);   /* no lane took the result */
 }
 
-static void test_pack_is_refused(void)
+/*
+ * The 16-bit packs replace half of the destination and leave the other half
+ * alone.  That is how Mesa gets two shaded coordinates into one VPM word: it
+ * packs X with 16A and Y with 16B, both as the destination of an FTOI, so both
+ * are integers.
+ */
+static void test_pack_16_halves(void)
 {
     uint64_t p[] = {
-        alu((AluInst){ ALU_DEFAULTS, .pack = 1, .op_add = A_ADD,
+        set_r0(fbits(3.5f)),        /* FTOI -> 4 */
+        set_r1(fbits(-2.5f)),       /* FTOI -> -2 */
+        alu((AluInst){ ALU_DEFAULTS, .pack = 1 /* 16A */, .op_add = A_FTOI,
                        .waddr_add = 0, .add_a = MUX_R0, .add_b = MUX_R0 }),
+        alu((AluInst){ ALU_DEFAULTS, .pack = 2 /* 16B */, .op_add = A_FTOI,
+                       .waddr_add = 0, .add_a = MUX_R1, .add_b = MUX_R1 }),
+        prog_end(), nop_inst(), nop_inst(),
+    };
+    V3DQPUState q;
+    TestEnv e = { 0 };
+
+    g_assert_cmpint(run_prog(&q, &e, p, ARRAY_SIZE(p)), ==, V3D_QPU_DONE);
+    /* Low half 4, high half -2 -- and the first pack survived the second. */
+    assert_all_lanes(q.ra[0], 0xfffe0004u);
+}
+
+static void test_pack_8_bytes(void)
+{
+    uint64_t p[] = {
+        set_r0(0xabu),
+        /* 8A puts the low byte in byte 0, 8C in byte 2. */
+        alu((AluInst){ ALU_DEFAULTS, .pack = 4 /* 8A */, .op_add = A_OR,
+                       .waddr_add = 0, .add_a = MUX_R0, .add_b = MUX_R0 }),
+        alu((AluInst){ ALU_DEFAULTS, .pack = 6 /* 8C */, .op_add = A_OR,
+                       .waddr_add = 0, .add_a = MUX_R0, .add_b = MUX_R0 }),
+        /* 8888 replicates it everywhere, into a different register. */
+        alu((AluInst){ ALU_DEFAULTS, .pack = 3 /* 8888 */, .op_add = A_OR,
+                       .waddr_add = 1, .add_a = MUX_R0, .add_b = MUX_R0 }),
+        prog_end(), nop_inst(), nop_inst(),
+    };
+    V3DQPUState q;
+    TestEnv e = { 0 };
+
+    g_assert_cmpint(run_prog(&q, &e, p, ARRAY_SIZE(p)), ==, V3D_QPU_DONE);
+    assert_all_lanes(q.ra[0], 0x00ab00abu);
+    assert_all_lanes(q.ra[1], 0xababababu);
+}
+
+/* A float value packed to 16 bits becomes a half float, not a truncated int. */
+static void test_pack_16_float(void)
+{
+    uint64_t p[] = {
+        set_r0(fbits(1.0f)),
+        set_r1(fbits(0.5f)),
+        alu((AluInst){ ALU_DEFAULTS, .pack = 1 /* 16A */, .op_add = A_FADD,
+                       .waddr_add = 0, .add_a = MUX_R0, .add_b = MUX_R1 }),
+        prog_end(), nop_inst(), nop_inst(),
+    };
+    V3DQPUState q;
+    TestEnv e = { 0 };
+
+    g_assert_cmpint(run_prog(&q, &e, p, ARRAY_SIZE(p)), ==, V3D_QPU_DONE);
+    /* 1.5 as binary16 is 0x3e00. */
+    assert_all_lanes(q.ra[0], 0x3e00u);
+}
+
+/* The mul ALU's pack turns a [0,1] float into a colour byte. */
+static void test_pack_mul_colour(void)
+{
+    uint64_t p[] = {
+        set_r0(fbits(1.0f)),
+        set_r1(fbits(1.0f)),
+        alu((AluInst){ ALU_DEFAULTS, .pm = true, .pack = 3 /* 8888 */,
+                       .op_mul = M_FMUL, .waddr_mul = 0,
+                       .mul_a = MUX_R0, .mul_b = MUX_R1 }),
+        prog_end(), nop_inst(), nop_inst(),
+    };
+    V3DQPUState q;
+    TestEnv e = { 0 };
+
+    g_assert_cmpint(run_prog(&q, &e, p, ARRAY_SIZE(p)), ==, V3D_QPU_DONE);
+    /* The mul ALU writes regfile B when ws is clear; 1.0 -> 0xff everywhere. */
+    assert_all_lanes(q.rb[0], 0xffffffffu);
+}
+
+static void test_unpack_is_refused(void)
+{
+    uint64_t p[] = {
+        alu((AluInst){ ALU_DEFAULTS, .unpack = 1, .op_add = A_ADD,
+                       .waddr_add = 0, .raddr_a = 2,
+                       .add_a = MUX_A, .add_b = MUX_A }),
         prog_end(), nop_inst(), nop_inst(),
     };
     V3DQPUState q;
@@ -895,7 +980,7 @@ static void test_pack_is_refused(void)
 
     g_assert_cmpint(run_prog(&q, &e, p, ARRAY_SIZE(p)), ==,
                     V3D_QPU_UNSUPPORTED);
-    g_assert_cmpstr(q.unsupported, ==, "pack mode");
+    g_assert_cmpstr(q.unsupported, ==, "unpack mode");
 }
 
 int main(int argc, char **argv)
@@ -932,7 +1017,11 @@ int main(int argc, char **argv)
     g_test_add_func("/vc4-qpu/sfu-recip", test_sfu_recip);
     g_test_add_func("/vc4-qpu/sfu-functions", test_sfu_functions);
     g_test_add_func("/vc4-qpu/sfu-condition", test_sfu_respects_condition);
-    g_test_add_func("/vc4-qpu/pack-refused", test_pack_is_refused);
+    g_test_add_func("/vc4-qpu/pack-16-halves", test_pack_16_halves);
+    g_test_add_func("/vc4-qpu/pack-8-bytes", test_pack_8_bytes);
+    g_test_add_func("/vc4-qpu/pack-16-float", test_pack_16_float);
+    g_test_add_func("/vc4-qpu/pack-mul-colour", test_pack_mul_colour);
+    g_test_add_func("/vc4-qpu/unpack-refused", test_unpack_is_refused);
 
     return g_test_run();
 }

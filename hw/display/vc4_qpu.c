@@ -430,6 +430,145 @@ static uint16_t qpu_cond_mask(const V3DQPUState *q, unsigned cond)
 }
 
 /*
+ * Packing.
+ *
+ * A result can be narrowed on its way to its destination.  With PM clear the
+ * pack field applies to whichever ALU is writing regfile A; with PM set it
+ * applies to the mul ALU's output wherever it goes.  The 16- and 8-bit packs
+ * replace only part of the destination, so they read it back first -- which is
+ * how Mesa gets two shaded coordinates into one VPM word, packing X with 16A
+ * and Y with 16B.
+ *
+ * Whether a 16-bit pack means "convert to half float" or "take the low 16 bits
+ * of an integer" depends on what the ALU produced.  Mesa's coordinate shader
+ * packs the result of an FTOI, i.e. an integer.
+ */
+
+/* IEEE binary32 to binary16, flushing denormals to zero as the hardware does.
+ * Truncating rather than rounding: this is a functional model. */
+static uint16_t f32_to_f16(uint32_t f32)
+{
+    uint32_t sign = (f32 >> 16) & 0x8000;
+    uint32_t biased = (f32 >> 23) & 0xff;
+    uint32_t mant = f32 & 0x7fffff;
+    int32_t exp = (int32_t)biased - 127 + 15;
+
+    if (biased == 0xff) {
+        return sign | 0x7c00 | (mant ? 0x200 : 0);   /* inf or nan */
+    }
+    if (exp >= 31) {
+        return sign | 0x7c00;                        /* overflow to inf */
+    }
+    if (exp <= 0) {
+        return sign;                                 /* underflow to zero */
+    }
+    return sign | ((uint32_t)exp << 10) | (mant >> 13);
+}
+
+static uint32_t qpu_pack_16(uint32_t old, uint32_t val, bool high,
+                            bool is_float, bool sat)
+{
+    uint32_t half;
+
+    if (is_float) {
+        half = f32_to_f16(val);
+    } else {
+        int32_t v = (int32_t)val;
+
+        if (sat) {
+            v = MIN(MAX(v, -32768), 32767);
+        }
+        half = (uint32_t)v & 0xffff;
+    }
+    return high ? (old & 0x0000ffffu) | (half << 16)
+                : (old & 0xffff0000u) | half;
+}
+
+static uint32_t qpu_pack_8(uint32_t old, uint32_t val, unsigned byte,
+                           bool is_float, bool sat, bool replicate)
+{
+    uint32_t b;
+
+    if (is_float) {
+        /* Colour packing: [0,1] becomes [0,255]. */
+        float f = u2f(val);
+
+        f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+        b = (uint32_t)(f * 255.0f + 0.5f);
+    } else if (sat) {
+        int32_t v = (int32_t)val;
+
+        b = (uint32_t)MIN(MAX(v, 0), 255);
+    } else {
+        b = val & 0xff;
+    }
+
+    if (replicate) {
+        return b * 0x01010101u;
+    }
+    return (old & ~(0xffu << (byte * 8))) | (b << (byte * 8));
+}
+
+/* Regfile A pack.  Modes 8-15 are the saturating forms of 0-7. */
+static uint32_t qpu_pack_a(unsigned mode, uint32_t old, uint32_t val,
+                           bool is_float)
+{
+    bool sat = mode >= 8;
+    unsigned base = sat ? mode - 8 : mode;
+
+    switch (base) {
+    case 0:
+        return val;                 /* no pack, or a 32-bit saturate */
+    case 1:
+        return qpu_pack_16(old, val, false, is_float, sat);
+    case 2:
+        return qpu_pack_16(old, val, true, is_float, sat);
+    case 3:
+        return qpu_pack_8(old, val, 0, is_float, sat, true);
+    default:
+        return qpu_pack_8(old, val, base - 4, is_float, sat, false);
+    }
+}
+
+/* The mul ALU's pack only does the 8-bit colour forms. */
+static uint32_t qpu_pack_mul(V3DQPUState *q, unsigned mode, uint32_t old,
+                             uint32_t val)
+{
+    switch (mode) {
+    case 0:
+        return val;
+    case 3:
+        return qpu_pack_8(old, val, 0, true, true, true);
+    case 4:
+    case 5:
+    case 6:
+    case 7:
+        return qpu_pack_8(old, val, mode - 4, true, true, false);
+    default:
+        qpu_unsupported(q, "mul pack mode");
+        return val;
+    }
+}
+
+/* Which add-ALU operations hand on a float?  FTOI does not: it is exactly the
+ * integer whose low half Mesa packs. */
+static bool qpu_add_is_float(unsigned op)
+{
+    switch (op) {
+    case QPU_A_FADD:
+    case QPU_A_FSUB:
+    case QPU_A_FMIN:
+    case QPU_A_FMAX:
+    case QPU_A_FMINABS:
+    case QPU_A_FMAXABS:
+    case QPU_A_ITOF:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
  * Start a special function.  The unit takes one operand per lane and delivers
  * its result to r4 three instructions later, which is the latency Mesa's
  * scheduler assigns it: it will not read r4 while
@@ -478,24 +617,32 @@ static void qpu_sfu_retire(V3DQPUState *q)
     }
 }
 
+/* The storage a write address names, or NULL if it is outside the core. */
+static uint32_t *qpu_dst_vec(V3DQPUState *q, unsigned waddr, bool file_b)
+{
+    if (waddr < VC4_QPU_NUM_REGS) {
+        return file_b ? q->rb[waddr] : q->ra[waddr];
+    }
+    if (waddr >= QPU_W_ACC0 && waddr <= QPU_W_ACC3) {
+        return q->acc[waddr - QPU_W_ACC0];
+    }
+    if (waddr == QPU_W_ACC5) {
+        return q->acc[5];
+    }
+    return NULL;
+}
+
 static void qpu_write_reg(V3DQPUState *q, unsigned waddr, bool file_b,
                           const V3DQPUVec value, uint16_t mask)
 {
-    uint32_t *dst = NULL;
+    uint32_t *dst;
     unsigned i;
 
     if (!mask || waddr == QPU_W_NOP) {
         return;
     }
 
-    if (waddr < VC4_QPU_NUM_REGS) {
-        dst = file_b ? q->rb[waddr] : q->ra[waddr];
-    } else if (waddr <= QPU_W_ACC3) {
-        dst = q->acc[waddr - QPU_W_ACC0];
-    } else if (waddr == QPU_W_ACC5) {
-        dst = q->acc[5];
-    }
-
+    dst = qpu_dst_vec(q, waddr, file_b);
     if (dst) {
         for (i = 0; i < VC4_QPU_LANES; i++) {
             if (mask & (1u << i)) {
@@ -549,12 +696,6 @@ static void qpu_exec_alu(V3DQPUState *q, uint64_t inst, unsigned sig)
     uint16_t add_mask, mul_mask, carry = 0;
     unsigned i;
 
-    if (QPU_GET(inst, PACK) != 0) {
-        /* Both the regfile-A pack and the mul pack change the value written;
-         * refusing is better than writing an unpacked one. */
-        qpu_unsupported(q, "pack mode");
-        return;
-    }
     if (QPU_GET(inst, UNPACK) != 0) {
         qpu_unsupported(q, "unpack mode");
         return;
@@ -604,6 +745,36 @@ static void qpu_exec_alu(V3DQPUState *q, uint64_t inst, unsigned sig)
         return;
     }
 
+    /* Narrow the results if the instruction asked for it.  PM clear packs
+     * whichever ALU writes regfile A; PM set packs the mul ALU's output. */
+    if (QPU_GET(inst, PACK) != 0) {
+        unsigned pack = QPU_GET(inst, PACK);
+
+        if (inst & QPU_PM) {
+            uint32_t *dst = qpu_dst_vec(q, waddr_mul, !ws);
+
+            for (i = 0; i < VC4_QPU_LANES; i++) {
+                mul_result[i] = qpu_pack_mul(q, pack, dst ? dst[i] : 0,
+                                             mul_result[i]);
+            }
+        } else if (!ws && waddr_add < VC4_QPU_NUM_REGS) {
+            for (i = 0; i < VC4_QPU_LANES; i++) {
+                add_result[i] = qpu_pack_a(pack, q->ra[waddr_add][i],
+                                           add_result[i],
+                                           qpu_add_is_float(op_add));
+            }
+        } else if (ws && waddr_mul < VC4_QPU_NUM_REGS) {
+            for (i = 0; i < VC4_QPU_LANES; i++) {
+                mul_result[i] = qpu_pack_a(pack, q->ra[waddr_mul][i],
+                                           mul_result[i],
+                                           op_mul == QPU_M_FMUL);
+            }
+        }
+        if (q->unsupported) {
+            return;
+        }
+    }
+
     /* Condition codes test the flags left by an earlier instruction; this
      * instruction's own flags land after its writes. */
     add_mask = qpu_cond_mask(q, QPU_GET(inst, COND_ADD));
@@ -639,13 +810,9 @@ static void qpu_exec_load_imm(V3DQPUState *q, uint64_t inst)
     unsigned waddr_add = QPU_GET(inst, WADDR_ADD);
     unsigned waddr_mul = QPU_GET(inst, WADDR_MUL);
     bool ws = !!(inst & QPU_WS);
-    V3DQPUVec value;
+    unsigned pack = QPU_GET(inst, PACK);
+    V3DQPUVec value, add_value, mul_value;
     unsigned i;
-
-    if (QPU_GET(inst, PACK) != 0) {
-        qpu_unsupported(q, "pack mode");
-        return;
-    }
 
     switch (variant) {
     case QPU_LOAD_IMM_32:
@@ -675,9 +842,40 @@ static void qpu_exec_load_imm(V3DQPUState *q, uint64_t inst)
         return;
     }
 
-    qpu_write_reg(q, waddr_add, ws, value, qpu_cond_mask(q,
+    memcpy(add_value, value, sizeof(value));
+    memcpy(mul_value, value, sizeof(value));
+
+    /* A load-immediate can narrow what it writes, the same way an ALU result
+     * can.  The immediate is an integer, so a 16-bit pack takes its low half
+     * rather than converting a float. */
+    if (pack != 0) {
+        uint32_t *dst;
+
+        if (inst & QPU_PM) {
+            dst = qpu_dst_vec(q, waddr_mul, !ws);
+            for (i = 0; i < VC4_QPU_LANES; i++) {
+                mul_value[i] = qpu_pack_mul(q, pack, dst ? dst[i] : 0,
+                                            mul_value[i]);
+            }
+        } else if (!ws && waddr_add < VC4_QPU_NUM_REGS) {
+            for (i = 0; i < VC4_QPU_LANES; i++) {
+                add_value[i] = qpu_pack_a(pack, q->ra[waddr_add][i],
+                                          add_value[i], false);
+            }
+        } else if (ws && waddr_mul < VC4_QPU_NUM_REGS) {
+            for (i = 0; i < VC4_QPU_LANES; i++) {
+                mul_value[i] = qpu_pack_a(pack, q->ra[waddr_mul][i],
+                                          mul_value[i], false);
+            }
+        }
+        if (q->unsupported) {
+            return;
+        }
+    }
+
+    qpu_write_reg(q, waddr_add, ws, add_value, qpu_cond_mask(q,
                                                 QPU_GET(inst, COND_ADD)));
-    qpu_write_reg(q, waddr_mul, !ws, value, qpu_cond_mask(q,
+    qpu_write_reg(q, waddr_mul, !ws, mul_value, qpu_cond_mask(q,
                                                 QPU_GET(inst, COND_MUL)));
 
     if (inst & QPU_SF) {
