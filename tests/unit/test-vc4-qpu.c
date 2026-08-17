@@ -967,20 +967,78 @@ static void test_pack_mul_colour(void)
     assert_all_lanes(q.rb[0], 0xffffffffu);
 }
 
-static void test_unpack_is_refused(void)
+/*
+ * Unpacking widens a source on its way into the ALU: regfile A with PM clear,
+ * r4 with PM set.  A 16- or 8-bit field becomes a float for a float operation
+ * and an integer for an integer one, which is how a texture result -- bytes
+ * arriving in r4 -- turns into colours in [0,1].
+ */
+static void test_unpack_r4_bytes(void)
 {
     uint64_t p[] = {
-        alu((AluInst){ ALU_DEFAULTS, .unpack = 1, .op_add = A_ADD,
-                       .waddr_add = 0, .raddr_a = 2,
+        /* A load signal puts a known word in r4. */
+        alu((AluInst){ ALU_DEFAULTS, .sig = SIG_LOAD_TMU0 }),
+        /* 8A as a float: the low byte over 255. */
+        alu((AluInst){ ALU_DEFAULTS, .pm = true, .unpack = 4,
+                       .op_add = A_FMAX, .waddr_add = 0,
+                       .add_a = MUX_R4, .add_b = MUX_R4 }),
+        /* 8C as an integer: byte 2, zero extended. */
+        alu((AluInst){ ALU_DEFAULTS, .pm = true, .unpack = 6,
+                       .op_add = A_OR, .waddr_add = 1,
+                       .add_a = MUX_R4, .add_b = MUX_R4 }),
+        prog_end(), nop_inst(), nop_inst(),
+    };
+    V3DQPUState q;
+    TestEnv e = { 0 };
+
+    e.have_tmu = true;
+    e.tmu_value = 0x11223344 - SIG_LOAD_TMU0;   /* r4 becomes 0x11223344 */
+
+    g_assert_cmpint(run_prog(&q, &e, p, ARRAY_SIZE(p)), ==, V3D_QPU_DONE);
+    assert_all_lanes(q.ra[0], fbits(0x44 / 255.0f));
+    assert_all_lanes(q.ra[1], 0x22);
+}
+
+static void test_unpack_16_bit(void)
+{
+    uint64_t p[] = {
+        alu((AluInst){ ALU_DEFAULTS, .sig = SIG_LOAD_TMU0 }),
+        /* 16A as an integer: the low half, sign extended. */
+        alu((AluInst){ ALU_DEFAULTS, .pm = true, .unpack = 1,
+                       .op_add = A_OR, .waddr_add = 0,
+                       .add_a = MUX_R4, .add_b = MUX_R4 }),
+        /* 16B as a half float: 0x3c00 is 1.0. */
+        alu((AluInst){ ALU_DEFAULTS, .pm = true, .unpack = 2,
+                       .op_add = A_FMAX, .waddr_add = 1,
+                       .add_a = MUX_R4, .add_b = MUX_R4 }),
+        prog_end(), nop_inst(), nop_inst(),
+    };
+    V3DQPUState q;
+    TestEnv e = { 0 };
+
+    e.have_tmu = true;
+    e.tmu_value = 0x3c00cafe - SIG_LOAD_TMU0;
+
+    g_assert_cmpint(run_prog(&q, &e, p, ARRAY_SIZE(p)), ==, V3D_QPU_DONE);
+    assert_all_lanes(q.ra[0], 0xffffcafeu);     /* 0xcafe sign extends */
+    assert_all_lanes(q.ra[1], fbits(1.0f));     /* binary16 1.0 */
+}
+
+/* With PM clear the same modes apply to regfile A instead. */
+static void test_unpack_regfile_a(void)
+{
+    uint64_t p[] = {
+        load_imm(LI_32, 0x11223344, 5, W_NOP, false),
+        alu((AluInst){ ALU_DEFAULTS, .unpack = 4, .raddr_a = 5,
+                       .op_add = A_OR, .waddr_add = 0,
                        .add_a = MUX_A, .add_b = MUX_A }),
         prog_end(), nop_inst(), nop_inst(),
     };
     V3DQPUState q;
     TestEnv e = { 0 };
 
-    g_assert_cmpint(run_prog(&q, &e, p, ARRAY_SIZE(p)), ==,
-                    V3D_QPU_UNSUPPORTED);
-    g_assert_cmpstr(q.unsupported, ==, "unpack mode");
+    g_assert_cmpint(run_prog(&q, &e, p, ARRAY_SIZE(p)), ==, V3D_QPU_DONE);
+    assert_all_lanes(q.ra[0], 0x44);
 }
 
 int main(int argc, char **argv)
@@ -1021,7 +1079,9 @@ int main(int argc, char **argv)
     g_test_add_func("/vc4-qpu/pack-8-bytes", test_pack_8_bytes);
     g_test_add_func("/vc4-qpu/pack-16-float", test_pack_16_float);
     g_test_add_func("/vc4-qpu/pack-mul-colour", test_pack_mul_colour);
-    g_test_add_func("/vc4-qpu/unpack-refused", test_unpack_is_refused);
+    g_test_add_func("/vc4-qpu/unpack-r4-bytes", test_unpack_r4_bytes);
+    g_test_add_func("/vc4-qpu/unpack-16-bit", test_unpack_16_bit);
+    g_test_add_func("/vc4-qpu/unpack-regfile-a", test_unpack_regfile_a);
 
     return g_test_run();
 }

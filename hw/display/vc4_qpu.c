@@ -423,6 +423,19 @@ static const uint32_t *qpu_mux(V3DQPUState *q, unsigned mux,
     }
 }
 
+/* Resolve one of the four operand muxes, optionally with r4 replaced by an
+ * unpacked copy of itself. */
+static const uint32_t *qpu_mux2(V3DQPUState *q, unsigned mux,
+                                const V3DQPUVec ra, const V3DQPUVec rb,
+                                const uint32_t *r4_unpacked)
+{
+    if (mux == QPU_MUX_R4 && r4_unpacked) {
+        return r4_unpacked;
+    }
+    return qpu_mux(q, mux, ra, rb);
+}
+
+
 /* Lanes a condition code lets through, given the flags from the last
  * set-flags instruction. */
 static uint16_t qpu_cond_mask(const V3DQPUState *q, unsigned cond)
@@ -568,6 +581,62 @@ static uint32_t qpu_pack_mul(V3DQPUState *q, unsigned mode, uint32_t old,
     }
 }
 
+/*
+ * Unpacking, the mirror of packing: a value can be widened on its way out of
+ * regfile A (PM clear) or out of r4 (PM set).  As with packing, whether 16-bit
+ * means "half float" or "low half of an integer" depends on what consumes it.
+ */
+static float f16_to_f32(uint16_t h)
+{
+    uint32_t sign = (uint32_t)(h & 0x8000) << 16;
+    uint32_t exp = (h >> 10) & 0x1f;
+    uint32_t mant = h & 0x3ff;
+    uint32_t bits;
+
+    if (exp == 0) {
+        bits = sign;                                    /* zero or denormal */
+    } else if (exp == 31) {
+        bits = sign | 0x7f800000 | (mant << 13);        /* inf or nan */
+    } else {
+        bits = sign | ((exp - 15 + 127) << 23) | (mant << 13);
+    }
+    return u2f(bits);
+}
+
+static uint32_t qpu_unpack_value(V3DQPUState *q, unsigned mode, uint32_t val,
+                                 bool is_float)
+{
+    unsigned byte;
+
+    switch (mode) {
+    case 0:
+        return val;
+    case 1:
+    case 2: {
+        uint16_t half = mode == 1 ? (val & 0xffff) : (val >> 16);
+
+        return is_float ? f2u(f16_to_f32(half))
+                        : (uint32_t)(int32_t)(int16_t)half;
+    }
+    case 3:
+        byte = 3;                                       /* 8d, replicated */
+        break;
+    default:
+        byte = mode - 4;                                /* 8a to 8d */
+        break;
+    }
+
+    {
+        uint32_t b = (val >> (byte * 8)) & 0xff;
+
+        if (mode == 3 && !is_float) {
+            return b * 0x01010101u;
+        }
+        /* Colour bytes widen to [0,1]; integers just zero extend. */
+        return is_float ? f2u((float)b / 255.0f) : b;
+    }
+}
+
 /* Which add-ALU operations hand on a float?  FTOI does not: it is exactly the
  * integer whose low half Mesa packs. */
 static bool qpu_add_is_float(unsigned op)
@@ -709,15 +778,11 @@ static void qpu_exec_alu(V3DQPUState *q, uint64_t inst, unsigned sig)
     unsigned waddr_add = QPU_GET(inst, WADDR_ADD);
     unsigned waddr_mul = QPU_GET(inst, WADDR_MUL);
     bool ws = !!(inst & QPU_WS);
-    V3DQPUVec ra, rb, add_result, mul_result;
+    V3DQPUVec ra, rb, add_result, mul_result, unpacked;
+    const uint32_t *r4_unpacked = NULL;
     const uint32_t *add_a, *add_b, *mul_a, *mul_b;
     uint16_t add_mask, mul_mask, carry = 0;
     unsigned i;
-
-    if (QPU_GET(inst, UNPACK) != 0) {
-        qpu_unsupported(q, "unpack mode");
-        return;
-    }
 
     /* The register file reads happen because the raddr field names them, not
      * because a mux selects them: naming the uniform register pops the
@@ -739,10 +804,37 @@ static void qpu_exec_alu(V3DQPUState *q, uint64_t inst, unsigned sig)
         return;
     }
 
-    add_a = qpu_mux(q, QPU_GET(inst, ADD_A), ra, rb);
-    add_b = qpu_mux(q, QPU_GET(inst, ADD_B), ra, rb);
-    mul_a = qpu_mux(q, QPU_GET(inst, MUL_A), ra, rb);
-    mul_b = qpu_mux(q, QPU_GET(inst, MUL_B), ra, rb);
+    /*
+     * Unpacking widens one source on its way in: regfile A with PM clear, r4
+     * with PM set.  Whether a 16-bit unpack means a half float or the low half
+     * of an integer depends on the operation consuming it, so ask both ALUs
+     * whether either reads it as a float.
+     */
+    if (QPU_GET(inst, UNPACK) != 0) {
+        unsigned unpack = QPU_GET(inst, UNPACK);
+        unsigned want = (inst & QPU_PM) ? QPU_MUX_R4 : QPU_MUX_A;
+        bool is_float = (qpu_add_is_float(op_add) &&
+                         (QPU_GET(inst, ADD_A) == want ||
+                          QPU_GET(inst, ADD_B) == want)) ||
+                        (op_mul == QPU_M_FMUL &&
+                         (QPU_GET(inst, MUL_A) == want ||
+                          QPU_GET(inst, MUL_B) == want));
+        uint32_t *src = (inst & QPU_PM) ? q->acc[4] : ra;
+
+        for (i = 0; i < VC4_QPU_LANES; i++) {
+            unpacked[i] = qpu_unpack_value(q, unpack, src[i], is_float);
+        }
+        if (inst & QPU_PM) {
+            r4_unpacked = unpacked;
+        } else {
+            memcpy(ra, unpacked, sizeof(ra));
+        }
+    }
+
+    add_a = qpu_mux2(q, QPU_GET(inst, ADD_A), ra, rb, r4_unpacked);
+    add_b = qpu_mux2(q, QPU_GET(inst, ADD_B), ra, rb, r4_unpacked);
+    mul_a = qpu_mux2(q, QPU_GET(inst, MUL_A), ra, rb, r4_unpacked);
+    mul_b = qpu_mux2(q, QPU_GET(inst, MUL_B), ra, rb, r4_unpacked);
 
     for (i = 0; i < VC4_QPU_LANES; i++) {
         bool lane_carry = false;
