@@ -428,6 +428,7 @@ int main(void)
 
         unsigned char culled_front, kept_back;
 
+        (void)c;
         glEnable(GL_CULL_FACE);
 
         /* The triangle is front facing, so culling fronts must remove it. */
@@ -451,7 +452,6 @@ int main(void)
         kept_back = px[((H / 2) * W + W / 2) * 4];
         glDisable(GL_CULL_FACE);
 
-        c = px;
         snprintf(detail, sizeof(detail),
                  "cull front -> red %02x (want 00), cull back -> red %02x (want ff)",
                  culled_front, kept_back);
@@ -582,6 +582,114 @@ int main(void)
                  "centre %02x%02x%02x (near red must survive the far green)",
                  c[0], c[1], c[2]);
         report("depth test", c[0] == 0xff && c[1] == 0x00, detail);
+    }
+
+    /*
+     * Stage 9: texturing.  A 2x2 texture of four distinct colours stretched
+     * over the whole viewport with nearest filtering, so each quadrant must
+     * come back as its own texel.  Getting the layout or the coordinates
+     * wrong shuffles the quadrants rather than blanking them, which is why
+     * all four are checked.
+     */
+    {
+        static const unsigned char texels[] = {
+            0xff, 0x00, 0x00, 0xff,     /* red    at (0,0) */
+            0x00, 0xff, 0x00, 0xff,     /* green  at (1,0) */
+            0x00, 0x00, 0xff, 0xff,     /* blue   at (0,1) */
+            0xff, 0xff, 0x00, 0xff,     /* yellow at (1,1) */
+        };
+        static const char *tex_vs_src =
+            "attribute vec4 pos;\n"
+            "attribute vec2 uv;\n"
+            "varying vec2 vuv;\n"
+            "void main() { gl_Position = pos; vuv = uv; }\n";
+        static const char *tex_fs_src =
+            "precision mediump float;\n"
+            "uniform sampler2D tex;\n"
+            "varying vec2 vuv;\n"
+            "void main() { gl_FragColor = texture2D(tex, vuv); }\n";
+        /* Two triangles covering the viewport, with matching texcoords. */
+        static const GLfloat quad[] = {
+            -1.0f, -1.0f, 0.0f, 1.0f,   1.0f, -1.0f, 0.0f, 1.0f,
+            -1.0f,  1.0f, 0.0f, 1.0f,   1.0f, -1.0f, 0.0f, 1.0f,
+             1.0f,  1.0f, 0.0f, 1.0f,  -1.0f,  1.0f, 0.0f, 1.0f,
+        };
+        static const GLfloat uvs[] = {
+            0.0f, 0.0f,  1.0f, 0.0f,  0.0f, 1.0f,
+            1.0f, 0.0f,  1.0f, 1.0f,  0.0f, 1.0f,
+        };
+        GLuint tex, tprog, qvbo, uvbo;
+        GLint tlinked = 0;
+        const unsigned char *q0, *q1, *q2, *q3;
+        char detail[160];
+        int ok;
+
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, texels);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        tprog = glCreateProgram();
+        glAttachShader(tprog, compile(GL_VERTEX_SHADER, tex_vs_src));
+        glAttachShader(tprog, compile(GL_FRAGMENT_SHADER, tex_fs_src));
+        glBindAttribLocation(tprog, 0, "pos");
+        glBindAttribLocation(tprog, 1, "uv");
+        glLinkProgram(tprog);
+        glGetProgramiv(tprog, GL_LINK_STATUS, &tlinked);
+        if (!tlinked) {
+            char log[512] = { 0 };
+
+            glGetProgramInfoLog(tprog, sizeof(log) - 1, NULL, log);
+            report("texture program links", 0, log);
+            goto done;
+        }
+        glUseProgram(tprog);
+        glUniform1i(glGetUniformLocation(tprog, "tex"), 0);
+
+        glGenBuffers(1, &qvbo);
+        glBindBuffer(GL_ARRAY_BUFFER, qvbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+
+        glGenBuffers(1, &uvbo);
+        glBindBuffer(GL_ARRAY_BUFFER, uvbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(uvs), uvs, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, 0);
+
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glFinish();
+        glDisableVertexAttribArray(1);
+
+        memset(px, 0x5a, sizeof(px));
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+
+        /* One sample well inside each quadrant. */
+        q0 = px + ((H / 4) * W + W / 4) * 4;
+        q1 = px + ((H / 4) * W + 3 * W / 4) * 4;
+        q2 = px + ((3 * H / 4) * W + W / 4) * 4;
+        q3 = px + ((3 * H / 4) * W + 3 * W / 4) * 4;
+
+        /* Each quadrant must be one of the four texels, and all four must be
+         * different from each other. */
+        ok = (q0[0] | q0[1] | q0[2]) && (q1[0] | q1[1] | q1[2]) &&
+             (q2[0] | q2[1] | q2[2]) && (q3[0] | q3[1] | q3[2]) &&
+             memcmp(q0, q1, 3) && memcmp(q0, q2, 3) && memcmp(q0, q3, 3) &&
+             memcmp(q1, q2, 3) && memcmp(q1, q3, 3) && memcmp(q2, q3, 3);
+
+        snprintf(detail, sizeof(detail),
+                 "quadrants %02x%02x%02x %02x%02x%02x %02x%02x%02x %02x%02x%02x"
+                 " (four distinct texels)",
+                 q0[0], q0[1], q0[2], q1[0], q1[1], q1[2],
+                 q2[0], q2[1], q2[2], q3[0], q3[1], q3[2]);
+        report("texture sampled", ok, detail);
     }
 
 done:

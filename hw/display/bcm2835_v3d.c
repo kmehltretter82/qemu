@@ -233,6 +233,29 @@ static const V3DPacketInfo v3d_packets[256] = {
 
 #undef V3D_PACKET
 
+/* QPU signals and write addresses the fragment path cares about. */
+#define V3D_QPU_SIG_COLOR_LOAD      8
+#define V3D_QPU_SIG_COLOR_LOAD_END  9
+#define V3D_QPU_SIG_LOAD_TMU0       10
+#define V3D_QPU_SIG_LOAD_TMU1       11
+#define V3D_QPU_WADDR_TMU0_S        56
+#define V3D_QPU_WADDR_TMU0_T        57
+#define V3D_QPU_WADDR_TMU1_B        63
+
+/* Texture configuration words; the field layouts are the VC4_TEX_P0_ and
+ * VC4_TEX_P1_ ones in vc4_packet.h. */
+#define V3D_TEX_P0_BASE(p0)     ((p0) & 0xfffff000u)
+#define V3D_TEX_P0_TYPE(p0)     (((p0) >> 4) & 0xf)
+#define V3D_TEX_P1_TYPE4(p1)    (((p1) >> 31) & 0x1)
+#define V3D_TEX_P1_HEIGHT(p1)   (((p1) >> 20) & 0x7ff)
+#define V3D_TEX_P1_WIDTH(p1)    (((p1) >> 8) & 0x7ff)
+#define V3D_TEX_P1_WRAP_T(p1)   (((p1) >> 2) & 0x3)
+#define V3D_TEX_P1_WRAP_S(p1)   ((p1) & 0x3)
+#define V3D_TEX_TYPE_RGBA8888   0
+#define V3D_TEX_TYPE_RGBX8888   1
+#define V3D_TEX_WRAP_REPEAT     0
+#define V3D_TEX_WRAP_CLAMP      1
+
 /* Interpreter limits.  A malformed or hostile control list must not be able
  * to spin the bottom half or read unbounded amounts of guest memory. */
 #define V3D_MAX_PACKETS         65536u  /* packets walked per job */
@@ -616,6 +639,13 @@ static void v3d_shader_write_special(void *opaque, unsigned waddr, bool file_b,
             vc4_vpm_setup_read(&p->s->vpm, lanes[0]);
         }
         break;
+
+    case V3D_QPU_WADDR_TMU0_S:
+    case V3D_QPU_WADDR_TMU0_T:
+    case 58: case 59:                       /* TMU0 R and B */
+    case 60: case 61: case 62:              /* TMU1 S, T, R */
+    case V3D_QPU_WADDR_TMU1_B:
+        break;                              /* handled by the fragment path */
 
     case V3D_QPU_WADDR_VPM_ADDR:
         /* The VPM DMA trigger.  No shader the guest can submit reaches this:
@@ -1029,8 +1059,6 @@ static void v3d_record_draw(BCM2835V3DState *s, uint32_t first)
  * the fragment shader on the QPU and taking whatever it writes to the tile
  * buffer colour register.
  */
-#define V3D_QPU_SIG_COLOR_LOAD      8
-#define V3D_QPU_SIG_COLOR_LOAD_END  9
 #define V3D_QPU_WADDR_TLB_Z         44
 #define V3D_QPU_WADDR_TLB_COLOR_MS  45
 #define V3D_QPU_WADDR_TLB_COLOR_ALL 46
@@ -1057,6 +1085,19 @@ typedef struct V3DFragmentRun {
 
     /* Which pixels these lanes are, so a colour read can find them. */
     const struct V3DFragGroup *group;
+
+    /*
+     * Texture unit.  Every write to a TMU register also pops one word from the
+     * uniform stream -- that word is a texture configuration parameter, which
+     * is why the kernel's shader validator refuses a uniform read in the same
+     * instruction as a texture setup.  Mesa writes T carrying p0 and then S
+     * carrying p1, and the S write starts the lookup
+     * (vc4_program.c:ntq_emit_tex).
+     */
+    uint32_t tmu_config[4];
+    unsigned tmu_writes;
+    float tmu_s[VC4_QPU_LANES];
+    float tmu_t[VC4_QPU_LANES];
 } V3DFragmentRun;
 
 /* One group of up to sixteen covered pixels, ready to shade. */
@@ -1109,6 +1150,37 @@ static void v3d_frag_write_special(void *opaque, unsigned waddr, bool file_b,
     V3DFragmentRun *f = opaque;
     unsigned i;
 
+    if (waddr >= V3D_QPU_WADDR_TMU0_S && waddr <= V3D_QPU_WADDR_TMU1_B) {
+        /* Each TMU write also consumes one uniform: a configuration word, in
+         * the order the writes happen -- p0 with the first, p1 with the
+         * second. */
+        uint32_t cfg = 0;
+
+        if (v3d_read_u32(f->s, f->uniform_addr + f->uniform_reads * 4, &cfg)) {
+            f->uniform_reads++;
+        }
+        if (f->tmu_writes < ARRAY_SIZE(f->tmu_config)) {
+            f->tmu_config[f->tmu_writes] = cfg;
+        }
+        f->tmu_writes++;
+
+        switch (waddr) {
+        case V3D_QPU_WADDR_TMU0_S:
+            for (i = 0; i < VC4_QPU_LANES; i++) {
+                f->tmu_s[i] = v3d_f32(lanes[i]);
+            }
+            break;
+        case V3D_QPU_WADDR_TMU0_T:
+            for (i = 0; i < VC4_QPU_LANES; i++) {
+                f->tmu_t[i] = v3d_f32(lanes[i]);
+            }
+            break;
+        default:
+            break;
+        }
+        return;
+    }
+
     if (waddr != V3D_QPU_WADDR_TLB_COLOR_ALL &&
         waddr != V3D_QPU_WADDR_TLB_COLOR_MS) {
         return;         /* depth and the alpha mask are not modelled yet */
@@ -1119,6 +1191,75 @@ static void v3d_frag_write_special(void *opaque, unsigned waddr, bool file_b,
         }
     }
     f->color_mask |= mask;
+}
+
+/*
+ * Sample a texture.  Nearest filtering of a 32-bit texture is what this
+ * models; the mip level, the compressed and narrow formats, cube maps and the
+ * mirror/border wrap modes are declined by name rather than approximated.
+ */
+static uint32_t v3d_tmu_sample(BCM2835V3DState *s, uint32_t p0, uint32_t p1,
+                               float sc, float tc)
+{
+    const unsigned cpp = 4;
+    unsigned type = V3D_TEX_P0_TYPE(p0) | (V3D_TEX_P1_TYPE4(p1) << 4);
+    unsigned width = V3D_TEX_P1_WIDTH(p1);
+    unsigned height = V3D_TEX_P1_HEIGHT(p1);
+    unsigned tiling, aligned_width;
+    uint32_t offset;
+    uint8_t buf[4];
+    int x, y;
+
+    if (type != V3D_TEX_TYPE_RGBA8888 && type != V3D_TEX_TYPE_RGBX8888) {
+        qemu_log_mask(LOG_UNIMP, "bcm2835-v3d: texture type %u not sampled\n",
+                      type);
+        return 0;
+    }
+    /* Zero in the field means the maximum. */
+    if (!width) {
+        width = 2048;
+    }
+    if (!height) {
+        height = 2048;
+    }
+
+    /* Coordinates arrive normalised. */
+    x = (int)floorf(sc * (float)width);
+    y = (int)floorf(tc * (float)height);
+
+    switch (V3D_TEX_P1_WRAP_S(p1)) {
+    case V3D_TEX_WRAP_REPEAT:
+        x = ((x % (int)width) + (int)width) % (int)width;
+        break;
+    case V3D_TEX_WRAP_CLAMP:
+        x = MIN(MAX(x, 0), (int)width - 1);
+        break;
+    default:
+        qemu_log_mask(LOG_UNIMP, "bcm2835-v3d: texture wrap mode not modelled\n");
+        x = MIN(MAX(x, 0), (int)width - 1);
+        break;
+    }
+    switch (V3D_TEX_P1_WRAP_T(p1)) {
+    case V3D_TEX_WRAP_REPEAT:
+        y = ((y % (int)height) + (int)height) % (int)height;
+        break;
+    default:
+        y = MIN(MAX(y, 0), (int)height - 1);
+        break;
+    }
+
+    /* The texture unit picks the layout from the level's size. */
+    tiling = vc4_size_is_lt(width, height, cpp) ? VC4_TILING_LT : VC4_TILING_T;
+    aligned_width = vc4_aligned_width(tiling, cpp, width);
+    if (!vc4_tiling_offset(tiling, cpp, aligned_width, x, y, &offset)) {
+        return 0;
+    }
+    if (!bcm2835_v3d_dma_read(s, V3D_TEX_P0_BASE(p0) + offset, buf,
+                              sizeof(buf))) {
+        return 0;
+    }
+    s->tmu_fetches++;
+    return ldl_le_p(buf);
 }
 
 /* Hand the shader the next varying, and its constant term for r5. */
@@ -1151,6 +1292,21 @@ static bool v3d_frag_signal_load(void *opaque, unsigned sig,
     V3DFragmentRun *f = opaque;
     const V3DFragGroup *g = f->group;
     unsigned i;
+
+    if (sig == V3D_QPU_SIG_LOAD_TMU0 || sig == V3D_QPU_SIG_LOAD_TMU1) {
+        /* The first two configuration words the TMU writes carried are p0 and
+         * p1, whichever registers they went to. */
+        uint32_t p0 = f->tmu_config[0];
+        uint32_t p1 = f->tmu_config[1];
+
+        for (i = 0; i < VC4_QPU_LANES; i++) {
+            r4[i] = i < g->count
+                  ? v3d_tmu_sample(f->s, p0, p1, f->tmu_s[i], f->tmu_t[i])
+                  : 0;
+        }
+        f->tmu_writes = 0;      /* ready for the next lookup */
+        return true;
+    }
 
     if (sig != V3D_QPU_SIG_COLOR_LOAD && sig != V3D_QPU_SIG_COLOR_LOAD_END) {
         return false;           /* coverage and alpha-mask loads: not yet */

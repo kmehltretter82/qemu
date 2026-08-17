@@ -37,6 +37,14 @@ unsigned vc4_utile_height(unsigned cpp);
 /* Width a surface is padded to, in pixels, for the given layout. */
 unsigned vc4_aligned_width(unsigned tiling, unsigned cpp, unsigned width);
 
+/*
+ * Which layout a surface of this size uses.  The texture unit decides per
+ * miplevel with this rule, so miptrees are laid out to match
+ * (vc4_tiling.c:vc4_size_is_lt in Mesa, size_is_lt in the kernel's
+ * vc4_validate.c).
+ */
+bool vc4_size_is_lt(unsigned width, unsigned height, unsigned cpp);
+
 /* Whether this model can place pixels in the given layout. */
 bool vc4_tiling_supported(unsigned tiling);
 

@@ -49,6 +49,12 @@ unsigned vc4_aligned_width(unsigned tiling, unsigned cpp, unsigned width)
     return ROUND_UP(width, utile_w);
 }
 
+bool vc4_size_is_lt(unsigned width, unsigned height, unsigned cpp)
+{
+    return width <= 4 * vc4_utile_width(cpp) ||
+           height <= 4 * vc4_utile_height(cpp);
+}
+
 bool vc4_tiling_supported(unsigned tiling)
 {
     return tiling == VC4_TILING_LINEAR || tiling == VC4_TILING_LT ||
