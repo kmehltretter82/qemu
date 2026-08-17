@@ -171,6 +171,11 @@ struct BCM2835V3DState {
     int32_t viewport_x16;
     int32_t viewport_y16;
 
+    /* Primitive mode of the last draw, and rasterizer statistics. */
+    uint32_t prim_mode;
+    uint32_t frag_shaded;
+    bool frag_reported;
+
     /* Narrow B5 texture-fetch probe (not a general TMU implementation). */
     uint32_t tmu_fetches;
     uint32_t tmu_faults;

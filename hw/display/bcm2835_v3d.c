@@ -40,6 +40,8 @@
 #include "migration/vmstate.h"
 #include "trace.h"
 
+#include <math.h>
+
 /* Register offsets (see drivers/gpu/drm/vc4/vc4_regs.h). */
 #define V3D_IDENT0      0x000
 #define V3D_IDENT1      0x004
@@ -914,6 +916,230 @@ static void v3d_bin_cap_tile_lists(V3DCLWalker *w)
     }
 }
 
+/*
+ * Rasterization.
+ *
+ * A real binner sorts primitives into per-tile lists in the tile allocation
+ * area, and the render list branches into a tile's list to draw it.  This model
+ * keeps the shaded vertices in its own state instead and rasterizes them when
+ * the render list branches to a tile -- the same point in the pipeline, without
+ * having to reproduce the binner's internal list format.  Everything visible to
+ * the guest (which pixels end up in the framebuffer) is the same.
+ *
+ * Coverage is the usual edge-function test at pixel centres, accepting either
+ * winding: culling is configured by VC4_PACKET_CONFIGURATION_BITS, which the
+ * model does not act on yet.  Fragments are shaded sixteen at a time by running
+ * the fragment shader on the QPU and taking whatever it writes to the tile
+ * buffer colour register.
+ */
+#define V3D_QPU_WADDR_TLB_Z         44
+#define V3D_QPU_WADDR_TLB_COLOR_MS  45
+#define V3D_QPU_WADDR_TLB_COLOR_ALL 46
+
+typedef struct V3DFragmentRun {
+    BCM2835V3DState *s;
+    uint32_t uniform_addr;
+    unsigned uniform_reads;
+    uint32_t color[VC4_QPU_LANES];
+    uint16_t color_mask;
+} V3DFragmentRun;
+
+static bool v3d_frag_fetch(void *opaque, uint32_t addr, uint64_t *inst)
+{
+    V3DFragmentRun *f = opaque;
+    uint8_t buf[8];
+
+    if (!bcm2835_v3d_dma_read(f->s, addr, buf, sizeof(buf))) {
+        return false;
+    }
+    *inst = ldq_le_p(buf);
+    return true;
+}
+
+static bool v3d_frag_read_special(void *opaque, unsigned raddr, bool file_b,
+                                  uint32_t lanes[VC4_QPU_LANES])
+{
+    V3DFragmentRun *f = opaque;
+    uint32_t value;
+    unsigned i;
+
+    if (raddr != VC4_QPU_RADDR_UNIF) {
+        return false;   /* varyings and the rest are not modelled yet */
+    }
+    if (!v3d_read_u32(f->s, f->uniform_addr + f->uniform_reads * 4, &value)) {
+        return false;
+    }
+    f->uniform_reads++;
+    for (i = 0; i < VC4_QPU_LANES; i++) {
+        lanes[i] = value;
+    }
+    return true;
+}
+
+static void v3d_frag_write_special(void *opaque, unsigned waddr, bool file_b,
+                                   const uint32_t lanes[VC4_QPU_LANES],
+                                   uint16_t mask)
+{
+    V3DFragmentRun *f = opaque;
+    unsigned i;
+
+    if (waddr != V3D_QPU_WADDR_TLB_COLOR_ALL &&
+        waddr != V3D_QPU_WADDR_TLB_COLOR_MS) {
+        return;         /* depth and the alpha mask are not modelled yet */
+    }
+    for (i = 0; i < VC4_QPU_LANES; i++) {
+        if (mask & (1u << i)) {
+            f->color[i] = lanes[i];
+        }
+    }
+    f->color_mask |= mask;
+}
+
+static const V3DQPUOps v3d_frag_ops = {
+    .fetch = v3d_frag_fetch,
+    .read_special = v3d_frag_read_special,
+    .write_special = v3d_frag_write_special,
+};
+
+/* Shade one group of up to 16 covered pixels and put them in the tile. */
+static void v3d_shade_group(BCM2835V3DState *s, const uint16_t *px,
+                            const uint16_t *py, unsigned count)
+{
+    V3DFragmentRun run = {
+        .s = s,
+        .uniform_addr = s->fs_uniforms_addr,
+    };
+    V3DQPUState q;
+    V3DQPUResult r;
+    unsigned i;
+
+    if (!count) {
+        return;
+    }
+
+    vc4_qpu_init(&q, &v3d_frag_ops, &run);
+    r = vc4_qpu_run(&q, s->fs_code_addr, V3D_SHADER_INST_LIMIT);
+    s->shader_probes++;
+    s->shader_instructions += q.instructions;
+    if (r != V3D_QPU_DONE) {
+        s->shader_incomplete++;
+        if (!s->frag_reported) {
+            s->frag_reported = true;
+            trace_bcm2835_v3d_shader_probe("fs (fragment)", s->fs_code_addr,
+                                           q.instructions, run.uniform_reads,
+                                           0, vc4_qpu_result_name(r),
+                                           q.unsupported ? q.unsupported : "-");
+        }
+        return;
+    }
+
+    for (i = 0; i < count; i++) {
+        if (run.color_mask & (1u << i)) {
+            s->tile_color[py[i] * BCM2835_V3D_TILE_W + px[i]] = run.color[i];
+            s->frag_shaded++;
+        }
+    }
+}
+
+/* Edge function: positive on one side of the line ab, negative on the other. */
+static float v3d_edge(const V3DShadedVertex *a, const V3DShadedVertex *b,
+                      float x, float y)
+{
+    return (b->x - a->x) * (y - a->y) - (b->y - a->y) * (x - a->x);
+}
+
+static void v3d_raster_triangle(BCM2835V3DState *s, const V3DShadedVertex *a,
+                                const V3DShadedVertex *b,
+                                const V3DShadedVertex *c)
+{
+    uint16_t gx[VC4_QPU_LANES], gy[VC4_QPU_LANES];
+    unsigned group = 0;
+    float minx, maxx, miny, maxy;
+    int x0, x1, y0, y1, x, y;
+    int tile_x0 = s->tile_x * BCM2835_V3D_TILE_W;
+    int tile_y0 = s->tile_y * BCM2835_V3D_TILE_H;
+
+    minx = MIN(a->x, MIN(b->x, c->x));
+    maxx = MAX(a->x, MAX(b->x, c->x));
+    miny = MIN(a->y, MIN(b->y, c->y));
+    maxy = MAX(a->y, MAX(b->y, c->y));
+
+    /* Clip the bounding box to this tile and to the framebuffer. */
+    x0 = MAX((int)floorf(minx), tile_x0);
+    x1 = MIN((int)ceilf(maxx), MIN(tile_x0 + BCM2835_V3D_TILE_W,
+                                   (int)s->render_width));
+    y0 = MAX((int)floorf(miny), tile_y0);
+    y1 = MIN((int)ceilf(maxy), MIN(tile_y0 + BCM2835_V3D_TILE_H,
+                                   (int)s->render_height));
+
+    for (y = y0; y < y1; y++) {
+        for (x = x0; x < x1; x++) {
+            float cx = (float)x + 0.5f;
+            float cy = (float)y + 0.5f;
+            float w0 = v3d_edge(b, c, cx, cy);
+            float w1 = v3d_edge(c, a, cx, cy);
+            float w2 = v3d_edge(a, b, cx, cy);
+
+            /* Accept either winding; culling is not modelled. */
+            if (!((w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) ||
+                  (w0 <= 0.0f && w1 <= 0.0f && w2 <= 0.0f))) {
+                continue;
+            }
+
+            gx[group] = x - tile_x0;
+            gy[group] = y - tile_y0;
+            if (++group == VC4_QPU_LANES) {
+                v3d_shade_group(s, gx, gy, group);
+                group = 0;
+            }
+        }
+    }
+    v3d_shade_group(s, gx, gy, group);
+}
+
+/*
+ * Draw everything the coordinate shader produced into the current tile.  The
+ * primitive mode says how the vertex stream forms triangles.
+ */
+static void v3d_raster_tile(BCM2835V3DState *s)
+{
+    uint32_t i;
+    uint32_t before = s->frag_shaded;
+
+    if (!s->shaded_count || !s->fs_code_addr || !s->render_width) {
+        return;
+    }
+
+    switch (s->prim_mode) {
+    case 4:     /* triangles */
+        for (i = 0; i + 2 < s->shaded_count; i += 3) {
+            v3d_raster_triangle(s, &s->shaded[i], &s->shaded[i + 1],
+                                &s->shaded[i + 2]);
+        }
+        break;
+    case 5:     /* triangle strip */
+        for (i = 0; i + 2 < s->shaded_count; i++) {
+            v3d_raster_triangle(s, &s->shaded[i], &s->shaded[i + 1],
+                                &s->shaded[i + 2]);
+        }
+        break;
+    case 6:     /* triangle fan */
+        for (i = 1; i + 1 < s->shaded_count; i++) {
+            v3d_raster_triangle(s, &s->shaded[0], &s->shaded[i],
+                                &s->shaded[i + 1]);
+        }
+        break;
+    default:
+        qemu_log_mask(LOG_UNIMP,
+                      "bcm2835-v3d: primitive mode %u not rasterized\n",
+                      s->prim_mode);
+        return;
+    }
+
+    trace_bcm2835_v3d_raster(s->tile_x, s->tile_y, s->shaded_count,
+                             s->frag_shaded - before);
+}
+
 /* Packets that mean the same thing on both threads: control flow. */
 static bool v3d_dispatch_common(V3DCLWalker *w, uint8_t op)
 {
@@ -947,6 +1173,11 @@ static bool v3d_dispatch_common(V3DCLWalker *w, uint8_t op)
             return true;
         }
         trace_bcm2835_v3d_cl_branch(w->thread, w->pc, target, "sub-list");
+        /* This is where the hardware would run the tile's primitive list.
+         * The model keeps the primitives in its own state instead. */
+        if (w->thread == 1) {
+            v3d_raster_tile(s);
+        }
         w->ret_stack[w->ret_depth++] = w->next;
         w->next = target;
         return true;
@@ -1025,6 +1256,7 @@ static void v3d_dispatch_bin(V3DCLWalker *w, uint8_t op)
             return;
         }
         s->bin_prims++;
+        s->prim_mode = payload[0] & 0xf;
         trace_bcm2835_v3d_array_prim(payload[0], ldl_le_p(payload + 1),
                                      ldl_le_p(payload + 5));
         v3d_fetch_array(w, ldl_le_p(payload + 5), ldl_le_p(payload + 1));
@@ -1040,6 +1272,7 @@ static void v3d_dispatch_bin(V3DCLWalker *w, uint8_t op)
         /* Bit 4 of the mode byte selects u8 or u16 indices. */
         index_size = (payload[0] & (1u << 4)) ? 2 : 1;
         s->bin_prims++;
+        s->prim_mode = payload[0] & 0xf;
         trace_bcm2835_v3d_indexed_prim(payload[0], ldl_le_p(payload + 1),
                                        ldl_le_p(payload + 5),
                                        ldl_le_p(payload + 9), index_size);
@@ -1223,6 +1456,9 @@ static void v3d_run_cl(BCM2835V3DState *s, unsigned thread)
         vc4_vpm_reset(&s->vpm);
         s->vpm_rows = 0;
         s->vpm_batches = 0;
+        s->shaded_count = 0;
+        s->shaded_dropped = 0;
+        s->frag_reported = false;
     }
     trace_bcm2835_v3d_cl_begin(thread, thread ? "render" : "bin", w.ca, w.ea);
 
@@ -1515,6 +1751,13 @@ static void bcm2835_v3d_reset(DeviceState *dev)
     vc4_vpm_reset(&s->vpm);
     s->vpm_rows = 0;
     s->vpm_batches = 0;
+    s->shaded_count = 0;
+    s->shaded_dropped = 0;
+    s->viewport_x16 = 0;
+    s->viewport_y16 = 0;
+    s->prim_mode = 0;
+    s->frag_shaded = 0;
+    s->frag_reported = false;
     memset(s->tile_color, 0, sizeof(s->tile_color));
     s->clear_color[0] = 0;
     s->clear_color[1] = 0;

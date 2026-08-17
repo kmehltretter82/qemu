@@ -222,6 +222,33 @@ int main(void)
                      c[0], c[1], c[2], c[3]);
             report("triangle rasterized", is_red, detail);
         }
+        {
+            /*
+             * One pixel proves nothing on its own -- a rasterizer that covered
+             * the whole surface would pass it too.  The triangle has its apex
+             * at the top centre and its base along the bottom, so the bottom
+             * corners are inside and the top corners are not, and it should
+             * cover roughly half the pixels.
+             */
+            unsigned i, red = 0;
+            const unsigned char *tl = px + (0 * W + 0) * 4;
+            const unsigned char *tr = px + (0 * W + (W - 1)) * 4;
+            char detail[96];
+
+            for (i = 0; i < W * H; i++) {
+                if (px[i * 4] == 0xff && px[i * 4 + 1] == 0x00 &&
+                    px[i * 4 + 2] == 0x00) {
+                    red++;
+                }
+            }
+            snprintf(detail, sizeof(detail),
+                     "%u/%u pixels covered, corners %02x%02x%02x/%02x%02x%02x",
+                     red, W * H, tl[0], tl[1], tl[2], tr[0], tr[1], tr[2]);
+            report("triangle has a shape",
+                   red > (W * H) / 5 && red < (W * H) * 3 / 4 &&
+                   tl[2] == 0xff && tr[2] == 0xff,
+                   detail);
+        }
     }
 
 done:

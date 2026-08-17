@@ -7,9 +7,9 @@
 # triangle -- all read back with glReadPixels.
 #
 # Unlike run-guest-tests.sh, which submits hand-assembled control lists, this
-# exercises what a real application produces.  The triangle is expected to fail
-# its pixel check until the model has a rasterizer; the point of running it is
-# the trace of genuine shaders, control lists and VPM traffic it produces.
+# exercises what a real application produces: Mesa compiles the shaders, builds
+# the control lists, and the model runs them on its QPU interpreter and
+# rasterizer.  Both the clear and the triangle are checked pixel by pixel.
 #
 #   usage: sh run-gles-test.sh
 #
@@ -133,6 +133,8 @@ check_serial "a real glClear reaches memory"  "glClear readback       PASS"
 check_serial "GLSL compiles"                  "glsl compile           PASS"
 check_serial "GLSL links"                     "glsl link              PASS"
 check_serial "a real draw is submitted"       "draw submitted         PASS"
+check_serial "the triangle is rasterized"    "triangle rasterized    PASS"
+check_serial "and it has the right shape"    "triangle has a shape   PASS"
 
 if grep -q "control list aborted" "$TRACE"; then
     echo "  FAIL : a control list was aborted"
@@ -143,9 +145,9 @@ fi
 
 echo "---- verdict ----"
 if [ "$fails" -eq 0 ]; then
-    echo "GLES OK: real Mesa drives the model; clears produce correct pixels."
-    echo "         The triangle still needs a rasterizer -- that is the next phase,"
-    echo "         and the trace above says what it must supply."
+    echo "GLES OK: real Mesa drives the model, and a GLES triangle comes back"
+    echo "         correct -- GLSL compiled by Mesa, run on the emulated QPUs,"
+    echo "         rasterized, and read out of the framebuffer."
 else
     echo "GLES FAILED: $fails check(s)"
 fi
