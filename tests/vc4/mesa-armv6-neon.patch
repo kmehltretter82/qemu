@@ -1,0 +1,36 @@
+Build fixes for cross-compiling Mesa's vc4 driver for ARMv6 (Raspberry Pi 1 /
+Zero), which is what QEMU's raspi1ap machine is.
+
+Mesa adds -mfpu=neon for any host_machine.cpu_family() == 'arm', with no ARMv7
+check.  That is fine on Debian armhf, whose baseline is ARMv7 with NEON, but the
+armel/ARMv6 target this build uses has neither -- and its soft-float ABI makes
+gcc emit '.fpu softvfp', so the NEON intrinsics assemble to instructions the
+assembler then rejects.
+
+Give just those two objects an ARMv7 target and the softfp ABI (same calling
+convention as soft, but FPU instructions allowed).  Both are optimizations
+guarded at runtime by util_get_cpu_caps()->has_neon, which is false on ARM1176,
+so the ARMv7 code is never reached on the target this is built for.
+
+--- a/src/broadcom/meson.build	2023-10-04 15:53:02
++++ b/src/broadcom/meson.build	2026-08-17 02:02:43
+@@ -54,7 +54,7 @@
+ 
+ v3d_neon_c_args = []
+ if host_machine.cpu_family() == 'arm'
+-    v3d_neon_c_args = '-mfpu=neon'
++    v3d_neon_c_args = ['-march=armv7-a', '-mfpu=neon', '-mfloat-abi=softfp']
+ endif
+ 
+ libv3d_neon = static_library(
+--- a/src/gallium/drivers/vc4/meson.build	2023-10-04 15:53:02
++++ b/src/gallium/drivers/vc4/meson.build	2026-08-17 02:09:53
+@@ -91,7 +91,7 @@
+     include_directories : [
+       inc_src, inc_include, inc_gallium, inc_gallium_aux, inc_broadcom
+     ],
+-    c_args : '-mfpu=neon',
++    c_args : ['-march=armv7-a', '-mfpu=neon', '-mfloat-abi=softfp'],
+   )
+   vc4_c_args += '-DUSE_ARM_ASM'
+ endif

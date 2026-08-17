@@ -37,6 +37,42 @@ Logs and the generated initramfs land in `out/`.
 `run-guest-tests.sh` runs both in a single boot and asserts 22 things about the
 resulting trace and guest output.
 
+## Driving it through real OpenGL ES
+
+The two tests above hand-assemble control lists, which is fine for pinning
+behaviour but is a stand-in for what an application really produces. The GLES
+test replaces the stand-in with Mesa itself:
+
+```sh
+sh build-mesa-guest.sh    # cross-builds Mesa's vc4 driver for ARMv6 (slow, cached)
+sh run-gles-test.sh
+```
+
+`guest/gles_vc4_test.c` uses EGL's surfaceless platform and an off-screen
+framebuffer object — no display, no window system, no KMS, which suits a model
+that has a GPU but none of the display blocks. It reports each stage separately
+so a failure says how far the stack got:
+
+```
+GLES: GL_VENDOR   = Broadcom
+GLES: GL_RENDERER = VC4 V3D 2.1
+GLES: GL_VERSION  = OpenGL ES 2.0 Mesa 23.1.9
+GLES: glClear readback       PASS -- all pixels opaque green
+GLES: glsl compile           PASS -- vertex + fragment
+GLES: draw submitted         PASS -- glDrawArrays + glFinish
+GLES: triangle rasterized    FAIL -- centre pixel 0000ffff (want ff0000ff)
+```
+
+The triangle is **expected to fail** until the model has a rasterizer — its
+centre pixel comes back as the blue clear colour, which is precisely right when
+the clear works and no fragments are produced. It is run anyway because the
+trace it generates is the specification for what to build next.
+
+`build-mesa-guest.sh` applies `mesa-armv6-neon.patch`: Mesa adds `-mfpu=neon`
+for any ARM host without checking for ARMv7, which the ARMv6 soft-float target
+cannot assemble. Both affected objects are runtime-gated optimizations that an
+ARM1176 never selects — see the patch header.
+
 ## Assets this needs, and why they are not in the tree
 
 The tests need a guest kernel, a device tree and a busybox, which together are
