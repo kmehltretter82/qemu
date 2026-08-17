@@ -113,6 +113,7 @@ typedef struct AT91TcChan {
     uint32_t imr;
     uint32_t sr;           /* event bits only (COVFS..ETRGS) */
     bool clken;
+    bool stopped;          /* CPCSTOP: counter halted at RC, retriggerable */
     int64_t epoch;         /* vtime when the counter was last (re)started */
     uint32_t cv_frozen;    /* CV held while the clock is disabled */
     uint64_t ext_ticks;    /* selected external-XC edges since trigger */
@@ -258,8 +259,8 @@ static uint32_t tc_cv(AT91TcState *s, int n, int64_t now)
 {
     AT91TcChan *c = &s->ch[n];
 
-    return c->clken ? tc_cv_for_ticks(c, tc_ticks(s, n, now)) :
-                      c->cv_frozen;
+    return (c->clken && !c->stopped) ?
+           tc_cv_for_ticks(c, tc_ticks(s, n, now)) : c->cv_frozen;
 }
 
 static bool tc_edge_matches(unsigned selector, bool old_level, bool level)
@@ -509,7 +510,12 @@ static void tc_process_event(AT91TcState *s, int n, uint64_t ticks)
     if ((flags & TC_SR_CPCS) && (c->cmr & TC_CMR_WAVE) &&
         (c->cmr & (TC_CMR_CPCDIS | TC_CMR_CPCSTOP))) {
         c->cv_frozen = tc_cv_for_ticks(c, ticks);
-        c->clken = false;
+        if (c->cmr & TC_CMR_CPCDIS) {
+            c->clken = false;      /* CPCDIS: clock disabled; needs CLKEN */
+            c->stopped = false;
+        } else {
+            c->stopped = true;     /* CPCSTOP: stopped but retriggerable */
+        }
         timer_del(c->timer);
     }
     tc_update_irq(s);
@@ -525,7 +531,7 @@ static void tc_rearm(AT91TcState *s, int n)
     int64_t deadline;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
-    if (!c->clken || !rate) {
+    if (!c->clken || c->stopped || !rate) {
         timer_del(c->timer);
         return;
     }
@@ -600,6 +606,7 @@ static void tc_trigger(AT91TcState *s, int n)
 {
     AT91TcChan *c = &s->ch[n];
 
+    c->stopped = false;   /* a trigger restarts a CPCSTOP-halted counter */
     c->epoch = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     c->ext_ticks = 0;
     c->chain_origin = n == 1 ? tc_ticks(s, 0, c->epoch) : 0;
@@ -709,7 +716,12 @@ static void tc_capture_input(AT91TcState *s, int n, bool is_a, bool level)
     }
     if (loaded_b && (c->cmr & (TC_CMR_CPCSTOP | TC_CMR_CPCDIS))) {
         c->cv_frozen = cv;
-        c->clken = false;
+        if (c->cmr & TC_CMR_CPCDIS) {
+            c->clken = false;
+            c->stopped = false;
+        } else {
+            c->stopped = true;
+        }
         timer_del(c->timer);
     }
     tc_update_irq(s);
@@ -794,6 +806,7 @@ static void tc_write(void *opaque, hwaddr offset, uint64_t value,
                 c->ext_ticks = tc_ticks(s, n, now);
                 c->cv_frozen = tc_cv_for_ticks(c, c->ext_ticks);
                 c->clken = false;
+                c->stopped = false;
                 timer_del(c->timer);
             }
             if (value & TC_CCR_CLKEN) {
@@ -915,6 +928,7 @@ static void tc_reset(DeviceState *dev)
         c->cmr = c->smmr = c->ra = c->rb = c->rc = 0;
         c->imr = c->sr = 0;
         c->clken = false;
+        c->stopped = false;
         c->cv_frozen = 0;
         c->ext_ticks = 0;
         c->chain_origin = 0;
@@ -992,6 +1006,7 @@ static const VMStateDescription vmstate_at91_tc_chan = {
         VMSTATE_UINT32(imr, AT91TcChan),
         VMSTATE_UINT32(sr, AT91TcChan),
         VMSTATE_BOOL(clken, AT91TcChan),
+        VMSTATE_BOOL(stopped, AT91TcChan),
         VMSTATE_INT64(epoch, AT91TcChan),
         VMSTATE_UINT32(cv_frozen, AT91TcChan),
         VMSTATE_UINT64_V(ext_ticks, AT91TcChan, 2),

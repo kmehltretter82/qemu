@@ -174,11 +174,12 @@ static void rtc_tick(void *opaque)
 {
     AT91RtcState *s = opaque;
     int64_t now = rtc_now(s);
+    time_t t = now;
     struct tm tm;
     bool alarm;
 
     s->sr |= SR_SECEV;
-    gmtime_r(&now, &tm);
+    gmtime_r(&t, &tm);
     alarm = rtc_alarm_match(s, &tm);
     if (alarm) {
         s->sr |= SR_ALARM;
@@ -211,9 +212,10 @@ static uint64_t rtc_read(void *opaque, hwaddr offset, unsigned size)
 {
     AT91RtcState *s = opaque;
     int64_t now = rtc_now(s);
+    time_t t = now;
     struct tm tm;
 
-    gmtime_r(&now, &tm);
+    gmtime_r(&t, &tm);
     switch (offset) {
     case RTC_CR:
         return s->stopped ? (CR_UPDTIM | CR_UPDCAL) : 0;
@@ -249,8 +251,18 @@ static void rtc_write(void *opaque, hwaddr offset, uint64_t value,
         if (val & (CR_UPDTIM | CR_UPDCAL)) {
             /* Request to update: freeze the counter and acknowledge. */
             if (!s->stopped) {
+                time_t t;
+                struct tm tm;
+
                 s->frozen = rtc_now(s);
                 s->stopped = true;
+                /* Seed both latches from the frozen time so a time-only or
+                 * calendar-only update overrides just its half and leaves the
+                 * other intact, instead of decoding a zeroed latch to garbage. */
+                t = s->frozen;
+                gmtime_r(&t, &tm);
+                s->timr_latch = rtc_timr(&tm);
+                s->calr_latch = rtc_calr(&tm);
             }
             s->sr |= SR_ACKUPD;
             rtc_update_irq(s);
@@ -388,6 +400,7 @@ struct AT91RttState {
     uint32_t mr;
     uint32_t ar;
     uint32_t sr;
+    uint32_t last_value;   /* VR at the previous tick, for alarm edge detect */
 };
 
 static uint32_t rtt_prescaler(AT91RttState *s)
@@ -432,12 +445,16 @@ static void rtt_tick(void *opaque)
 {
     AT91RttState *s = opaque;
     uint32_t value = rtt_value(s);
-    bool alarm = value >= s->ar;
+    /* ALMS latches only on the increment that reaches AR.  VR is a monotonic
+     * counter, so a plain "value >= ar" would re-assert every tick past the
+     * alarm and storm the shared IRQ (the driver never clears ALMIEN). */
+    bool alarm = s->last_value < s->ar && value >= s->ar;
 
     s->sr |= RTT_RTTINC;
     if (alarm) {
         s->sr |= RTT_ALMS;
     }
+    s->last_value = value;
     trace_at91_rtt_tick(value, alarm);
     rtt_update_irq(s);
     rtt_arm(s);
@@ -450,6 +467,7 @@ static void rtt_reset(DeviceState *dev)
     s->mr = 0x00008000;   /* reset value: RTPRES = 0x8000 (1 Hz) */
     s->ar = 0xffffffff;
     s->sr = 0;
+    s->last_value = 0;
     s->base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     rtt_arm(s);
     qemu_set_irq(s->irq, 0);
@@ -489,6 +507,7 @@ static void rtt_write(void *opaque, hwaddr offset, uint64_t value,
         if (val & MR_RTTRST) {
             s->base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
             s->sr = 0;
+            s->last_value = 0;
         }
         rtt_update_irq(s);
         rtt_arm(s);
@@ -528,6 +547,7 @@ static const VMStateDescription vmstate_at91_rtt = {
         VMSTATE_UINT32(mr, AT91RttState),
         VMSTATE_UINT32(ar, AT91RttState),
         VMSTATE_UINT32(sr, AT91RttState),
+        VMSTATE_UINT32(last_value, AT91RttState),
         VMSTATE_END_OF_LIST()
     }
 };

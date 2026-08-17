@@ -44,6 +44,8 @@
 #define MACB_MID    0xfc   /* Module ID              */
 
 /* NCR - Network Control */
+#define NCR_LB      (1u << 0)    /* loopback (PHY)          */
+#define NCR_LLB     (1u << 1)    /* local loopback (MAC)    */
 #define NCR_RE      (1u << 2)    /* receive enable          */
 #define NCR_TE      (1u << 3)    /* transmit enable         */
 #define NCR_TSTART  (1u << 9)    /* start transmission      */
@@ -199,11 +201,18 @@ static void macb_do_tx(AT91MacbState *s)
     uint8_t frame[2048];
     size_t frame_len = 0;
     bool in_frame = false;
+    bool overflow = false;
+    bool loopback;
     int guard = 0;
 
     if (!(s->ncr & NCR_TE)) {
         return;
     }
+
+    /* LLB (MAC local loopback) or PHY loopback routes egress frames straight
+     * back into our own receive path instead of out onto the wire. */
+    loopback = (s->ncr & NCR_LLB) ||
+               (s->phy_regs[MACB_PHY_CONTROL] & PHY_CONTROL_LOOP);
 
     while (guard++ < 1024) {
         uint32_t addr = address_space_ldl_le(&address_space_memory, desc,
@@ -220,6 +229,7 @@ static void macb_do_tx(AT91MacbState *s)
         if (!in_frame) {
             frame_first = desc;
             frame_len = 0;
+            overflow = false;
             in_frame = true;
         }
         len = ctrl & TXD_LEN_MASK;
@@ -227,12 +237,24 @@ static void macb_do_tx(AT91MacbState *s)
             address_space_read(&address_space_memory, addr,
                                MEMTXATTRS_UNSPECIFIED, frame + frame_len, len);
             frame_len += len;
+        } else {
+            /* Gathered frame exceeds the assembly buffer: drop it rather than
+             * transmit a silently truncated frame. */
+            overflow = true;
         }
         if (ctrl & TXD_LAST) {
             uint32_t fctrl;
 
-            trace_at91_macb_tx(frame_len);
-            qemu_send_packet(qemu_get_queue(s->nic), frame, frame_len);
+            if (!overflow) {
+                trace_at91_macb_tx(frame_len);
+                if (loopback) {
+                    qemu_receive_packet(qemu_get_queue(s->nic),
+                                        frame, frame_len);
+                } else {
+                    qemu_send_packet(qemu_get_queue(s->nic),
+                                     frame, frame_len);
+                }
+            }
             /* Hardware writes the USED bit back only on the frame's first
              * buffer descriptor; that is what the driver inspects on reclaim.
              */

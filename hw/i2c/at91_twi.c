@@ -76,15 +76,17 @@ static void twi_update_irq(AT91TwiState *s)
     qemu_set_irq(s->irq, !!(s->sr & s->imr));
 }
 
-/* Send the internal (sub-)address bytes, MSB first. */
-static void twi_send_iadr(AT91TwiState *s)
+/* Send the internal (sub-)address bytes, MSB first.  Returns non-zero if the
+ * slave NACKed one of them. */
+static int twi_send_iadr(AT91TwiState *s)
 {
     int sz = MMR_IADRSZ(s->mmr);
-    int i;
+    int i, nack = 0;
 
-    for (i = sz - 1; i >= 0; i--) {
-        i2c_send(s->bus, (s->iadr >> (8 * i)) & 0xff);
+    for (i = sz - 1; i >= 0 && !nack; i--) {
+        nack = i2c_send(s->bus, (s->iadr >> (8 * i)) & 0xff);
     }
+    return nack;
 }
 
 /*
@@ -98,10 +100,19 @@ static void twi_start(AT91TwiState *s, bool reading)
     uint8_t dadr = MMR_DADR(s->mmr);
     int nack;
 
+    /* Fresh transfer: close any transfer left open by an aborted or repeated
+     * START (otherwise the I2C core keeps stale device references), and clear
+     * a stale NACK so a prior failure cannot suppress this transfer's RXRDY. */
+    if (s->xfer) {
+        i2c_end_transfer(s->bus);
+        s->xfer = s->reading = s->stopping = false;
+    }
+    s->sr &= ~SR_NACK;
+
     if (MMR_IADRSZ(s->mmr) > 0) {
         nack = i2c_start_send(s->bus, dadr);
         if (!nack) {
-            twi_send_iadr(s);
+            nack = twi_send_iadr(s);
         }
         if (reading && !nack) {
             nack = i2c_start_recv(s->bus, dadr);
@@ -121,6 +132,7 @@ static void twi_start(AT91TwiState *s, bool reading)
     } else {
         s->xfer = true;
         s->reading = reading;
+        s->stopping = false;
         s->sr &= ~SR_TXCOMP;
     }
 }

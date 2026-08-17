@@ -596,11 +596,14 @@ void nand_setio(DeviceState *dev, uint32_t value)
             }
         }
     } else if (!s->cle && !s->ale && s->cmd == NAND_CMD_COPYBACKPRG1) {
-        if ((s->addr & ((1 << s->addr_shift) - 1)) <
-                (1 << s->page_shift) + (1 << s->oob_shift)) {
-            for (i = s->buswidth; i--; s->addr++, value >>= 8) {
-                s->io[s->iolen + (s->addr & ((1 << s->addr_shift) - 1))] =
-                    (uint8_t) (value & 0xff);
+        /* Copy-back data overwrites columns of the page already loaded into
+         * s->io[] by the copy-back read; index by the column alone (not
+         * s->iolen + column, which walks off the end of the buffer) and
+         * bounds-check every byte since s->addr advances across the loop. */
+        for (i = s->buswidth; i--; s->addr++, value >>= 8) {
+            unsigned col = s->addr & ((1 << s->addr_shift) - 1);
+            if (col < (1 << s->page_shift) + (1 << s->oob_shift)) {
+                s->io[col] = (uint8_t) (value & 0xff);
             }
         }
     }
@@ -699,19 +702,19 @@ static void glue(nand_blk_write_, NAND_PAGE_SIZE)(NANDFlashState *s)
         }
     } else {
         off = PAGE_START(s->addr) + (s->addr & PAGE_MASK) + s->offset;
-        sector = off >> 9;
-        soff = off & 0x1ff;
-        if (blk_pread(s->blk, sector << BDRV_SECTOR_BITS,
-                      (PAGE_SECTORS + 2) << BDRV_SECTOR_BITS, iobuf, 0) < 0) {
-            printf("%s: read error in sector %" PRIu64 "\n", __func__, sector);
+        /* Byte-addressed read-modify-write of exactly the touched bytes.
+         * Rounding up to whole sectors here would run past the end of an
+         * image sized to exactly pages*(page+oob) and fail the whole
+         * request, silently dropping the program of the last page. */
+        if (blk_pread(s->blk, off, s->iolen, iobuf, 0) < 0) {
+            printf("%s: read error at offset %" PRIu64 "\n", __func__, off);
             return;
         }
 
-        mem_and(iobuf + soff, s->io, s->iolen);
+        mem_and(iobuf, s->io, s->iolen);
 
-        if (blk_pwrite(s->blk, sector << BDRV_SECTOR_BITS,
-                       (PAGE_SECTORS + 2) << BDRV_SECTOR_BITS, iobuf, 0) < 0) {
-            printf("%s: write error in sector %" PRIu64 "\n", __func__, sector);
+        if (blk_pwrite(s->blk, off, s->iolen, iobuf, 0) < 0) {
+            printf("%s: write error at offset %" PRIu64 "\n", __func__, off);
         }
     }
     s->offset = 0;
@@ -804,12 +807,13 @@ static bool glue(nand_blk_load_, NAND_PAGE_SIZE)(NANDFlashState *s,
              * the start of s->io; indexing the buffer by the page's
              * intra-sector remainder as well (as this code did when the
              * block API was sector-based) would double-count it and
-             * return every non-sector-aligned page shifted. */
+             * return every non-sector-aligned page shifted.  Read exactly
+             * the page+OOB bytes: rounding up to whole sectors would run
+             * past the end of an exactly-sized image on the last page. */
             if (blk_pread(s->blk, PAGE_START(addr),
-                          (PAGE_SECTORS + 2) << BDRV_SECTOR_BITS, s->io, 0)
-                < 0) {
-                printf("%s: read error in sector %" PRIu64 "\n",
-                                __func__, PAGE_START(addr) >> 9);
+                          NAND_PAGE_SIZE + OOB_SIZE, s->io, 0) < 0) {
+                printf("%s: read error at offset %" PRIu64 "\n",
+                                __func__, (uint64_t)PAGE_START(addr));
             }
             s->ioaddr = s->io + offset;
         }

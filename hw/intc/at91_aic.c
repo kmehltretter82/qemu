@@ -59,6 +59,8 @@ struct AT91AicState {
 
     int prio_stack[AIC_STACK_SZ];
     int sp;
+    uint32_t nest_extra;   /* IVR pushes dropped past the 8-deep stack, tracked
+                              so the matching EOICR pop stays balanced */
 
     bool irq_asserted;
     bool fiq_asserted;
@@ -181,6 +183,8 @@ static uint64_t aic_read(void *opaque, hwaddr offset, unsigned size)
             s->isr = 0;
             if (s->sp < AIC_STACK_SZ) {
                 s->prio_stack[s->sp++] = cur_prio;
+            } else {
+                s->nest_extra++;
             }
             trace_at91_aic_ivr(-1, cur_prio, s->sp);
             return s->spu;
@@ -188,6 +192,8 @@ static uint64_t aic_read(void *opaque, hwaddr offset, unsigned size)
         s->isr = best;
         if (s->sp < AIC_STACK_SZ) {
             s->prio_stack[s->sp++] = best_prio;
+        } else {
+            s->nest_extra++;
         }
         trace_at91_aic_ivr(best, best_prio, s->sp);
         if (AIC_SRCTYPE_IS_EDGE(s->smr[best])) {
@@ -294,7 +300,9 @@ static void aic_write(void *opaque, hwaddr offset, uint64_t value,
         }
         break;
     case AIC_EOICR:
-        if (s->sp > 0) {
+        if (s->nest_extra > 0) {
+            s->nest_extra--;       /* balance a push dropped at stack saturation */
+        } else if (s->sp > 0) {
             s->sp--;               /* exit point: pop priority stack */
         }
         trace_at91_aic_eoi(s->sp);
@@ -343,6 +351,7 @@ static void aic_reset(DeviceState *dev)
     s->spu = 0;
     s->dcr = 0;
     s->sp = 0;
+    s->nest_extra = 0;
     s->irq_asserted = false;
     s->fiq_asserted = false;
     qemu_set_irq(s->irq, 0);
@@ -361,10 +370,23 @@ static void aic_init(Object *obj)
     qdev_init_gpio_in(DEVICE(obj), aic_set_irq, AIC_NUM_IRQ);
 }
 
+static int aic_post_load(void *opaque, int version_id)
+{
+    AT91AicState *s = opaque;
+
+    /* A crafted migration stream must not drive prio_stack[] out of bounds:
+     * the IVR/EOICR paths trust sp to index it. */
+    if (s->sp < 0 || s->sp > AIC_STACK_SZ) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_at91_aic = {
     .name = "at91-aic",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = aic_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(smr, AT91AicState, AIC_NUM_IRQ),
         VMSTATE_UINT32_ARRAY(svr, AT91AicState, AIC_NUM_IRQ),
@@ -377,6 +399,7 @@ static const VMStateDescription vmstate_at91_aic = {
         VMSTATE_UINT32(dcr, AT91AicState),
         VMSTATE_INT32_ARRAY(prio_stack, AT91AicState, AIC_STACK_SZ),
         VMSTATE_INT32(sp, AT91AicState),
+        VMSTATE_UINT32(nest_extra, AT91AicState),
         VMSTATE_BOOL(irq_asserted, AT91AicState),
         VMSTATE_BOOL(fiq_asserted, AT91AicState),
         VMSTATE_END_OF_LIST()

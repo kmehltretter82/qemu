@@ -190,11 +190,26 @@ static void pit_write(void *opaque, hwaddr offset, uint64_t value,
     AT91PitState *s = AT91_PIT(opaque);
 
     switch (offset) {
-    case PIT_MR:
+    case PIT_MR: {
+        uint32_t old = s->mr;
+        bool was_running = (old & PIT_MR_PITEN) && PIT_MR_PIV(old) != 0;
+        bool now_running;
+
         s->mr = value & 0x03FFFFFF;
-        pit_rearm(s);
+        now_running = (s->mr & PIT_MR_PITEN) && PIT_MR_PIV(s->mr) != 0;
+
+        /* Re-arm (which resets the interval phase) only when the timer
+         * actually starts, stops, or changes period.  A bare PITIEN toggle -
+         * e.g. Linux masking the PIT tick IRQ while keeping the PIT running as
+         * a free-running clocksource - must leave last_fire alone, or CPIV
+         * would snap back to 0 and the composed clock would step backwards. */
+        if (was_running != now_running ||
+            PIT_MR_PIV(old) != PIT_MR_PIV(s->mr)) {
+            pit_rearm(s);
+        }
         pit_update_irq(s);
         break;
+    }
     default:
         qemu_log_mask(LOG_UNIMP, "at91-pit: write to unimplemented "
                       "offset 0x%02" HWADDR_PRIx " = 0x%08x\n",
