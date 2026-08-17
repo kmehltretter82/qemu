@@ -181,7 +181,14 @@ struct BCM2835V3DState {
     /* Primitive mode of the last draw, and rasterizer statistics. */
     uint32_t prim_mode;
     uint32_t frag_shaded;
+    uint32_t frag_culled;
     bool frag_reported;
+
+    /* Face culling, from VC4_PACKET_CONFIGURATION_BITS. */
+    bool cfg_valid;
+    bool cfg_enable_front;
+    bool cfg_enable_back;
+    bool cfg_cw_front;
 
     /* Narrow B5 texture-fetch probe (not a general TMU implementation). */
     uint32_t tmu_fetches;

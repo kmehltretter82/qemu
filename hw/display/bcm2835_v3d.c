@@ -991,9 +991,13 @@ static void v3d_bin_cap_tile_lists(V3DCLWalker *w)
  * the fragment shader on the QPU and taking whatever it writes to the tile
  * buffer colour register.
  */
+#define V3D_QPU_SIG_COLOR_LOAD      8
+#define V3D_QPU_SIG_COLOR_LOAD_END  9
 #define V3D_QPU_WADDR_TLB_Z         44
 #define V3D_QPU_WADDR_TLB_COLOR_MS  45
 #define V3D_QPU_WADDR_TLB_COLOR_ALL 46
+
+struct V3DFragGroup;
 
 typedef struct V3DFragmentRun {
     BCM2835V3DState *s;
@@ -1012,6 +1016,9 @@ typedef struct V3DFragmentRun {
     float vary_c[BCM2835_V3D_MAX_VARYINGS];
     unsigned vary_count;
     unsigned vary_read;
+
+    /* Which pixels these lanes are, so a colour read can find them. */
+    const struct V3DFragGroup *group;
 } V3DFragmentRun;
 
 /* One group of up to sixteen covered pixels, ready to shade. */
@@ -1095,11 +1102,35 @@ static bool v3d_frag_read_varying(void *opaque, uint32_t vary[VC4_QPU_LANES],
     return true;
 }
 
+/*
+ * A colour load hands the shader what is already in the tile buffer.  VC4 has
+ * no fixed-function blender: Mesa emits the blend equation into the fragment
+ * shader, which reads the destination this way and combines it itself.
+ */
+static bool v3d_frag_signal_load(void *opaque, unsigned sig,
+                                 uint32_t r4[VC4_QPU_LANES])
+{
+    V3DFragmentRun *f = opaque;
+    const V3DFragGroup *g = f->group;
+    unsigned i;
+
+    if (sig != V3D_QPU_SIG_COLOR_LOAD && sig != V3D_QPU_SIG_COLOR_LOAD_END) {
+        return false;           /* coverage and alpha-mask loads: not yet */
+    }
+    for (i = 0; i < VC4_QPU_LANES; i++) {
+        r4[i] = i < g->count
+              ? f->s->tile_color[g->py[i] * BCM2835_V3D_TILE_W + g->px[i]]
+              : 0;
+    }
+    return true;
+}
+
 static const V3DQPUOps v3d_frag_ops = {
     .fetch = v3d_frag_fetch,
     .read_special = v3d_frag_read_special,
     .write_special = v3d_frag_write_special,
     .read_varying = v3d_frag_read_varying,
+    .signal_load = v3d_frag_signal_load,
 };
 
 /* Shade one group of up to 16 covered pixels and put them in the tile. */
@@ -1109,6 +1140,7 @@ static void v3d_shade_group(BCM2835V3DState *s, const V3DFragGroup *g)
         .s = s,
         .uniform_addr = s->fs_uniforms_addr,
         .vary_count = g->vary_count,
+        .group = g,
     };
     V3DQPUState q;
     V3DQPUResult r;
@@ -1172,6 +1204,21 @@ static void v3d_raster_triangle(BCM2835V3DState *s, const V3DShadedVertex *a,
     area = v3d_edge(a, b, c->x, c->y);
     if (area == 0.0f) {
         return;                 /* degenerate */
+    }
+
+    /*
+     * Face culling.  Screen y runs downwards, so a triangle that is
+     * counter-clockwise in NDC -- front facing by default in GL -- comes out
+     * with a positive signed area here; VC4_CONFIG_BITS_CW_PRIMITIVES flips
+     * which sense counts as the front.
+     */
+    if (s->cfg_valid) {
+        bool front = (area > 0.0f) != s->cfg_cw_front;
+
+        if (front ? !s->cfg_enable_front : !s->cfg_enable_back) {
+            s->frag_culled++;
+            return;
+        }
     }
 
     /*
@@ -1424,6 +1471,19 @@ static void v3d_dispatch_bin(V3DCLWalker *w, uint8_t op)
                           index_size);
         break;
     }
+
+    case VC4_PACKET_CONFIGURATION_BITS:
+        /* Byte 0 carries the face-culling controls (vc4_packet.h). */
+        if (!bcm2835_v3d_dma_read(s, w->pc + 1, payload, 3)) {
+            v3d_walk_stop(w, "configuration bits unreadable", true);
+            return;
+        }
+        s->cfg_enable_front = !!(payload[0] & (1u << 0));
+        s->cfg_enable_back = !!(payload[0] & (1u << 1));
+        s->cfg_cw_front = !!(payload[0] & (1u << 2));
+        s->cfg_valid = true;
+        trace_bcm2835_v3d_config_bits(payload[0], payload[1], payload[2]);
+        break;
 
     case VC4_PACKET_VIEWPORT_OFFSET:
         /* Two signed 12.4 fixed-point values: the screen position the shaded
@@ -1901,6 +1961,8 @@ static void bcm2835_v3d_reset(DeviceState *dev)
     s->viewport_y16 = 0;
     s->prim_mode = 0;
     s->frag_shaded = 0;
+    s->frag_culled = 0;
+    s->cfg_valid = false;
     s->frag_reported = false;
     memset(s->tile_color, 0, sizeof(s->tile_color));
     s->clear_color[0] = 0;

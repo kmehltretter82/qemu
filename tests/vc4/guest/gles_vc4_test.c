@@ -413,6 +413,177 @@ int main(void)
         }
     }
 
+    /*
+     * Stage 6: face culling.  The triangle is front-facing, so culling front
+     * faces must remove it entirely and leave the clear colour.
+     */
+    {
+        const unsigned char *c;
+        char detail[96];
+
+        glUseProgram(prog);
+        glDisableVertexAttribArray(1);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+
+        unsigned char culled_front, kept_back;
+
+        glEnable(GL_CULL_FACE);
+
+        /* The triangle is front facing, so culling fronts must remove it. */
+        glCullFace(GL_FRONT);
+        glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glFinish();
+        memset(px, 0x5a, sizeof(px));
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        culled_front = px[((H / 2) * W + W / 2) * 4];      /* red channel */
+
+        /* ... and culling backs must leave it alone.  Checking both ways
+         * means a model that has the winding sense backwards cannot pass. */
+        glCullFace(GL_BACK);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glFinish();
+        memset(px, 0x5a, sizeof(px));
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        kept_back = px[((H / 2) * W + W / 2) * 4];
+        glDisable(GL_CULL_FACE);
+
+        c = px;
+        snprintf(detail, sizeof(detail),
+                 "cull front -> red %02x (want 00), cull back -> red %02x (want ff)",
+                 culled_front, kept_back);
+        report("face culling", culled_front == 0x00 && kept_back == 0xff,
+               detail);
+    }
+
+    /*
+     * Stage 7: blending.  Half-transparent red over a blue clear should land
+     * halfway between the two.
+     */
+    {
+        static const char *blend_fs_src =
+            "precision mediump float;\n"
+            "void main() { gl_FragColor = vec4(1.0, 0.0, 0.0, 0.5); }\n";
+        GLuint bfs = compile(GL_FRAGMENT_SHADER, blend_fs_src);
+        GLuint bprog;
+        GLint linked3 = 0;
+        const unsigned char *c;
+        char detail[96];
+
+        if (!bfs) {
+            report("blend shader compiles", 0, "see log above");
+            goto done;
+        }
+        bprog = glCreateProgram();
+        glAttachShader(bprog, compile(GL_VERTEX_SHADER, vs_src));
+        glAttachShader(bprog, bfs);
+        glBindAttribLocation(bprog, 0, "pos");
+        glLinkProgram(bprog);
+        glGetProgramiv(bprog, GL_LINK_STATUS, &linked3);
+        if (!linked3) {
+            report("blend shader links", 0, "link failed");
+            goto done;
+        }
+        glUseProgram(bprog);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glFinish();
+        glDisable(GL_BLEND);
+
+        memset(px, 0x5a, sizeof(px));
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        c = px + ((H / 2) * W + W / 2) * 4;
+        snprintf(detail, sizeof(detail),
+                 "centre %02x%02x%02x (want about 800080)",
+                 c[0], c[1], c[2]);
+        report("alpha blending",
+               c[0] > 0x60 && c[0] < 0xa0 && c[2] > 0x60 && c[2] < 0xa0,
+               detail);
+    }
+
+    /*
+     * Stage 8: depth testing.  A near triangle then a far one covering the
+     * same pixels: the far one must lose.
+     */
+    {
+        GLuint depth_rb;
+        const unsigned char *c;
+        char detail[96];
+        static const GLfloat far_tri[] = {
+            -0.9f, -0.9f, 0.5f, 1.0f,
+             0.9f, -0.9f, 0.5f, 1.0f,
+             0.0f,  0.9f, 0.5f, 1.0f,
+        };
+        GLuint far_vbo;
+
+        glGenRenderbuffers(1, &depth_rb);
+        glBindRenderbuffer(GL_RENDERBUFFER, depth_rb);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, W, H);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                  GL_RENDERBUFFER, depth_rb);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) !=
+            GL_FRAMEBUFFER_COMPLETE) {
+            report("depth attachment", 0, "framebuffer incomplete");
+            goto done;
+        }
+
+        static const char *green_fs_src =
+            "precision mediump float;\n"
+            "void main() { gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+        GLuint gprog = glCreateProgram();
+        GLint glinked = 0;
+
+        glAttachShader(gprog, compile(GL_VERTEX_SHADER, vs_src));
+        glAttachShader(gprog, compile(GL_FRAGMENT_SHADER, green_fs_src));
+        glBindAttribLocation(gprog, 0, "pos");
+        glLinkProgram(gprog);
+        glGetProgramiv(gprog, GL_LINK_STATUS, &glinked);
+        if (!glinked) {
+            report("depth: green program links", 0, "link failed");
+            goto done;
+        }
+
+        glUseProgram(prog);            /* opaque red, near */
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        /* Near first, at z = 0. */
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+
+        /* Then the same triangle further away, in green: it must be rejected.
+         * A different colour is the whole point -- with both draws red the
+         * check would pass whether or not the depth test did anything. */
+        glUseProgram(gprog);
+        glGenBuffers(1, &far_vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, far_vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(far_tri), far_tri, GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glFinish();
+        glDisable(GL_DEPTH_TEST);
+
+        memset(px, 0x5a, sizeof(px));
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        c = px + ((H / 2) * W + W / 2) * 4;
+        snprintf(detail, sizeof(detail),
+                 "centre %02x%02x%02x (near red must survive the far green)",
+                 c[0], c[1], c[2]);
+        report("depth test", c[0] == 0xff && c[1] == 0x00, detail);
+    }
+
 done:
     printf("GLES: %d stage(s) failed\n", failures);
     return failures ? 1 : 0;
