@@ -236,9 +236,21 @@ struct BCM2835V3DState {
     uint32_t clip_w;
     uint32_t clip_h;
 
-    /* Narrow B5 texture-fetch probe (not a general TMU implementation). */
+    /* Texture fetches served, and those that fell outside guest memory. */
     uint32_t tmu_fetches;
     uint32_t tmu_faults;
+    /*
+     * Bitmask of the sampler's "not modelled" messages already logged.  These
+     * sites sit in the per-texel path, so an unrate-limited log line there
+     * costs more than the rendering does -- one report each is the useful
+     * amount.  Diagnostic only, so deliberately not in the vmstate.
+     */
+    uint32_t tmu_unimp_reported;
+    /* Last texture configuration traced, so the per-texel path only traces
+     * when it actually changes.  Diagnostic only, as above. */
+    uint32_t tmu_last_p0;
+    uint32_t tmu_last_p1;
+    uint32_t tmu_trace_budget;
 };
 
 #endif /* HW_DISPLAY_BCM2835_V3D_H */

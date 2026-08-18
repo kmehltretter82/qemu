@@ -251,6 +251,10 @@ static const V3DPacketInfo v3d_packets[256] = {
 #define V3D_TEX_P1_WIDTH(p1)    (((p1) >> 8) & 0x7ff)
 #define V3D_TEX_P1_WRAP_T(p1)   (((p1) >> 2) & 0x3)
 #define V3D_TEX_P1_WRAP_S(p1)   ((p1) & 0x3)
+#define V3D_TEX_P1_MAGFILT(p1)  (((p1) >> 7) & 0x1)
+#define V3D_TEX_P1_MINFILT(p1)  (((p1) >> 4) & 0x7)
+#define V3D_TEX_FILT_LINEAR     0
+#define V3D_TEX_FILT_NEAREST    1
 #define V3D_TEX_TYPE_RGBA8888   0
 #define V3D_TEX_TYPE_RGBX8888   1
 #define V3D_TEX_WRAP_REPEAT     0
@@ -1203,21 +1207,96 @@ static void v3d_frag_write_special(void *opaque, unsigned waddr, bool file_b,
  * models; the mip level, the compressed and narrow formats, cube maps and the
  * mirror/border wrap modes are declined by name rather than approximated.
  */
+/* Apply a wrap mode to a texel coordinate. */
+static int v3d_tex_wrap(int x, int size, unsigned mode)
+{
+    switch (mode) {
+    case V3D_TEX_WRAP_REPEAT:
+        return ((x % size) + size) % size;
+    case V3D_TEX_WRAP_CLAMP:
+        return MIN(MAX(x, 0), size - 1);
+    default:
+        /* Mirror and border are not modelled; clamping is the closest of the
+         * two behaviours and keeps the fetch in bounds. */
+        return MIN(MAX(x, 0), size - 1);
+    }
+}
+
+/*
+ * The sampler's "not modelled" reports sit in the per-texel path, where an
+ * unrestricted log line costs far more than the rendering.  Report each once.
+ */
+#define V3D_TMU_UNIMP_TYPE  (1u << 0)
+#define V3D_TMU_UNIMP_MIP   (1u << 1)
+
+static bool v3d_tmu_unimp_once(BCM2835V3DState *s, uint32_t what)
+{
+    if (s->tmu_unimp_reported & what) {
+        return false;
+    }
+    s->tmu_unimp_reported |= what;
+    return true;
+}
+
+/* Read one texel, already wrapped into range. */
+static uint32_t v3d_tmu_texel(BCM2835V3DState *s, uint32_t base, unsigned width,
+                              unsigned height, int x, int y)
+{
+    const unsigned cpp = 4;
+    unsigned tiling = vc4_size_is_lt(width, height, cpp) ? VC4_TILING_LT
+                                                         : VC4_TILING_T;
+    unsigned aligned_width = vc4_aligned_width(tiling, cpp, width);
+    uint32_t offset;
+    uint8_t buf[4];
+
+    if (!vc4_tiling_offset(tiling, cpp, aligned_width, x, y, &offset) ||
+        !bcm2835_v3d_dma_read(s, base + offset, buf, sizeof(buf))) {
+        s->tmu_faults++;
+        return 0;
+    }
+    s->tmu_fetches++;
+    return ldl_le_p(buf);
+}
+
+/* Blend two RGBA8888 texels, component by component. */
+static uint32_t v3d_tex_lerp(uint32_t a, uint32_t b, float t)
+{
+    uint32_t out = 0;
+    unsigned i;
+
+    for (i = 0; i < 4; i++) {
+        float ca = (float)((a >> (i * 8)) & 0xff);
+        float cb = (float)((b >> (i * 8)) & 0xff);
+        int v = (int)(ca + (cb - ca) * t + 0.5f);
+
+        out |= (uint32_t)MIN(MAX(v, 0), 255) << (i * 8);
+    }
+    return out;
+}
+
+/*
+ * Sample a texture.  32-bit texels with nearest or linear filtering; the mip
+ * level, the narrow and compressed formats, cube maps and the mirror and border
+ * wrap modes are declined by name rather than approximated.
+ */
 static uint32_t v3d_tmu_sample(BCM2835V3DState *s, uint32_t p0, uint32_t p1,
                                float sc, float tc)
 {
-    const unsigned cpp = 4;
     unsigned type = V3D_TEX_P0_TYPE(p0) | (V3D_TEX_P1_TYPE4(p1) << 4);
     unsigned width = V3D_TEX_P1_WIDTH(p1);
     unsigned height = V3D_TEX_P1_HEIGHT(p1);
-    unsigned tiling, aligned_width;
-    uint32_t offset;
-    uint8_t buf[4];
-    int x, y;
+    uint32_t base = V3D_TEX_P0_BASE(p0);
+    unsigned wrap_s = V3D_TEX_P1_WRAP_S(p1);
+    unsigned wrap_t = V3D_TEX_P1_WRAP_T(p1);
+    bool linear;
+    float u, v;
+    int x0, y0;
 
     if (type != V3D_TEX_TYPE_RGBA8888 && type != V3D_TEX_TYPE_RGBX8888) {
-        qemu_log_mask(LOG_UNIMP, "bcm2835-v3d: texture type %u not sampled\n",
-                      type);
+        if (v3d_tmu_unimp_once(s, V3D_TMU_UNIMP_TYPE)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "bcm2835-v3d: texture type %u not sampled\n", type);
+        }
         return 0;
     }
     /* Zero in the field means the maximum. */
@@ -1228,43 +1307,70 @@ static uint32_t v3d_tmu_sample(BCM2835V3DState *s, uint32_t p0, uint32_t p1,
         height = 2048;
     }
 
+    /*
+     * The magnification filter is one bit; the minification field also selects
+     * between mip modes, which are not modelled, so only its bottom choice of
+     * linear or nearest is honoured.  Which of the two applies needs screen
+     * space derivatives, so take magnification -- the common case for the
+     * content this models so far.
+     */
+    linear = V3D_TEX_P1_MAGFILT(p1) == V3D_TEX_FILT_LINEAR;
+    if (V3D_TEX_P1_MINFILT(p1) > V3D_TEX_FILT_NEAREST &&
+        v3d_tmu_unimp_once(s, V3D_TMU_UNIMP_MIP)) {
+        qemu_log_mask(LOG_UNIMP,
+                      "bcm2835-v3d: mipmapped minification not modelled\n");
+    }
+
+    /*
+     * Trace the decoded configuration, but only when it changes: this runs per
+     * texel, so tracing every sample would swamp the log and the run.
+     */
+    if (p0 != s->tmu_last_p0 || p1 != s->tmu_last_p1) {
+        s->tmu_last_p0 = p0;
+        s->tmu_last_p1 = p1;
+        s->tmu_trace_budget = 8;
+        trace_bcm2835_v3d_tex_config(p0, p1, width, height,
+                                     linear ? "linear" : "nearest",
+                                     wrap_s, wrap_t);
+    }
+
     /* Coordinates arrive normalised. */
-    x = (int)floorf(sc * (float)width);
-    y = (int)floorf(tc * (float)height);
-
-    switch (V3D_TEX_P1_WRAP_S(p1)) {
-    case V3D_TEX_WRAP_REPEAT:
-        x = ((x % (int)width) + (int)width) % (int)width;
-        break;
-    case V3D_TEX_WRAP_CLAMP:
-        x = MIN(MAX(x, 0), (int)width - 1);
-        break;
-    default:
-        qemu_log_mask(LOG_UNIMP, "bcm2835-v3d: texture wrap mode not modelled\n");
-        x = MIN(MAX(x, 0), (int)width - 1);
-        break;
-    }
-    switch (V3D_TEX_P1_WRAP_T(p1)) {
-    case V3D_TEX_WRAP_REPEAT:
-        y = ((y % (int)height) + (int)height) % (int)height;
-        break;
-    default:
-        y = MIN(MAX(y, 0), (int)height - 1);
-        break;
+    if (!linear) {
+        x0 = v3d_tex_wrap((int)floorf(sc * (float)width), width, wrap_s);
+        y0 = v3d_tex_wrap((int)floorf(tc * (float)height), height, wrap_t);
+        return v3d_tmu_texel(s, base, width, height, x0, y0);
     }
 
-    /* The texture unit picks the layout from the level's size. */
-    tiling = vc4_size_is_lt(width, height, cpp) ? VC4_TILING_LT : VC4_TILING_T;
-    aligned_width = vc4_aligned_width(tiling, cpp, width);
-    if (!vc4_tiling_offset(tiling, cpp, aligned_width, x, y, &offset)) {
-        return 0;
+    /* Linear: blend the four texels around the sample point, which sits half a
+     * texel in from the corner. */
+    u = sc * (float)width - 0.5f;
+    v = tc * (float)height - 0.5f;
+    x0 = (int)floorf(u);
+    y0 = (int)floorf(v);
+    {
+        float fu = u - (float)x0;
+        float fv = v - (float)y0;
+        int xa = v3d_tex_wrap(x0, width, wrap_s);
+        int xb = v3d_tex_wrap(x0 + 1, width, wrap_s);
+        int ya = v3d_tex_wrap(y0, height, wrap_t);
+        int yb = v3d_tex_wrap(y0 + 1, height, wrap_t);
+        uint32_t t00 = v3d_tmu_texel(s, base, width, height, xa, ya);
+        uint32_t t10 = v3d_tmu_texel(s, base, width, height, xb, ya);
+        uint32_t t01 = v3d_tmu_texel(s, base, width, height, xa, yb);
+        uint32_t t11 = v3d_tmu_texel(s, base, width, height, xb, yb);
+        uint32_t out = v3d_tex_lerp(v3d_tex_lerp(t00, t10, fu),
+                                    v3d_tex_lerp(t01, t11, fu), fv);
+
+        /* A few samples after each configuration change, so a wrong blend can
+         * be read off the trace instead of guessed at. */
+        if (s->tmu_trace_budget) {
+            s->tmu_trace_budget--;
+            trace_bcm2835_v3d_tex_blend((int)(sc * 1000.0f), (int)(tc * 1000.0f),
+                                        xa, ya, (int)(fu * 1000.0f),
+                                        (int)(fv * 1000.0f), t00, t11, out);
+        }
+        return out;
     }
-    if (!bcm2835_v3d_dma_read(s, V3D_TEX_P0_BASE(p0) + offset, buf,
-                              sizeof(buf))) {
-        return 0;
-    }
-    s->tmu_fetches++;
-    return ldl_le_p(buf);
 }
 
 /* Hand the shader the next varying, and its constant term for r5. */
@@ -2006,58 +2112,6 @@ static void v3d_run_cl(BCM2835V3DState *s, unsigned thread)
     trace_bcm2835_v3d_cl_end(thread, w.pc, w.packets, w.stop);
 }
 
-static bool bcm2835_v3d_shader_has_tmu(BCM2835V3DState *s, uint32_t addr)
-{
-    /* QPU instructions are 64-bit little-endian words.  This is only a
-     * recognizer for the canned B5 shader, not an instruction interpreter. */
-    for (unsigned i = 0; i < 256; i++) {
-        uint8_t bytes[8];
-        uint64_t inst;
-        uint32_t sig;
-        uint32_t waddr_add;
-        uint32_t waddr_mul;
-
-        if (!bcm2835_v3d_dma_read(s, addr + i * sizeof(inst), bytes,
-                                  sizeof(bytes)))
-            return false;
-        inst = ldq_le_p(bytes);
-        sig = (inst >> 60) & 0xf;
-        waddr_add = (inst >> 38) & 0x3f;
-        waddr_mul = (inst >> 32) & 0x3f;
-        if ((waddr_add >= 56 && waddr_add <= 63) ||
-            (waddr_mul >= 56 && waddr_mul <= 63))
-            return true;
-        if (sig == 3) /* QPU_SIG_PROG_END */
-            break;
-    }
-    return false;
-}
-
-/* Minimal B5-only TMU side effect.  The kernel validator has already
- * relocated the FS uniform p0 to tex->dma_addr + p0.  Reading that address
- * through QEMU's system-memory AddressSpace makes the attempted fetch visible
- * (as a successful read or a guest-DMA fault) without claiming to emulate
- * tiling, filtering, rasterization, or the general QPU ISA. */
-static void bcm2835_v3d_probe_b5_tmu(BCM2835V3DState *s)
-{
-    uint32_t p0;
-    uint8_t sample[4];
-    bool ok;
-
-    if (!s->shader_record_valid ||
-        !bcm2835_v3d_shader_has_tmu(s, s->fs_code_addr) ||
-        !v3d_read_u32(s, s->fs_uniforms_addr, &p0))
-        return;
-
-    s->tmu_fetches++;
-    ok = bcm2835_v3d_dma_read(s, p0, sample, sizeof(sample));
-    if (!ok)
-        s->tmu_faults++;
-    qemu_log_mask(LOG_GUEST_ERROR,
-                  "bcm2835-v3d: B5 TMU probe fetch #%u at 0x%08x (%s)\n",
-                  s->tmu_fetches, p0, ok ? "read" : "fault");
-}
-
 /* Bottom half: run every pending control-list thread to completion. */
 static void bcm2835_v3d_job_bh(void *opaque)
 {
@@ -2072,9 +2126,6 @@ static void bcm2835_v3d_job_bh(void *opaque)
         }
 
         v3d_run_cl(s, n);
-        if (n == 1) {
-            bcm2835_v3d_probe_b5_tmu(s);
-        }
 
         /*
          * The model completes the whole list in one go (CA advanced to EA so

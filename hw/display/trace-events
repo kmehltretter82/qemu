@@ -243,6 +243,8 @@ bcm2835_v3d_vcd_fetch(uint32_t vertices, uint32_t attrs) "VCD fetched %u vertice
 bcm2835_v3d_clamp(uint32_t pc, uint32_t count, uint32_t limit) "0x%08x: vertex count %u clamped to %u"
 bcm2835_v3d_render_config(uint32_t fb, uint32_t width, uint32_t height, uint32_t bits) "framebuffer 0x%08x %ux%u bits 0x%04x"
 bcm2835_v3d_tile_coords(uint32_t x, uint32_t y) "tile %u,%u"
+bcm2835_v3d_tex_config(uint32_t p0, uint32_t p1, uint32_t width, uint32_t height, const char *filt, uint32_t wrap_s, uint32_t wrap_t) "texture p0 0x%08x p1 0x%08x: %ux%u %s wrap %u/%u"
+bcm2835_v3d_tex_blend(int sc, int tc, int x0, int y0, int fu, int fv, uint32_t t00, uint32_t t11, uint32_t out) "texel st %d,%d/1000 -> %d,%d frac %d,%d/1000: t00 %08x t11 %08x -> %08x"
 bcm2835_v3d_clear_colors(uint32_t c0, uint32_t c1, uint32_t z, uint8_t stencil) "color 0x%08x/0x%08x depth 0x%08x stencil 0x%02x"
 bcm2835_v3d_tile_load(uint32_t addr, uint32_t bits) "load tile buffer from 0x%08x bits 0x%04x"
 bcm2835_v3d_tile_store(uint32_t addr, uint32_t bits, const char *eof) "store tile buffer to 0x%08x bits 0x%04x%s"
