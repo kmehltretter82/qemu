@@ -68,6 +68,81 @@ centre pixel comes back as the blue clear colour, which is precisely right when
 the clear works and no fragments are produced. It is run anyway because the
 trace it generates is the specification for what to build next.
 
+## dEQP-GLES2, the Khronos conformance module
+
+The strictest workload available: dEQP renders with the real driver and compares
+against its own reference renderer.
+
+```sh
+sh build-deqp-guest.sh                  # long; the clone alone is ~2 GB
+sh run-deqp.sh 'dEQP-GLES2.functional.prerequisite.*'
+```
+
+`run-deqp.sh` answers a targeted question: run these groups, now. Each pattern
+gets its own dEQP process, which is not cosmetic — dEQP builds one EGL context
+per process and reuses it for every case in the run, so a single test that
+leaves the framebuffer incomplete makes every later case fail at its first
+checked GL call, with `GL_INVALID_FRAMEBUFFER_OPERATION` reported against
+whatever innocent call happened to be checked first. One process per group
+bounds that to the group.
+
+### Sweeping the whole module
+
+For the module as a whole use `run-deqp-sweep.sh`, which is *resumable*:
+
+```sh
+sh run-deqp-sweep.sh          # start, or continue where the last run stopped
+sh run-deqp-sweep.sh status   # report progress, run nothing
+sh run-deqp-sweep.sh reset    # forget all progress
+```
+
+Resumability is the entire point. The module is roughly 19,000 cases, every one
+of them running Mesa's GLSL compiler on an emulated ARM1176, so a full pass
+takes days — long enough that a crash or a timeout is likely, and starting over
+from zero each time means never finishing. The sweep therefore:
+
+- asks dEQP for the case list once (`--deqp-runmode=stdout-caselist`) and splits
+  it into fixed-size chunks, written as case-list tries — this build's
+  `--deqp-caselist-file` takes the trie format, not a plain list;
+- runs one dEQP process per chunk and checkpoints each chunk only once dEQP has
+  printed its tally for it, so a boot cut short loses one chunk, not the run;
+- retries a chunk that starts but never reports exactly once, then records it in
+  `crashed.txt` and skips it, so a case that kills the guest cannot wedge the
+  sweep.
+
+State lives in `$VC4_OUT/sweep/`: `caselist.txt`, `chunks/`, `done.txt`,
+`results.txt`. `DEQP_CHUNK` sets cases per chunk (default 200) and
+`DEQP_TIMEOUT` the wall-clock budget for one boot.
+
+Point `DEQP_QEMU` at a copy of the binary so a rebuild cannot disturb a run in
+progress — and make that copy with `rm` then `cp`, never `cp` over an existing
+one: on Apple Silicon overwriting a Mach-O in place invalidates its signature
+and the next exec dies with `Killed: 9`. The corollary of freezing is that the
+run measures the build that started it, so work done during it is not reflected
+in the results.
+
+Results so far:
+
+| Group | Result |
+|-------|--------|
+| `dEQP-GLES2.info.*` | 6/6 pass |
+| `dEQP-GLES2.functional.prerequisite.*` | 3/3 pass (clear_color, read_pixels, state_reset) |
+| `dEQP-GLES2.functional.rasterization.primitives.triangles` | pass |
+
+Four things had to be got right to make it run at all, all encoded in the
+scripts: dEQP misdetects the CPU as x86 when cross-compiling, so `DE_CPU` and
+`DE_CPU_IS_ARM_NEON` are set explicitly (an ARM1176 has no NEON); the surfaceless
+target finds EGL through `egl.pc`, so Mesa is installed to a prefix and *both*
+pkgconfig directories are on the path, with `-L` for the linker; dEQP `dlopen`s
+the unversioned `libEGL.so`, so the guest image needs that symlink; and its
+default GL config asks for a packed depth/stencil this driver does not offer, so
+`run-deqp.sh` selects `rgba8888d0s0ms0`. The rasterization group also refuses to
+run below 256x256.
+
+dEQP throws on the way out on Linux ("Device fault tests execution not
+supported") *after* printing its totals, so the runner reads the tally rather
+than the exit status.
+
 `build-mesa-guest.sh` applies `mesa-armv6-neon.patch`: Mesa adds `-mfpu=neon`
 for any ARM host without checking for ARMv7, which the ARMv6 soft-float target
 cannot assemble. Both affected objects are runtime-gated optimizations that an

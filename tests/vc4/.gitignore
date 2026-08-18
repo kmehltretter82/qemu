@@ -2,4 +2,5 @@
 /guest/vc4_p1_draw
 /guest/vc4_p5_clear
 /out/
+/out-*/
 /guest/gles_vc4_test
