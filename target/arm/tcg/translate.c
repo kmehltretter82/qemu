@@ -3231,12 +3231,21 @@ DO_SMLAWX(SMLAWT, 1, 1)
 static bool trans_YIELD(DisasContext *s, arg_YIELD *a)
 {
     /*
-     * When running single-threaded TCG code, use the helper to ensure that
-     * the next round-robin scheduled vCPU gets a crack.  When running in
-     * MTTCG we don't generate jumps to the helper as it won't affect the
-     * scheduling of other vCPUs.
-     * This is a NOP hint on older architectures.
+     * ARM926EJ-S review finding: this whole 16-bit Thumb "hint" encoding
+     * space (t16.decode's Hints block: YIELD/WFE/WFI/SEV/SEVL/NOP, plus
+     * IT which shares the same top byte) was introduced with the Thumb-2
+     * technology (ARMv6T2) -- it doesn't exist in the plain ARMv4T/v5TE
+     * Thumb-1 ISA this core implements, and real ARM926EJ-S hardware
+     * (SAM9X75) genuinely raises Undefined Instruction for it (confirmed
+     * via a standalone probe, independent of risu). Below ARM_FEATURE_
+     * THUMB2 nothing in this space is legal at all -- distinct from (and
+     * layered underneath) the existing v6K/M-profile check below, which
+     * only controls whether an already-legal hint has a *real* side
+     * effect vs plain-NOP behaviour. See arm926ej-s/QEMU-ARM926-REVIEW.md.
      */
+    if (!ENABLE_ARCH_6T2) {
+        return false;
+    }
     if (arm_dc_feature(s, ARM_FEATURE_M) ||
         arm_dc_feature(s, ARM_FEATURE_V6K)) {
         if (!(tb_cflags(s->base.tb) & CF_PARALLEL)) {
@@ -3259,7 +3268,13 @@ static bool trans_SEV(DisasContext *s, arg_SEV *a)
      * Thumb SEV or not; we make the condition the same, to be
      * conservative. (If guests try to execute the Thumb SEV insn it
      * will be because they want SEV, not because they want a NOP.)
+     *
+     * ARM926EJ-S review finding: below ARM_FEATURE_THUMB2 this whole
+     * encoding doesn't exist at all -- see trans_YIELD's comment.
      */
+    if (!ENABLE_ARCH_6T2) {
+        return false;
+    }
 #ifndef CONFIG_USER_ONLY
     if (arm_dc_feature(s, ARM_FEATURE_M) ||
         arm_dc_feature(s, ARM_FEATURE_V6K)) {
@@ -3274,7 +3289,13 @@ static bool trans_SEVL(DisasContext *s, arg_SEV *a)
     /*
      * SEVL only exists for v8A; for M-profile and v7A and earlier
      * this encoding is an unallocated must-NOP hint.
+     *
+     * ARM926EJ-S review finding: "must-NOP" only holds for cores that
+     * implement the Thumb-2 hint space at all -- see trans_YIELD.
      */
+    if (!ENABLE_ARCH_6T2) {
+        return false;
+    }
     if (!arm_dc_feature(s, ARM_FEATURE_M) &&
         arm_dc_feature(s, ARM_FEATURE_V8)) {
         gen_event_reg();
@@ -3288,7 +3309,13 @@ static bool trans_WFE(DisasContext *s, arg_WFE *a)
      * For WFE, halt the vCPU until an event. This is a NOP
      * hint on older architectures, with the same conditions
      * as SEV.
+     *
+     * ARM926EJ-S review finding: below ARM_FEATURE_THUMB2 this whole
+     * encoding doesn't exist at all -- see trans_YIELD's comment.
      */
+    if (!ENABLE_ARCH_6T2) {
+        return false;
+    }
     if (arm_dc_feature(s, ARM_FEATURE_M) ||
         arm_dc_feature(s, ARM_FEATURE_V6K)) {
         gen_update_pc(s, curr_insn_len(s));
@@ -3302,7 +3329,13 @@ static bool trans_WFI(DisasContext *s, arg_WFI *a)
     /*
      * For WFI, halt the vCPU until an IRQ. This is a NOP
      * hint on older architectures.
+     *
+     * ARM926EJ-S review finding: below ARM_FEATURE_THUMB2 this whole
+     * encoding doesn't exist at all -- see trans_YIELD's comment.
      */
+    if (!ENABLE_ARCH_6T2) {
+        return false;
+    }
     if (arm_dc_feature(s, ARM_FEATURE_M) ||
         arm_dc_feature(s, ARM_FEATURE_V6K)) {
         gen_update_pc(s, curr_insn_len(s));
@@ -3336,6 +3369,15 @@ static bool trans_ESB(DisasContext *s, arg_ESB *a)
 
 static bool trans_NOP(DisasContext *s, arg_NOP *a)
 {
+    /*
+     * ARM926EJ-S review finding: below ARM_FEATURE_THUMB2 this whole
+     * encoding doesn't exist at all -- see trans_YIELD's comment.
+     * (This trans_NOP is Thumb-only: t32.decode/a32.decode have no NOP
+     * pattern of their own, so this fix cannot affect ARM-mode NOP.)
+     */
+    if (!ENABLE_ARCH_6T2) {
+        return false;
+    }
     return true;
 }
 
@@ -6030,6 +6072,15 @@ static bool trans_PLI(DisasContext *s, arg_PLI *a)
 static bool trans_IT(DisasContext *s, arg_IT *a)
 {
     int cond_mask = a->cond_mask;
+
+    /*
+     * ARM926EJ-S review finding: IT shares its top byte with the Hints
+     * block (t16.decode) and is exactly as Thumb-2-only as they are --
+     * see trans_YIELD's comment for the real-hardware confirmation.
+     */
+    if (!ENABLE_ARCH_6T2) {
+        return false;
+    }
 
     /*
      * No actual code generated for this insn, just setup state.
