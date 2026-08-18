@@ -666,7 +666,6 @@ int main(void)
         glClear(GL_COLOR_BUFFER_BIT);
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glFinish();
-        glDisableVertexAttribArray(1);
 
         memset(px, 0x5a, sizeof(px));
         glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
@@ -690,6 +689,36 @@ int main(void)
                  q0[0], q0[1], q0[2], q1[0], q1[1], q1[2],
                  q2[0], q2[1], q2[2], q3[0], q3[1], q3[2]);
         report("texture sampled", ok, detail);
+
+        /*
+         * The same texture with linear filtering.  Every channel of every one
+         * of the four texels is either 0x00 or 0xff, so a genuine blend at the
+         * centre of the quad -- where all four contribute -- must land strictly
+         * inside that range on all three channels.  Nearest filtering returns
+         * one texel exactly and so fails.  Checking the interval rather than a
+         * specific average keeps the test independent of exactly where the
+         * sample point falls, which the pixel centre offset shifts slightly.
+         */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glFinish();
+
+        memset(px, 0x5a, sizeof(px));
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        {
+            const unsigned char *c = px + ((H / 2) * W + W / 2) * 4;
+            int blended = c[0] > 0x08 && c[0] < 0xf7 &&
+                          c[1] > 0x08 && c[1] < 0xf7 &&
+                          c[2] > 0x08 && c[2] < 0xf7;
+
+            snprintf(detail, sizeof(detail),
+                     "centre %02x%02x%02x (every channel must be a blend, "
+                     "not 00 or ff)", c[0], c[1], c[2]);
+            report("texture filtered", blended, detail);
+        }
+        glDisableVertexAttribArray(1);
     }
 
     /*
