@@ -42,7 +42,7 @@ RUN printf '%s\n' \
   "cpp = 'arm-linux-gnueabi-g++'" \
   "ar = 'arm-linux-gnueabi-ar'" \
   "strip = 'arm-linux-gnueabi-strip'" \
-  "pkg-config = 'pkg-config'" \
+  "pkgconfig = 'pkg-config'" \
   '' \
   '[host_machine]' \
   "system = 'linux'" \
