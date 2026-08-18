@@ -114,7 +114,7 @@ for g in $GROUPS; do
     # the part that carries information: which cases failed and why, deduped by
     # reason, plus dEQP's own tally.
     echo "--- failures in \$g ---"
-    grep -B1 "^  \\(Fail\\|InternalError\\|ResourceError\\|Crash\\)" /tmp/deqp.txt \\
+    grep -B1 "^  \\(Fail\\|InternalError\\|ResourceError\\|Crash\\) (" /tmp/deqp.txt \\
         | grep "^  " | sort | uniq -c | sort -rn | head -40
     echo "--- tally for \$g ---"
     grep -A8 "Test run totals" /tmp/deqp.txt | head -9

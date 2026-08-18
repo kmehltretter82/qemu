@@ -282,7 +282,7 @@ report
     echo '                 --deqp-log-filename=/tmp/deqp.qpa > /tmp/out.txt 2>&1'
     # Keep what carries information: which cases failed and why, deduped by
     # reason, plus dEQP's own tally.  The full chatter is thousands of lines.
-    echo '    grep -B1 "^  \(Fail\|InternalError\|ResourceError\|Crash\)" /tmp/out.txt \'
+    echo '    grep -B1 "^  \(Fail\|InternalError\|ResourceError\|Crash\) (" /tmp/out.txt \'
     echo '        | grep "^  " | sort | uniq -c | sort -rn | head -25'
     echo '    grep -A8 "Test run totals" /tmp/out.txt | head -9'
     echo '    echo "=== CHUNK $id END ==="'
