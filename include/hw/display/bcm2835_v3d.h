@@ -90,6 +90,9 @@ typedef struct V3DDraw {
     bool cfg_cw_front;
     uint32_t cfg_depth_func;
     bool cfg_depth_update;
+    /* Size of a point and width of a line, in pixels. */
+    float point_size;
+    float line_width;
     /* The clip window, which is what a GL scissor becomes. */
     bool clip_valid;
     uint32_t clip_x;
@@ -228,6 +231,10 @@ struct BCM2835V3DState {
     uint32_t cfg_depth_func;
     bool cfg_depth_update;
     uint32_t frag_zfailed;
+
+    /* VC4_PACKET_POINT_SIZE and VC4_PACKET_LINE_WIDTH, in pixels. */
+    float point_size;
+    float line_width;
 
     /* VC4_PACKET_CLIP_WINDOW: left, bottom, width, height in pixels. */
     bool clip_valid;

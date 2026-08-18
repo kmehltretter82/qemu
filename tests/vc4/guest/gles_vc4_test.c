@@ -882,6 +882,101 @@ int main(void)
                detail);
     }
 
+    /*
+     * Stage 14-15: the primitive types that are not triangles.  Both are drawn
+     * along an axis so the expected pixels are exact: a line across the middle
+     * row, and a fat point at the centre.
+     */
+    {
+        static const GLfloat line_v[] = {
+            -0.9f, 0.0f, 0.0f, 1.0f,
+             0.9f, 0.0f, 0.0f, 1.0f,
+        };
+        static const GLfloat point_v[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        /* GLES2 leaves gl_PointSize undefined unless the vertex shader writes
+         * it, so this stage brings its own program rather than inheriting one. */
+        static const char *pl_vs_src =
+            "attribute vec4 pos;\n"
+            "void main() { gl_Position = pos; gl_PointSize = 1.0; }\n";
+        static const char *pl_fs_src =
+            "precision mediump float;\n"
+            "void main() { gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0); }\n";
+        GLuint lbo, plprog;
+        GLint pllinked = 0;
+        char detail[160];
+        int lit, unlit, row, col;
+
+        plprog = glCreateProgram();
+        glAttachShader(plprog, compile(GL_VERTEX_SHADER, pl_vs_src));
+        glAttachShader(plprog, compile(GL_FRAGMENT_SHADER, pl_fs_src));
+        glBindAttribLocation(plprog, 0, "pos");
+        glLinkProgram(plprog);
+        glGetProgramiv(plprog, GL_LINK_STATUS, &pllinked);
+        if (!pllinked) {
+            char log[512] = { 0 };
+
+            glGetProgramInfoLog(plprog, sizeof(log) - 1, NULL, log);
+            report("point/line program links", 0, log);
+            goto done;
+        }
+        glUseProgram(plprog);
+
+        glGenBuffers(1, &lbo);
+        glBindBuffer(GL_ARRAY_BUFFER, lbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(line_v), line_v, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, 0);
+
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_LINES, 0, 2);
+        glFinish();
+        memset(px, 0x5a, sizeof(px));
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+
+        /* y = 0 in NDC is the boundary between rows H/2-1 and H/2; a one-pixel
+         * line lands on one of them, and nothing should reach the top row. */
+        lit = 0;
+        for (col = 2; col < W - 2; col++) {
+            const unsigned char *lo = px + ((H / 2 - 1) * W + col) * 4;
+            const unsigned char *hi = px + ((H / 2) * W + col) * 4;
+
+            if (lo[0] == 0xff || hi[0] == 0xff) {
+                lit++;
+            }
+        }
+        unlit = 0;
+        for (col = 0; col < W; col++) {
+            if (px[(1 * W + col) * 4] == 0xff) {
+                unlit++;
+            }
+        }
+        snprintf(detail, sizeof(detail),
+                 "%d/%d middle-row pixels lit, %d stray on row 1",
+                 lit, W - 4, unlit);
+        report("line rasterized", lit == W - 4 && unlit == 0, detail);
+
+        glBufferData(GL_ARRAY_BUFFER, sizeof(point_v), point_v, GL_STATIC_DRAW);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_POINTS, 0, 1);
+        glFinish();
+        memset(px, 0x5a, sizeof(px));
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+
+        /* gl_PointSize defaults to 1, so exactly one pixel next to the centre
+         * must be lit and the rest of the surface must stay clear. */
+        lit = 0;
+        for (row = 0; row < H; row++) {
+            for (col = 0; col < W; col++) {
+                if (px[(row * W + col) * 4] == 0xff) {
+                    lit++;
+                }
+            }
+        }
+        snprintf(detail, sizeof(detail), "%d pixel(s) lit for one point", lit);
+        report("point rasterized", lit == 1, detail);
+        glDisableVertexAttribArray(0);
+    }
+
 done:
     printf("GLES: %d stage(s) failed\n", failures);
     return failures ? 1 : 0;

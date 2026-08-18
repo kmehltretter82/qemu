@@ -257,3 +257,5 @@ bcm2835_v3d_raster(uint32_t tile_x, uint32_t tile_y, uint32_t vertices, uint32_t
 bcm2835_v3d_varyings(uint32_t count, uint32_t vertices) "vertex shader wrote %u varyings for %u vertices"
 bcm2835_v3d_config_bits(uint8_t b0, uint8_t b1, uint8_t b2) "configuration bits %02x %02x %02x"
 bcm2835_v3d_clip_window(uint32_t x, uint32_t y, uint32_t w, uint32_t h) "clip window %u,%u %ux%u"
+bcm2835_v3d_prim_size(int point, int line) "point size %d/1000 px, line width %d/1000 px"
+bcm2835_v3d_raster_point(int x, int y, int size, uint32_t vary) "point at %d/1000,%d/1000 px size %d/1000, %u varyings"

@@ -1045,6 +1045,8 @@ static void v3d_record_draw(BCM2835V3DState *s, uint32_t first)
     d->cfg_cw_front = s->cfg_cw_front;
     d->cfg_depth_func = s->cfg_depth_func;
     d->cfg_depth_update = s->cfg_depth_update;
+    d->point_size = s->point_size;
+    d->line_width = s->line_width;
     d->clip_valid = s->clip_valid;
     d->clip_x = s->clip_x;
     d->clip_y = s->clip_y;
@@ -1506,6 +1508,76 @@ static bool v3d_depth_passes(unsigned func, float src, float dst)
     }
 }
 
+/*
+ * One fragment's interpolated attributes, in the form the shader wants them:
+ * vary[] is already the (v - c)/w sum, so the shader's FMUL(vary, W) + r5
+ * reconstructs the value.  Points, lines and triangles differ only in how they
+ * compute this, so everything after it -- clipping, the depth test, batching
+ * into groups of sixteen -- is shared.
+ */
+typedef struct V3DFragAttrs {
+    float z;
+    float rcp_w;
+    float vary[BCM2835_V3D_MAX_VARYINGS];
+} V3DFragAttrs;
+
+/*
+ * Add one covered pixel to the group, shading the group when it fills up.
+ * Returns nothing: a pixel outside the tile, the framebuffer or the clip
+ * window, or one that fails the depth test, is simply not added.
+ */
+static void v3d_emit_fragment(BCM2835V3DState *s, const V3DDraw *d,
+                              V3DFragGroup *g, int x, int y,
+                              const V3DFragAttrs *at)
+{
+    int tile_x0 = s->tile_x * BCM2835_V3D_TILE_W;
+    int tile_y0 = s->tile_y * BCM2835_V3D_TILE_H;
+    unsigned lane, k, idx;
+
+    if (x < tile_x0 || x >= tile_x0 + BCM2835_V3D_TILE_W ||
+        y < tile_y0 || y >= tile_y0 + BCM2835_V3D_TILE_H ||
+        x < 0 || x >= (int)s->render_width ||
+        y < 0 || y >= (int)s->render_height) {
+        return;
+    }
+    if (d->clip_valid &&
+        (x < (int)d->clip_x || x >= (int)(d->clip_x + d->clip_w) ||
+         y < (int)d->clip_y || y >= (int)(d->clip_y + d->clip_h))) {
+        return;
+    }
+
+    idx = (y - tile_y0) * BCM2835_V3D_TILE_W + (x - tile_x0);
+
+    /*
+     * Depth.  The test happens before shading, which is what the early-Z
+     * configuration asks for and costs nothing here; a shader that wrote its
+     * own depth would need late Z.
+     */
+    if (d->cfg_valid) {
+        if (!v3d_depth_passes(d->cfg_depth_func, at->z, s->tile_depth[idx])) {
+            s->frag_zfailed++;
+            return;
+        }
+        if (d->cfg_depth_update) {
+            s->tile_depth[idx] = at->z;
+        }
+    }
+
+    lane = g->count;
+    g->px[lane] = x - tile_x0;
+    g->py[lane] = y - tile_y0;
+    /* 1/w interpolates linearly; W is what the shader multiplies by. */
+    g->w[lane] = at->rcp_w != 0.0f ? 1.0f / at->rcp_w : 0.0f;
+    for (k = 0; k < g->vary_count; k++) {
+        g->vary[k][lane] = at->vary[k];
+    }
+
+    if (++g->count == VC4_QPU_LANES) {
+        v3d_shade_group(s, d, g);
+        g->count = 0;
+    }
+}
+
 /* Edge function: positive on one side of the line ab, negative on the other. */
 static float v3d_edge(const V3DShadedVertex *a, const V3DShadedVertex *b,
                       float x, float y)
@@ -1569,14 +1641,6 @@ static void v3d_raster_triangle(BCM2835V3DState *s, const V3DDraw *d,
     y1 = MIN((int)ceilf(maxy), MIN(tile_y0 + BCM2835_V3D_TILE_H,
                                    (int)s->render_height));
 
-    /* ... and to the clip window, which is where a GL scissor arrives. */
-    if (d->clip_valid) {
-        x0 = MAX(x0, (int)d->clip_x);
-        x1 = MIN(x1, (int)(d->clip_x + d->clip_w));
-        y0 = MAX(y0, (int)d->clip_y);
-        y1 = MIN(y1, (int)(d->clip_y + d->clip_h));
-    }
-
     for (y = y0; y < y1; y++) {
         for (x = x0; x < x1; x++) {
             float cx = (float)x + 0.5f;
@@ -1584,10 +1648,10 @@ static void v3d_raster_triangle(BCM2835V3DState *s, const V3DDraw *d,
             float w0 = v3d_edge(b, c, cx, cy);
             float w1 = v3d_edge(c, a, cx, cy);
             float w2 = v3d_edge(a, b, cx, cy);
-            float l0, l1, l2, rcp_w;
-            unsigned lane;
+            float l0, l1, l2;
+            V3DFragAttrs at;
 
-            /* Accept either winding; culling is not modelled. */
+            /* Accept either winding; culling was applied above. */
             if (!((w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) ||
                   (w0 <= 0.0f && w1 <= 0.0f && w2 <= 0.0f))) {
                 continue;
@@ -1597,46 +1661,159 @@ static void v3d_raster_triangle(BCM2835V3DState *s, const V3DDraw *d,
             l1 = w1 / area;
             l2 = w2 / area;
 
-            /*
-             * Depth.  Screen-space Z interpolates linearly, so this is the
-             * plain barycentric mix.  The test happens before shading, which
-             * is what the early-Z configuration asks for and costs nothing
-             * here; a shader that wrote its own depth would need late Z.
-             */
-            if (d->cfg_valid) {
-                unsigned idx = (y - tile_y0) * BCM2835_V3D_TILE_W +
-                               (x - tile_x0);
-                float z = l0 * a->z + l1 * b->z + l2 * c->z;
-
-                if (!v3d_depth_passes(d->cfg_depth_func, z,
-                                      s->tile_depth[idx])) {
-                    s->frag_zfailed++;
-                    continue;
-                }
-                if (d->cfg_depth_update) {
-                    s->tile_depth[idx] = z;
-                }
-            }
-
-            lane = g.count;
-            g.px[lane] = x - tile_x0;
-            g.py[lane] = y - tile_y0;
-
-            /* 1/w interpolates linearly; W is what the shader multiplies by. */
-            rcp_w = l0 * a->rcp_w + l1 * b->rcp_w + l2 * c->rcp_w;
-            g.w[lane] = rcp_w != 0.0f ? 1.0f / rcp_w : 0.0f;
-
+            /* Screen-space Z and 1/W both interpolate linearly. */
+            at.z = l0 * a->z + l1 * b->z + l2 * c->z;
+            at.rcp_w = l0 * a->rcp_w + l1 * b->rcp_w + l2 * c->rcp_w;
             for (k = 0; k < g.vary_count; k++) {
-                g.vary[k][lane] =
+                at.vary[k] =
                     l0 * (a->vary[k] - g.vary_c[k]) * a->rcp_w +
                     l1 * (b->vary[k] - g.vary_c[k]) * b->rcp_w +
                     l2 * (c->vary[k] - g.vary_c[k]) * c->rcp_w;
             }
+            v3d_emit_fragment(s, d, &g, x, y, &at);
+        }
+    }
+    v3d_shade_group(s, d, &g);
+}
 
-            if (++g.count == VC4_QPU_LANES) {
-                v3d_shade_group(s, d, &g);
-                g.count = 0;
+/*
+ * A point is a square of point_size pixels centred on the vertex.  The vertex's
+ * own attributes apply across the whole square, so their vary term is zero and
+ * the shader's FMUL(vary, W) + r5 yields the constant -- which is what flat,
+ * one-vertex interpolation means.
+ *
+ * On top of those, a point primitive is handed two more varyings carrying
+ * gl_PointCoord.  That is not a guess: with only the vertex's varyings on
+ * offer, Mesa's fragment shader for a point draw stops on its *second* varying
+ * read, and it reads two more than the vertex shader wrote -- the coordinate
+ * pair.  The shader has to drain them from the varying FIFO whether or not the
+ * GLSL uses gl_PointCoord, which is why even a shader that just writes a
+ * constant colour needs them.
+ *
+ * They are appended after the vertex shader's varyings.  A shader that actually
+ * reads gl_PointCoord would pin the order; nothing here does yet, so treat the
+ * position in the sequence as the part of this that is inferred.
+ */
+#define V3D_POINT_COORD_VARYINGS 2
+
+static void v3d_raster_point(BCM2835V3DState *s, const V3DDraw *d,
+                             const V3DShadedVertex *v)
+{
+    unsigned nvary = MIN(d->vary_count, BCM2835_V3D_MAX_VARYINGS);
+    unsigned coord = MIN(nvary + V3D_POINT_COORD_VARYINGS,
+                         BCM2835_V3D_MAX_VARYINGS);
+    V3DFragGroup g = { .vary_count = coord };
+    float size = d->point_size > 0.0f ? d->point_size : 1.0f;
+    float half = size * 0.5f;
+    float left = v->x - half;
+    float top = v->y - half;
+    V3DFragAttrs at;
+    int x0, x1, y0, y1, x, y;
+    unsigned k;
+
+    for (k = 0; k < g.vary_count; k++) {
+        g.vary_c[k] = k < nvary ? v->vary[k] : 0.0f;
+        at.vary[k] = 0.0f;
+    }
+    at.z = v->z;
+    at.rcp_w = v->rcp_w;
+
+    x0 = (int)floorf(left);
+    x1 = (int)ceilf(v->x + half);
+    y0 = (int)floorf(top);
+    y1 = (int)ceilf(v->y + half);
+    trace_bcm2835_v3d_raster_point((int)(v->x * 1000.0f), (int)(v->y * 1000.0f),
+                                   (int)(size * 1000.0f), g.vary_count);
+
+    for (y = y0; y < y1; y++) {
+        for (x = x0; x < x1; x++) {
+            /* Centre-in-square coverage, so a one-pixel point lights exactly
+             * the pixel containing the vertex. */
+            float cx = (float)x + 0.5f;
+            float cy = (float)y + 0.5f;
+
+            if (cx < left || cx >= v->x + half ||
+                cy < top || cy >= v->y + half) {
+                continue;
             }
+            /*
+             * gl_PointCoord runs 0..1 across the point, with t downwards from
+             * the top edge.  The constant term is zero for these, so the value
+             * has to arrive pre-divided by W: the shader multiplies it back.
+             */
+            for (k = nvary; k < g.vary_count; k++) {
+                float c = k == nvary ? (cx - left) / size : (cy - top) / size;
+
+                at.vary[k] = c * at.rcp_w;
+            }
+            v3d_emit_fragment(s, d, &g, x, y, &at);
+        }
+    }
+    v3d_shade_group(s, d, &g);
+}
+
+/*
+ * A line of line_width pixels between two vertices.  Coverage is by distance
+ * to the segment rather than GL's diamond-exit rule: the rule decides which
+ * pixels a *thin* line touches, and reproducing it exactly needs the same
+ * fixed-point arithmetic the hardware uses.  Distance gives the same pixels for
+ * axis-aligned lines and differs by at most a pixel along a diagonal, which is
+ * worth stating plainly rather than claiming conformance this does not have.
+ */
+static void v3d_raster_line(BCM2835V3DState *s, const V3DDraw *d,
+                            const V3DShadedVertex *a, const V3DShadedVertex *b)
+{
+    V3DFragGroup g = { .vary_count = MIN(d->vary_count,
+                                         BCM2835_V3D_MAX_VARYINGS) };
+    float width = d->line_width > 0.0f ? d->line_width : 1.0f;
+    float half = width * 0.5f;
+    float dx = b->x - a->x;
+    float dy = b->y - a->y;
+    float len2 = dx * dx + dy * dy;
+    int x0, x1, y0, y1, x, y;
+    unsigned k;
+
+    for (k = 0; k < g.vary_count; k++) {
+        g.vary_c[k] = a->vary[k];
+    }
+
+    if (len2 == 0.0f) {
+        return;                 /* degenerate: GL draws nothing */
+    }
+
+    x0 = (int)floorf(MIN(a->x, b->x) - half);
+    x1 = (int)ceilf(MAX(a->x, b->x) + half);
+    y0 = (int)floorf(MIN(a->y, b->y) - half);
+    y1 = (int)ceilf(MAX(a->y, b->y) + half);
+
+    for (y = y0; y < y1; y++) {
+        for (x = x0; x < x1; x++) {
+            float cx = (float)x + 0.5f;
+            float cy = (float)y + 0.5f;
+            float t = ((cx - a->x) * dx + (cy - a->y) * dy) / len2;
+            float px, py, dist2;
+            V3DFragAttrs at;
+
+            if (t < 0.0f) {
+                t = 0.0f;
+            } else if (t > 1.0f) {
+                t = 1.0f;
+            }
+            px = a->x + t * dx - cx;
+            py = a->y + t * dy - cy;
+            dist2 = px * px + py * py;
+            if (dist2 > half * half) {
+                continue;
+            }
+
+            at.z = a->z + t * (b->z - a->z);
+            at.rcp_w = a->rcp_w + t * (b->rcp_w - a->rcp_w);
+            for (k = 0; k < g.vary_count; k++) {
+                at.vary[k] =
+                    (1.0f - t) * (a->vary[k] - g.vary_c[k]) * a->rcp_w +
+                    t * (b->vary[k] - g.vary_c[k]) * b->rcp_w;
+            }
+            v3d_emit_fragment(s, d, &g, x, y, &at);
         }
     }
     v3d_shade_group(s, d, &g);
@@ -1664,6 +1841,29 @@ static void v3d_raster_tile(BCM2835V3DState *s)
             continue;
         }
         switch (d->prim_mode) {
+        case 0:     /* points */
+            for (i = 0; i < d->count; i++) {
+                v3d_raster_point(s, d, &v[i]);
+            }
+            break;
+        case 1:     /* lines */
+            for (i = 0; i + 1 < d->count; i += 2) {
+                v3d_raster_line(s, d, &v[i], &v[i + 1]);
+            }
+            break;
+        case 2:     /* line loop */
+            for (i = 0; i + 1 < d->count; i++) {
+                v3d_raster_line(s, d, &v[i], &v[i + 1]);
+            }
+            if (d->count > 2) {
+                v3d_raster_line(s, d, &v[d->count - 1], &v[0]);
+            }
+            break;
+        case 3:     /* line strip */
+            for (i = 0; i + 1 < d->count; i++) {
+                v3d_raster_line(s, d, &v[i], &v[i + 1]);
+            }
+            break;
         case 4:     /* triangles */
             for (i = 0; i + 2 < d->count; i += 3) {
                 v3d_raster_triangle(s, d, &v[i], &v[i + 1], &v[i + 2]);
@@ -1841,6 +2041,22 @@ static void v3d_dispatch_bin(V3DCLWalker *w, uint8_t op)
         }
         break;
     }
+
+    case VC4_PACKET_POINT_SIZE:
+    case VC4_PACKET_LINE_WIDTH:
+        /* One float of pixels each. */
+        if (!bcm2835_v3d_dma_read(s, w->pc + 1, payload, 4)) {
+            v3d_walk_stop(w, "point size or line width unreadable", true);
+            return;
+        }
+        if (op == VC4_PACKET_POINT_SIZE) {
+            s->point_size = v3d_f32(ldl_le_p(payload));
+        } else {
+            s->line_width = v3d_f32(ldl_le_p(payload));
+        }
+        trace_bcm2835_v3d_prim_size((int)(s->point_size * 1000.0f),
+                                    (int)(s->line_width * 1000.0f));
+        break;
 
     case VC4_PACKET_CLIP_WINDOW:
         /* Four u16s: left, bottom, width, height.  This is where a GL scissor
@@ -2300,6 +2516,9 @@ static void bcm2835_v3d_reset(DeviceState *dev)
     s->frag_culled = 0;
     s->cfg_valid = false;
     s->clip_valid = false;
+    /* GL's defaults, which apply until the list says otherwise. */
+    s->point_size = 1.0f;
+    s->line_width = 1.0f;
     s->frag_zfailed = 0;
     memset(s->tile_depth, 0, sizeof(s->tile_depth));
     s->frag_reported = false;
