@@ -1175,12 +1175,15 @@ static bool get_phys_addr_v5(CPUARMState *env, S1Translate *ptw,
     if (type != 2) {
         level = 2;
     }
-    if (domain_prot == 0 || domain_prot == 2) {
-        fi->type = ARMFault_Domain;
-        goto do_fault;
-    }
     if (type == 2) {
-        /* 1Mb section.  */
+        /*
+         * 1Mb section. Domain is checked here (immediately, per the L1
+         * descriptor) since there is no L2 descriptor to wait for.
+         */
+        if (domain_prot == 0 || domain_prot == 2) {
+            fi->type = ARMFault_Domain;
+            goto do_fault;
+        }
         phys_addr = (desc & 0xfff00000) | (address & 0x000fffff);
         ap = (desc >> 10) & 3;
         result->f.lg_page_size = 20; /* 1MB */
@@ -1237,6 +1240,16 @@ static bool get_phys_addr_v5(CPUARMState *env, S1Translate *ptw,
         default:
             /* Never happens, but compiler isn't smart enough to tell.  */
             g_assert_not_reached();
+        }
+        /*
+         * Domain is checked here, now that a valid second-level
+         * descriptor has been returned (DDI 0100I/E, Figure B4-2):
+         * an invalid L2 descriptor above already took a Translation
+         * Fault regardless of domain permissions.
+         */
+        if (domain_prot == 0 || domain_prot == 2) {
+            fi->type = ARMFault_Domain;
+            goto do_fault;
         }
     }
     result->f.prot = ap_to_rw_prot(env, ptw->in_mmu_idx, ap, domain_prot);
@@ -1309,12 +1322,16 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
         level = 2;
     }
     domain_prot = (dacr >> (domain * 2)) & 3;
-    if (domain_prot == 0 || domain_prot == 2) {
-        /* Section or Page domain fault */
-        fi->type = ARMFault_Domain;
-        goto do_fault;
-    }
     if (type != 1) {
+        /*
+         * Section or supersection: domain is checked here (immediately,
+         * per the L1 descriptor) since there is no L2 descriptor to
+         * wait for.
+         */
+        if (domain_prot == 0 || domain_prot == 2) {
+            fi->type = ARMFault_Domain;
+            goto do_fault;
+        }
         if (desc & (1 << 18)) {
             /* Supersection.  */
             phys_addr = (desc & 0xff000000) | (address & 0x00ffffff);
@@ -1362,6 +1379,16 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
         default:
             /* Never happens, but compiler isn't smart enough to tell.  */
             g_assert_not_reached();
+        }
+        /*
+         * Domain is checked here, now that a valid second-level
+         * descriptor has been returned (DDI 0100I, Figure B4-2): an
+         * invalid L2 descriptor above already took a Translation Fault
+         * regardless of domain permissions.
+         */
+        if (domain_prot == 0 || domain_prot == 2) {
+            fi->type = ARMFault_Domain;
+            goto do_fault;
         }
     }
     out_space = ptw->cur_space;
