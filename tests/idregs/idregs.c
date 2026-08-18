@@ -90,6 +90,27 @@ void c_main(void)
     report("c0,c0,6         = 0x", mrc_c0_c0(6));
     report("c0,c0,7         = 0x", mrc_c0_c0(7));
 
+    {
+        /*
+         * Board-probe list: STR PC stored-offset (IMPDEF). Self-contained
+         * in one asm block with explicit clobbers -- an earlier version
+         * using an "=m" output operand let the compiler pick the same
+         * register for the memory address and our "=r" output, and our
+         * own adr clobbered it before the str used it. Don't repeat that.
+         */
+        uint32_t off;
+        __asm__ volatile(
+            "adr r0, 1f\n\t"
+            "1: str pc, [sp, #-4]!\n\t"
+            "ldr r1, [sp], #4\n\t"
+            "sub %0, r1, r0\n\t"
+            : "=r"(off)
+            :
+            : "r0", "r1", "memory"
+        );
+        report("STR PC stored-offset = 0x", off);
+    }
+
     for (;;) {
         /* ARMv5: WFI is CP15 c7,c0,4, not a dedicated mnemonic. */
         __asm__ volatile ("mcr p15, 0, %0, c7, c0, 4" : : "r"(0));
