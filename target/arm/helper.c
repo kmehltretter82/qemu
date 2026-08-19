@@ -7303,7 +7303,7 @@ void register_cp_regs_for_features(ARMCPU *cpu)
         define_arm_cp_regs(cpu, id_cp_reginfo);
         /*
          * TLBTR is v6+ VMSA; pre-v6 CPUs (e.g. arm926, arm1026) instead
-         * read the ID code at this encoding (DDI 0198E Table 2-4: any
+         * read the ID code at this encoding (DDI 0198D Table 2-4: any
          * opc2 other than 1 or 2 reads MIDR), which the pre-v8 MIDR
          * wildcard already provides once we don't override it here.
          */

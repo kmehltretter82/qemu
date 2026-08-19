@@ -34,7 +34,7 @@ static void arm926_initfn(Object *obj)
     cpu->reset_fpsid = 0x41011090;
     cpu->ctr = 0x1dd20d2;
     /*
-     * DDI 0198E Table 2-11: c1 bit 18 is Reserved/SBO, bit 16 is
+     * DDI 0198D Table 2-11: c1 bit 18 is Reserved/SBO, bit 16 is
      * Reserved/SBO, bits [31:19] are Reserved/SBZ (bit 19 is NOT SBO,
      * unlike v6+ SCTLR). Real hardware reads 0x00050078 after reset
      * (bit 18 set, bit 19 clear); QEMU had them swapped.
