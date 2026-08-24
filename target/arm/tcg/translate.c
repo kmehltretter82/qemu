@@ -910,10 +910,71 @@ MemOp pow2_align(unsigned i)
  * that the address argument is TCGv_i32 rather than TCGv.
  */
 
+/*
+ * Prior to ARMv6, an unaligned data access is not a byte-addressed
+ * access. With alignment checking disabled (SCTLR.A == 0) the memory
+ * interface simply truncates the address: DDI 0100I A2-40, "data
+ * accesses to non-aligned word and halfword data are treated as aligned
+ * from the memory interface perspective ... the address is treated as
+ * truncated, with address bits[1:0] treated as zero for word accesses,
+ * and address bit[0] treated as zero for halfword accesses".
+ *
+ * A single-word *load* additionally rotates the aligned word right by
+ * 8 * addr[1:0] (Table A2-10, row "U=0 A=0 WLoad"); a word store is
+ * "unaffected by Addr[1:0]" (row "WStore") and nothing else rotates.
+ *
+ * ARMv6 gained real unaligned accesses, selected by SCTLR.U; QEMU does
+ * not model U, so this covers pre-v6 cores only. M-profile is excluded
+ * for free: every M-profile CPU sets ARM_FEATURE_V6 (cpu-v7m.c, and
+ * cpu.c derives it from V7), and M-profile unaligned accesses really
+ * are byte-addressed.
+ */
+static bool pre_v6_unaligned(DisasContext *s)
+{
+    return !arm_dc_feature(s, ARM_FEATURE_V6) && !s->align_mem;
+}
+
+/* Rotate a loaded word as a pre-v6 unaligned single-word load does. */
+static void gen_pre_v6_rotate(TCGv_i32 val, TCGv_i32 a32)
+{
+    TCGv_i32 rot = tcg_temp_new_i32();
+
+    tcg_gen_andi_i32(rot, a32, 3);
+    tcg_gen_shli_i32(rot, rot, 3);
+    tcg_gen_rotr_i32(val, val, rot);
+}
+
 static TCGv_va gen_aa32_addr(DisasContext *s, TCGv_i32 a32, MemOp op)
 {
     TCGv_va addr = tcgv_va_temp_new();
     tcg_gen_mov_i32(addr, a32);
+
+    if (pre_v6_unaligned(s)) {
+        /*
+         * Truncate to the access size, capped at a word: LDRD/STRD
+         * reach us as a 64-bit MemOp, but the memory interface still
+         * drops only the two low bits. (Architecturally UNPREDICTABLE
+         * pre-v6; measured on ARM926EJ-S r0p5, see the commit message.)
+         *
+         * Doing this here also satisfies, by construction, the MO_ALIGN
+         * that LDM/STM, SWP and LDRD carry -- so those stop raising
+         * alignment faults, which no pre-v6 core takes with A == 0
+         * (DDI 0198E 3.5.1 conditions every alignment fault on the A bit).
+         *
+         * Order relative to the BE-32 byte-lane XOR below does not
+         * matter: for any given size one of the two is a no-op, or they
+         * touch disjoint bits. A halfword truncation clears bit 0 while
+         * the XOR flips bit 1; word and doubleword accesses truncate
+         * bits [1:0] and get no XOR at all; a byte access is not
+         * truncated. So this sits with the rest of the pre-v6 handling
+         * rather than having to be sequenced against it.
+         */
+        MemOp size = MIN(op & MO_SIZE, MO_32);
+
+        if (size != MO_8) {
+            tcg_gen_andi_i32(addr, addr, ~((1 << size) - 1));
+        }
+    }
 
     /* Not needed for user-mode BE32, where we use MO_BE instead.  */
     if (!IS_USER_ONLY && s->sctlr_b && (op & MO_SIZE) < MO_32) {
@@ -3762,6 +3823,11 @@ static bool op_load_rr(DisasContext *s, arg_ldst_rr *a,
     gen_aa32_ld_i32(s, tmp, addr, mem_idx, mop);
     disas_set_da_iss(s, mop, issinfo);
 
+    /* Rotate before the writeback below can disturb addr. */
+    if (pre_v6_unaligned(s) && (mop & MO_SIZE) == MO_32) {
+        gen_pre_v6_rotate(tmp, addr);
+    }
+
     /*
      * Perform base writeback before the loaded value to
      * ensure correct behavior with overlapping index registers.
@@ -3967,6 +4033,11 @@ static bool op_load_ri(DisasContext *s, arg_ldst_ri *a,
     gen_aa32_ld_i32(s, tmp, addr, mem_idx, mop);
     disas_set_da_iss(s, mop, issinfo);
 
+    /* Rotate before the writeback below can disturb addr. */
+    if (pre_v6_unaligned(s) && (mop & MO_SIZE) == MO_32) {
+        gen_pre_v6_rotate(tmp, addr);
+    }
+
     /*
      * Perform base writeback before the loaded value to
      * ensure correct behavior with overlapping index registers.
@@ -4104,6 +4175,16 @@ static bool op_swp(DisasContext *s, arg_SWP *a, MemOp opc)
 
     tmp = load_reg(s, a->rt2);
     tcg_gen_atomic_xchg_i32(tmp, taddr, tmp, get_mem_index(s), opc);
+
+    /*
+     * SWP is an LDR and an STR at one address: the value loaded is
+     * rotated exactly as LDR rotates it, while the value stored goes to
+     * the truncated address unrotated, exactly as STR stores it.
+     * (Measured on ARM926EJ-S r0p5.)
+     */
+    if (pre_v6_unaligned(s) && (opc & MO_SIZE) == MO_32) {
+        gen_pre_v6_rotate(tmp, addr);
+    }
 
     store_reg(s, a->rt, tmp);
     return true;
