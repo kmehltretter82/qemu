@@ -32,6 +32,21 @@ run-fcvt: fcvt
 ARM_TESTS += pcalign-a32
 pcalign-a32: CFLAGS+=-marm
 
+# Pre-v6 unaligned access semantics (DDI 0100I A2-40, Table A2-10).
+# Only meaningful on a pre-v6 CPU: from ARMv6 these accesses really are
+# byte-addressed, so the expectations in the test are deliberately not
+# the v6 ones.
+# armv5te has no FPU, so this cannot use the hard-float ABI that the
+# arm-linux-gnueabihf toolchain configure picks by default -- hence
+# -mfloat-abi=soft, and freestanding so there is no hard-float libc to
+# link against either. Same approach as hello-arm above.
+ARM_TESTS += unaligned-v5
+unaligned-v5: CFLAGS+=-marm -march=armv5te -mfloat-abi=soft \
+                      -ffreestanding -fno-stack-protector
+unaligned-v5: LDFLAGS+=-nostdlib
+run-unaligned-v5: unaligned-v5
+	$(call run-test,unaligned-v5,$(QEMU) -cpu arm926 $<)
+
 ifeq ($(CONFIG_ARM_COMPATIBLE_SEMIHOSTING),y)
 
 # Semihosting smoke test for linux-user
