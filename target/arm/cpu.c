@@ -2322,10 +2322,15 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
         FIELD_DP64_IDREG(isar, ID_AA64PFR0, MPAM, 0);
     }
 
-    /* MPU can be configured out of a PMSA CPU either by setting has-mpu
-     * to false or by setting pmsav7-dregion to 0.
+    /*
+     * MPU can be configured out of a PMSA CPU either by setting has-mpu
+     * to false or by setting pmsav7-dregion to 0. The region count only
+     * exists from PMSAv7 on: a PMSAv5 core such as the ARM946E-S has a
+     * fixed set of eight regions and must keep its MPU (otherwise
+     * SCTLR.M can never be set and region permissions are never applied).
      */
-    if (!cpu->has_mpu || cpu->pmsav7_dregion == 0) {
+    if (!cpu->has_mpu ||
+        (arm_feature(env, ARM_FEATURE_V7) && cpu->pmsav7_dregion == 0)) {
         cpu->has_mpu = false;
         cpu->pmsav7_dregion = 0;
         cpu->pmsav8r_hdregion = 0;
