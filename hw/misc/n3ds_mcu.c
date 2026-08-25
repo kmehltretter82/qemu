@@ -13,6 +13,8 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/bswap.h"
+#include "hw/core/irq.h"
 #include "hw/i2c/i2c.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
@@ -46,7 +48,53 @@ struct N3DSMcuState {
     uint8_t regs[256];
     uint8_t reg;
     bool addr_pending;
+    qemu_irq irq;                /* MCU interrupt line (GIC 0x71 via GPIO) */
 };
+
+/* Interrupt status bits 24-31 (LCD/backlight power events) are not maskable */
+#define MCU_IRQ_UNMASKABLE  0xFF000000
+
+/*
+ * The MCU's interrupt pin reaches the GIC through the GPIO edge detector:
+ * one event per new interrupt, the status register is read (and cleared)
+ * later over I2C. Model it as a pulse for every newly raised bit that is
+ * not masked.
+ */
+static void n3ds_mcu_update_irq(N3DSMcuState *s)
+{
+}
+
+static void n3ds_mcu_raise(N3DSMcuState *s, uint32_t bits)
+{
+    uint32_t mask = ldl_le_p(&s->regs[MCU_REG_IRQ_MASK]);
+
+    stl_le_p(&s->regs[MCU_REG_IRQ_STATUS],
+             ldl_le_p(&s->regs[MCU_REG_IRQ_STATUS]) | bits);
+    if (bits & (~mask | MCU_IRQ_UNMASKABLE)) {
+        qemu_irq_pulse(s->irq);
+    }
+}
+
+/*
+ * MCU_REG_LCD_POWER (0x22): bit0 LCD voltage off, bit1 on, bit2 bottom
+ * backlight off, bit3 on, bit4 top backlight off, bit5 on. Each request is
+ * acknowledged with the matching interrupt bit 24+n and reflected in the
+ * power status register (bit7 LCD, bit6 top backlight, bit5 bottom).
+ */
+static void n3ds_mcu_lcd_power(N3DSMcuState *s, uint8_t req)
+{
+    uint8_t stat = s->regs[MCU_REG_POWER_STAT];
+
+    if (req & 0x01) stat &= ~0x80;
+    if (req & 0x02) stat |= 0x80;
+    if (req & 0x04) stat &= ~0x20;
+    if (req & 0x08) stat |= 0x20;
+    if (req & 0x10) stat &= ~0x40;
+    if (req & 0x20) stat |= 0x40;
+    s->regs[MCU_REG_POWER_STAT] = stat;
+    s->regs[MCU_REG_LCD_POWER] = 0;      /* request acknowledged */
+    n3ds_mcu_raise(s, (uint32_t)(req & 0x3F) << 24);
+}
 
 static uint8_t to_bcd(int v)
 {
@@ -91,6 +139,7 @@ static uint8_t n3ds_mcu_recv(I2CSlave *i2c)
 
     if (s->reg >= MCU_REG_IRQ_STATUS && s->reg < MCU_REG_IRQ_STATUS + 4) {
         s->regs[s->reg] = 0;
+        n3ds_mcu_update_irq(s);
     }
     s->reg++;
     return v;
@@ -118,12 +167,26 @@ static int n3ds_mcu_send(I2CSlave *i2c, uint8_t data)
         break;
     case MCU_REG_IRQ_STATUS ... MCU_REG_IRQ_STATUS + 3:
         break;
+    case MCU_REG_IRQ_MASK ... MCU_REG_IRQ_MASK + 3:
+        s->regs[s->reg] = data;
+        n3ds_mcu_update_irq(s);
+        break;
+    case MCU_REG_LCD_POWER:
+        n3ds_mcu_lcd_power(s, data);
+        break;
     default:
         s->regs[s->reg] = data;
         break;
     }
     s->reg++;
     return 0;
+}
+
+static void n3ds_mcu_init(Object *obj)
+{
+    N3DSMcuState *s = N3DS_MCU(obj);
+
+    qdev_init_gpio_out(DEVICE(obj), &s->irq, 1);
 }
 
 static void n3ds_mcu_reset(DeviceState *dev)
@@ -157,6 +220,7 @@ static const TypeInfo n3ds_mcu_info = {
     .name          = TYPE_N3DS_MCU,
     .parent        = TYPE_I2C_SLAVE,
     .instance_size = sizeof(N3DSMcuState),
+    .instance_init = n3ds_mcu_init,
     .class_init    = n3ds_mcu_class_init,
 };
 
