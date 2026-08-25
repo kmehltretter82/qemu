@@ -1116,6 +1116,14 @@ struct ArchCPU {
     uint64_t ccsidr[16];
     uint64_t reset_cbar;
     uint32_t reset_auxcr;
+    /*
+     * PMSAv5 (ARM946E-S) TCM region register writes: the TCMs are board
+     * memory whose window moves with c9,c1,{0,1}; the board can hook
+     * the writes to remap them. which: 0 = DTCM, 1 = ITCM.
+     */
+    void (*tcm_region_changed)(struct ArchCPU *cpu, int which, uint32_t value,
+                               void *opaque);
+    void *tcm_region_opaque;
     bool reset_hivecs;
     uint8_t reset_l0gptsz;
 

@@ -2479,6 +2479,28 @@ static void pmsav5_region_write(CPUARMState *env, const ARMCPRegInfo *ri,
     tlb_flush(env_cpu(env));
 }
 
+static void pmsav5_tcm_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                             uint64_t value)
+{
+    ARMCPU *cpu = env_archcpu(env);
+
+    raw_write(env, ri, value);
+    if (cpu->tcm_region_changed) {
+        /* The board remaps memory: that needs the BQL, which a CP15
+         * write from the vCPU thread does not hold. */
+        bool locked = bql_locked();
+
+        if (!locked) {
+            bql_lock();
+        }
+        cpu->tcm_region_changed(cpu, ri->opc2, value, cpu->tcm_region_opaque);
+        if (!locked) {
+            bql_unlock();
+        }
+    }
+    tlb_flush(env_cpu(env));
+}
+
 static uint64_t pmsav5_data_ap_read(CPUARMState *env, const ARMCPRegInfo *ri)
 {
     return simple_mpu_ap_bits(env->cp15.pmsav5_data_ap);
@@ -2806,11 +2828,11 @@ static const ARMCPRegInfo pmsav5_cp_reginfo[] = {
      * provided by the board.
      */
     { .name = "DTCM_REGION", .cp = 15, .crn = 9, .crm = 1, .opc1 = 0, .opc2 = 0,
-      .access = PL1_RW,
+      .access = PL1_RW, .writefn = pmsav5_tcm_write,
       .fieldoffset = offsetof(CPUARMState, cp15.pmsav5_tcm[0]),
       .resetvalue = 0, },
     { .name = "ITCM_REGION", .cp = 15, .crn = 9, .crm = 1, .opc1 = 0, .opc2 = 1,
-      .access = PL1_RW,
+      .access = PL1_RW, .writefn = pmsav5_tcm_write,
       .fieldoffset = offsetof(CPUARMState, cp15.pmsav5_tcm[1]),
       .resetvalue = 0, },
     { .name = "DCACHE_CFG", .cp = 15, .crn = 2, .crm = 0, .opc1 = 0, .opc2 = 0,
