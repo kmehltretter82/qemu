@@ -74,6 +74,7 @@ Board-specific documentation
    arm/max78000
    arm/integratorcp
    arm/mps2
+   arm/n3ds
    arm/musca
    arm/realview
    arm/sbsa
