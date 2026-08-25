@@ -446,3 +446,7 @@ iommu_testdev_dma_armed(bool armed) "armed=%d"
 # k230_decomp_gzip.c
 k230_decomp_gzip_read(uint64_t offset, unsigned int size, uint64_t value) "K230 DECOMP GZIP read: [0x%"PRIx64"] size %u -> 0x%"PRIx64
 k230_decomp_gzip_write(uint64_t offset, unsigned int size, uint64_t value) "K230 DECOMP GZIP write: [0x%"PRIx64"] size %u <- 0x%"PRIx64
+
+# n3ds_pxi.c
+n3ds_pxi_irq(int side, bool send_lvl, bool recv_lvl, int my_used, int other_used) "side %d send_irq %d recv_irq %d my_fifo %d other_fifo %d"
+n3ds_pxi_send(int side, uint32_t val) "side %d send 0x%08x"

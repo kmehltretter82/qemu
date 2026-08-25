@@ -30,6 +30,7 @@
 #include "qemu/module.h"
 #include "qemu/fifo32.h"
 #include "hw/misc/n3ds.h"
+#include "trace.h"
 #include "qom/object.h"
 
 OBJECT_DECLARE_SIMPLE_TYPE(N3DSPxiState, N3DS_PXI)
@@ -65,6 +66,8 @@ typedef struct N3DSPxiSide {
     qemu_irq irq_sync;
     qemu_irq irq_send;
     qemu_irq irq_recv;
+    bool send_lvl;
+    bool recv_lvl;
     uint32_t last_recv;
 } N3DSPxiSide;
 
@@ -81,10 +84,24 @@ static void pxi_update_irqs(N3DSPxiState *s)
         N3DSPxiSide *me = &s->side[i];
         N3DSPxiSide *other = &s->side[1 - i];
 
-        qemu_set_irq(me->irq_send,
-                     (me->cnt & CNT_SEND_IRQEN) && fifo32_is_empty(&me->send));
-        qemu_set_irq(me->irq_recv,
-                     (me->cnt & CNT_RECV_IRQEN) && !fifo32_is_empty(&other->send));
+        bool send_lvl = (me->cnt & CNT_SEND_IRQEN) && fifo32_is_empty(&me->send);
+        bool recv_lvl = (me->cnt & CNT_RECV_IRQEN) && !fifo32_is_empty(&other->send);
+
+        trace_n3ds_pxi_irq(i, send_lvl, recv_lvl, fifo32_num_used(&me->send),
+                           fifo32_num_used(&other->send));
+        /*
+         * The PXI interrupts are edge events on the console (3dbrew: 0x50-0x53
+         * "edge-triggered, 1-N"; GodMode9 relies on it): one pulse when the
+         * send FIFO becomes empty / the receive FIFO becomes non-empty.
+         */
+        if (send_lvl && !me->send_lvl) {
+            qemu_irq_pulse(me->irq_send);
+        }
+        if (recv_lvl && !me->recv_lvl) {
+            qemu_irq_pulse(me->irq_recv);
+        }
+        me->send_lvl = send_lvl;
+        me->recv_lvl = recv_lvl;
     }
 }
 
@@ -179,6 +196,7 @@ static void pxi_write(N3DSPxiState *s, int idx, hwaddr off, uint64_t v,
             me->cnt |= CNT_ERROR;
         } else {
             fifo32_push(&me->send, val);
+            trace_n3ds_pxi_send(idx, (uint32_t)val);
             pxi_update_irqs(s);
         }
         break;
@@ -238,6 +256,8 @@ static void n3ds_pxi_reset(DeviceState *dev)
         s->side[i].cnt = 0;
         s->side[i].sync_irqen = false;
         s->side[i].last_recv = 0;
+        s->side[i].send_lvl = false;
+        s->side[i].recv_lvl = false;
     }
     /* console after Luma3DS: PXI9 SYNC = 0x8000000e, CNT = 0x8101 */
     s->side[1].sync_out = 0x0e;
