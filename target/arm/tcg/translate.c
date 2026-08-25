@@ -934,7 +934,18 @@ static bool pre_v6_unaligned(DisasContext *s)
     return !arm_dc_feature(s, ARM_FEATURE_V6) && !s->align_mem;
 }
 
-/* Rotate a loaded word as a pre-v6 unaligned single-word load does. */
+/*
+ * Rotate a loaded word as a pre-v6 unaligned single-word load does.
+ *
+ * Not applied when the destination is PC. DDI 0100I A4-43 pseudocode
+ * rotates first and only then assigns to PC, but a real ARM926EJ-S
+ * (SAM9X75D2G) branches to the *unrotated* word: crafting memory so
+ * that only a rotating implementation reaches a known landing pad, and
+ * again so that only a non-rotating one does, lands the non-rotating
+ * craft at every misalignment. Plausibly the byte rotate unit sits in
+ * the writeback path to the register file (DDI 0222B 3-23 describes it
+ * there) and the branch target is taken before it.
+ */
 static void gen_pre_v6_rotate(TCGv_i32 val, TCGv_i32 a32)
 {
     TCGv_i32 rot = tcg_temp_new_i32();
@@ -3823,8 +3834,13 @@ static bool op_load_rr(DisasContext *s, arg_ldst_rr *a,
     gen_aa32_ld_i32(s, tmp, addr, mem_idx, mop);
     disas_set_da_iss(s, mop, issinfo);
 
-    /* Rotate before the writeback below can disturb addr. */
-    if (pre_v6_unaligned(s) && (mop & MO_SIZE) == MO_32) {
+    /*
+     * Rotate before the writeback below can disturb addr. Not when the
+     * destination is PC: on real hardware the branch target is the
+     * unrotated word, so an unaligned "ldr pc" behaves like LDM rather
+     * than like LDR. See gen_pre_v6_rotate().
+     */
+    if (pre_v6_unaligned(s) && (mop & MO_SIZE) == MO_32 && a->rt != 15) {
         gen_pre_v6_rotate(tmp, addr);
     }
 
@@ -4033,8 +4049,8 @@ static bool op_load_ri(DisasContext *s, arg_ldst_ri *a,
     gen_aa32_ld_i32(s, tmp, addr, mem_idx, mop);
     disas_set_da_iss(s, mop, issinfo);
 
-    /* Rotate before the writeback below can disturb addr. */
-    if (pre_v6_unaligned(s) && (mop & MO_SIZE) == MO_32) {
+    /* Rotate before the writeback below can disturb addr; not for PC. */
+    if (pre_v6_unaligned(s) && (mop & MO_SIZE) == MO_32 && a->rt != 15) {
         gen_pre_v6_rotate(tmp, addr);
     }
 
