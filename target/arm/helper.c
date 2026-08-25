@@ -2453,6 +2453,30 @@ static void pmsav5_data_ap_write(CPUARMState *env, const ARMCPRegInfo *ri,
                                  uint64_t value)
 {
     env->cp15.pmsav5_data_ap = extended_mpu_ap_bits(value);
+    /* The MPU has no TLB: permission changes take effect at once */
+    tlb_flush(env_cpu(env));
+}
+
+static void pmsav5_data_ext_ap_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                                     uint64_t value)
+{
+    env->cp15.pmsav5_data_ap = value;
+    tlb_flush(env_cpu(env));
+}
+
+static void pmsav5_insn_ext_ap_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                                     uint64_t value)
+{
+    env->cp15.pmsav5_insn_ap = value;
+    tlb_flush(env_cpu(env));
+}
+
+static void pmsav5_region_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                                uint64_t value)
+{
+    raw_write(env, ri, value);
+    /* Region base/size changes take effect at once on the MPU */
+    tlb_flush(env_cpu(env));
 }
 
 static uint64_t pmsav5_data_ap_read(CPUARMState *env, const ARMCPRegInfo *ri)
@@ -2464,6 +2488,7 @@ static void pmsav5_insn_ap_write(CPUARMState *env, const ARMCPRegInfo *ri,
                                  uint64_t value)
 {
     env->cp15.pmsav5_insn_ap = extended_mpu_ap_bits(value);
+    tlb_flush(env_cpu(env));
 }
 
 static uint64_t pmsav5_insn_ap_read(CPUARMState *env, const ARMCPRegInfo *ri)
@@ -2770,10 +2795,23 @@ static const ARMCPRegInfo pmsav5_cp_reginfo[] = {
     { .name = "DATA_EXT_AP", .cp = 15, .crn = 5, .crm = 0, .opc1 = 0, .opc2 = 2,
       .access = PL1_RW,
       .fieldoffset = offsetof(CPUARMState, cp15.pmsav5_data_ap),
-      .resetvalue = 0, },
+      .resetvalue = 0, .writefn = pmsav5_data_ext_ap_write, },
     { .name = "INSN_EXT_AP", .cp = 15, .crn = 5, .crm = 0, .opc1 = 0, .opc2 = 3,
       .access = PL1_RW,
       .fieldoffset = offsetof(CPUARMState, cp15.pmsav5_insn_ap),
+      .resetvalue = 0, .writefn = pmsav5_insn_ext_ap_write, },
+    /*
+     * ARM946E-S TCM region registers (DDI 0201 4.3.9): base address and
+     * size of the data and instruction TCMs. Stored only; the TCMs are
+     * provided by the board.
+     */
+    { .name = "DTCM_REGION", .cp = 15, .crn = 9, .crm = 1, .opc1 = 0, .opc2 = 0,
+      .access = PL1_RW,
+      .fieldoffset = offsetof(CPUARMState, cp15.pmsav5_tcm[0]),
+      .resetvalue = 0, },
+    { .name = "ITCM_REGION", .cp = 15, .crn = 9, .crm = 1, .opc1 = 0, .opc2 = 1,
+      .access = PL1_RW,
+      .fieldoffset = offsetof(CPUARMState, cp15.pmsav5_tcm[1]),
       .resetvalue = 0, },
     { .name = "DCACHE_CFG", .cp = 15, .crn = 2, .crm = 0, .opc1 = 0, .opc2 = 0,
       .access = PL1_RW,
@@ -2784,27 +2822,35 @@ static const ARMCPRegInfo pmsav5_cp_reginfo[] = {
     /* Protection region base and size registers */
     { .name = "946_PRBS0", .cp = 15, .crn = 6, .crm = 0, .opc1 = 0,
       .opc2 = CP_ANY, .access = PL1_RW, .resetvalue = 0,
+      .writefn = pmsav5_region_write,
       .fieldoffset = offsetof(CPUARMState, cp15.c6_region[0]) },
     { .name = "946_PRBS1", .cp = 15, .crn = 6, .crm = 1, .opc1 = 0,
       .opc2 = CP_ANY, .access = PL1_RW, .resetvalue = 0,
+      .writefn = pmsav5_region_write,
       .fieldoffset = offsetof(CPUARMState, cp15.c6_region[1]) },
     { .name = "946_PRBS2", .cp = 15, .crn = 6, .crm = 2, .opc1 = 0,
       .opc2 = CP_ANY, .access = PL1_RW, .resetvalue = 0,
+      .writefn = pmsav5_region_write,
       .fieldoffset = offsetof(CPUARMState, cp15.c6_region[2]) },
     { .name = "946_PRBS3", .cp = 15, .crn = 6, .crm = 3, .opc1 = 0,
       .opc2 = CP_ANY, .access = PL1_RW, .resetvalue = 0,
+      .writefn = pmsav5_region_write,
       .fieldoffset = offsetof(CPUARMState, cp15.c6_region[3]) },
     { .name = "946_PRBS4", .cp = 15, .crn = 6, .crm = 4, .opc1 = 0,
       .opc2 = CP_ANY, .access = PL1_RW, .resetvalue = 0,
+      .writefn = pmsav5_region_write,
       .fieldoffset = offsetof(CPUARMState, cp15.c6_region[4]) },
     { .name = "946_PRBS5", .cp = 15, .crn = 6, .crm = 5, .opc1 = 0,
       .opc2 = CP_ANY, .access = PL1_RW, .resetvalue = 0,
+      .writefn = pmsav5_region_write,
       .fieldoffset = offsetof(CPUARMState, cp15.c6_region[5]) },
     { .name = "946_PRBS6", .cp = 15, .crn = 6, .crm = 6, .opc1 = 0,
       .opc2 = CP_ANY, .access = PL1_RW, .resetvalue = 0,
+      .writefn = pmsav5_region_write,
       .fieldoffset = offsetof(CPUARMState, cp15.c6_region[6]) },
     { .name = "946_PRBS7", .cp = 15, .crn = 6, .crm = 7, .opc1 = 0,
       .opc2 = CP_ANY, .access = PL1_RW, .resetvalue = 0,
+      .writefn = pmsav5_region_write,
       .fieldoffset = offsetof(CPUARMState, cp15.c6_region[7]) },
 };
 

@@ -367,6 +367,7 @@ typedef struct CPUArchState {
             };
         };
         uint32_t pmsav5_data_ap; /* PMSAv5 MPU data access permissions */
+        uint32_t pmsav5_tcm[2]; /* ARM946E-S DTCM/ITCM region registers */
         uint32_t pmsav5_insn_ap; /* PMSAv5 MPU insn access permissions */
         uint64_t hcr_el2; /* Hypervisor configuration register */
         uint64_t hcrx_el2; /* Extended Hypervisor configuration register */
