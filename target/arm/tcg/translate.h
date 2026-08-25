@@ -153,6 +153,8 @@ typedef struct DisasContext {
     bool hstr_active;
     /* True if memory operations require alignment */
     bool align_mem;
+    /* Legacy (pre-v6 / v6 U=0) unaligned access semantics in effect */
+    bool legacy_unaligned;
     /* True if PSTATE.IL is set */
     bool pstate_il;
     /* True if PSTATE.SM is set. */

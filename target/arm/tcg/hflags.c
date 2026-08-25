@@ -262,6 +262,32 @@ static bool arm_d32dis(CPUARMState *env, int cur_el)
     return cpacr_d32dis;
 }
 
+/*
+ * Legacy (pre-ARMv6) unaligned access semantics apply when alignment
+ * checking is off on a pre-v6 CPU, or on an ARMv6 CPU with SCTLR.U == 0
+ * (DDI 0100I A2-40, Table A2-10). ARMv7 has SCTLR.U RAO. The memory type
+ * does not matter for these: the address is truncated and single-word
+ * loads rotate. Under user-mode emulation ARMv6 is taken as U == 1, as a
+ * Linux kernel would configure it.
+ */
+static bool legacy_unaligned(CPUARMState *env, uint64_t sctlr)
+{
+    if (sctlr & SCTLR_A) {
+        return false;
+    }
+    if (!arm_feature(env, ARM_FEATURE_V6)) {
+        return true;
+    }
+#ifdef CONFIG_USER_ONLY
+    return false;
+#else
+    if (arm_feature(env, ARM_FEATURE_V7)) {
+        return false;
+    }
+    return !(sctlr & SCTLR_U);
+#endif
+}
+
 static CPUARMTBFlags rebuild_hflags_a32(CPUARMState *env, int fp_el,
                                         ARMMMUIdx mmu_idx)
 {
@@ -269,7 +295,9 @@ static CPUARMTBFlags rebuild_hflags_a32(CPUARMState *env, int fp_el,
     int el = arm_current_el(env);
     uint64_t sctlr = arm_sctlr(env, el);
 
-    if (aprofile_require_alignment(env, el, sctlr)) {
+    if (legacy_unaligned(env, sctlr)) {
+        DP_TBFLAG_A32(flags, LEGACY_UNALIGN, 1);
+    } else if (aprofile_require_alignment(env, el, sctlr)) {
         DP_TBFLAG_ANY(flags, ALIGN_MEM, 1);
     }
 

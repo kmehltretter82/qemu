@@ -931,7 +931,7 @@ MemOp pow2_align(unsigned i)
  */
 static bool pre_v6_unaligned(DisasContext *s)
 {
-    return !arm_dc_feature(s, ARM_FEATURE_V6) && !s->align_mem;
+    return s->legacy_unaligned;
 }
 
 /*
@@ -6494,6 +6494,7 @@ static void arm_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
         dc->mve_no_pred = EX_TBFLAG_M32(tb_flags, MVE_NO_PRED);
     } else {
         dc->sctlr_b = EX_TBFLAG_A32(tb_flags, SCTLR__B);
+        dc->legacy_unaligned = EX_TBFLAG_A32(tb_flags, LEGACY_UNALIGN);
         dc->hstr_active = EX_TBFLAG_A32(tb_flags, HSTR_ACTIVE);
         dc->ns = EX_TBFLAG_A32(tb_flags, NS);
         dc->vfp_enabled = EX_TBFLAG_A32(tb_flags, VFPEN);

@@ -2516,6 +2516,8 @@ FIELD(TBFLAG_A32, SME_TRAP_NONSTREAMING, 11, 1)
 FIELD(TBFLAG_A32, NEONEXC_EL, 12, 2)
 /* Should VFP insns touching D16..D31 UNDEF? (CPACR.D32DIS) */
 FIELD(TBFLAG_A32, D32DIS, 14, 1)
+/* Pre-v6 / ARMv6 SCTLR.U=0 unaligned access semantics (rotate/truncate) */
+FIELD(TBFLAG_A32, LEGACY_UNALIGN, 15, 1)
 
 /*
  * Bit usage when in AArch32 state, for M-profile only.
