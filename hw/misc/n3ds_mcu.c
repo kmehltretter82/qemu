@@ -197,7 +197,7 @@ static void n3ds_mcu_reset(DeviceState *dev)
     s->regs[MCU_REG_VERSION_HI] = 0x03;
     s->regs[MCU_REG_VERSION_LO] = 0x05;
     s->regs[MCU_REG_BATTERY] = 100;
-    s->regs[MCU_REG_POWER_STAT] = 0x00;
+    s->regs[MCU_REG_POWER_STAT] = 0x02;    /* bit1: shell open */
     s->regs[MCU_REG_LCD_POWER] = 0x00;
     memset(&s->regs[MCU_REG_IRQ_MASK], 0xFF, 4);
     s->reg = 0;
