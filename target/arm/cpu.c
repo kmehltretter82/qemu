@@ -162,6 +162,27 @@ static bool arm_cpu_has_work(CPUState *cs)
     }
 
     /*
+     * WFE (unlike WFI) is not ended by an interrupt that is masked in
+     * CPSR/PSTATE: the ARM11 MPCore stays in WFE with a pending, masked
+     * IRQ (measured on a New 2DS XL).
+     */
+    if (cpu->env.halt_reason == HALT_WFE) {
+        CPUARMState *env = &cpu->env;
+
+        if (cpu_test_interrupt(cs, CPU_INTERRUPT_HARD | CPU_INTERRUPT_VIRQ) &&
+            !(env->daif & CPSR_I)) {
+            return true;
+        }
+        if (cpu_test_interrupt(cs, CPU_INTERRUPT_FIQ | CPU_INTERRUPT_VFIQ) &&
+            !(env->daif & CPSR_F)) {
+            return true;
+        }
+        return cpu_test_interrupt(cs, CPU_INTERRUPT_NMI | CPU_INTERRUPT_VINMI |
+                                  CPU_INTERRUPT_VFNMI | CPU_INTERRUPT_VSERR |
+                                  CPU_INTERRUPT_EXITTB);
+    }
+
+    /*
      * Otherwise pretty much any IRQ would wake us up
      */
     if (cpu_test_interrupt(cs,
@@ -2400,6 +2421,7 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
 #endif
 
     register_cp_regs_for_features(cpu);
+    arm_cp_regs_apply_quirks(cpu);
     arm_cpu_register_gdb_regs_for_features(cpu);
     arm_cpu_register_gdb_commands(cpu);
 
