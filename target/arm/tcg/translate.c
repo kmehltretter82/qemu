@@ -3302,6 +3302,9 @@ DO_SMLAWX(SMLAWT, 1, 1)
 
 static bool trans_YIELD(DisasContext *s, arg_YIELD *a)
 {
+    if (s->thumb && !arm_dc_feature(s, ARM_FEATURE_THUMB2)) {
+        return false;   /* 16-bit hint space is Thumb-2 */
+    }
     /*
      * When running single-threaded TCG code, use the helper to ensure that
      * the next round-robin scheduled vCPU gets a crack.  When running in
@@ -3343,6 +3346,9 @@ static bool trans_SEV(DisasContext *s, arg_SEV *a)
 
 static bool trans_SEVL(DisasContext *s, arg_SEV *a)
 {
+    if (s->thumb && !arm_dc_feature(s, ARM_FEATURE_THUMB2)) {
+        return false;   /* 16-bit hint space is Thumb-2 (UNDEF on ARM11) */
+    }
     /*
      * SEVL only exists for v8A; for M-profile and v7A and earlier
      * this encoding is an unallocated must-NOP hint.
@@ -3408,6 +3414,14 @@ static bool trans_ESB(DisasContext *s, arg_ESB *a)
 
 static bool trans_NOP(DisasContext *s, arg_NOP *a)
 {
+    /*
+     * The 16-bit Thumb hint encodings (NOP, YIELD, the reserved space)
+     * are Thumb-2: on an ARM11 MPCore they are UNDEFINED (measured),
+     * while the ARM-state hints execute.
+     */
+    if (s->thumb && !arm_dc_feature(s, ARM_FEATURE_THUMB2)) {
+        return false;
+    }
     return true;
 }
 
@@ -6127,6 +6141,15 @@ static bool trans_PLI(DisasContext *s, arg_PLI *a)
 static bool trans_IT(DisasContext *s, arg_IT *a)
 {
     int cond_mask = a->cond_mask;
+
+    /*
+     * IT is Thumb-2; on a v6K core without it (ARM11 MPCore) the
+     * encoding, which also catches the 16-bit hint space rejected by
+     * trans_NOP/trans_YIELD above it in the decode tree, is UNDEFINED.
+     */
+    if (!arm_dc_feature(s, ARM_FEATURE_THUMB2)) {
+        return false;
+    }
 
     /*
      * No actual code generated for this insn, just setup state.
