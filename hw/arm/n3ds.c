@@ -29,6 +29,7 @@
 #include "hw/cpu/arm11mpcore.h"
 #include "hw/misc/unimp.h"
 #include "hw/misc/n3ds.h"
+#include "hw/arm/n3ds_bootstub.h"
 #include "hw/i2c/i2c.h"
 #include "hw/sd/sd.h"
 #include "system/address-spaces.h"
@@ -100,54 +101,7 @@ struct N3DSMachineState {
 #define TYPE_N3DS_MACHINE MACHINE_TYPE_NAME("n3ds")
 OBJECT_DECLARE_SIMPLE_TYPE(N3DSMachineState, N3DS_MACHINE)
 
-/*
- * boot11 stub: every core enables its GIC CPU interface (GICC_CTLR=1,
- * PMR=0xF0 as found on the console); core 0 enables the GIC distributor
- * and waits for the Luma ARM11 entry mailbox; cores 1-3 park in WFI
- * until their mailbox at 0x1FFFFFDC is written and an SGI wakes them.
- */
-static const uint32_t boot11_stub[] = {
-    0xea000006, 0xeafffffe, 0xeafffffe, 0xeafffffe,
-    0xeafffffe, 0xeafffffe, 0xeafffffe, 0xeafffffe,
-    0xe59f3054, 0xe3a04001, 0xe5834000, 0xe3a040f0,
-    0xe5834004, 0xee100fb0, 0xe2000003, 0xe3500000,
-    0x1a000007, 0xe59f3034, 0xe3a04001, 0xe5834000,
-    0xe3e0123e, 0xe5912000, 0xe3520000, 0x0afffffc,
-    0xe12fff12, 0xe59f1018, 0xe320f003, 0xe5912000,
-    0xe3520000, 0x0afffffb, 0xe12fff12, 0x17e00100,
-    0x17e01000, 0x1fffffdc,
-};
 
-/*
- * boot9 stub: like the real boot ROM, the exception vectors branch to
- * 8-byte slots in ARM9 WRAM where firmware (Kernel9, arm9linuxfw, ...)
- * installs `ldr pc, [pc, #-4]; .word handler` pairs, in the boot ROM's
- * order: IRQ 0x08000000, FIQ 0x08000008, SVC 0x08000010,
- * UNDEF 0x08000018, PABT 0x08000020, DABT 0x08000028. The reset vector
- * hangs. `bx lr` sits at the two cache maintenance entry points Luma3DS
- * calls (0x830, 0xAB4).
- */
-#define BOOT9_STUB_SIZE 0xB00
-static void n3ds_make_boot9(uint8_t *buf)
-{
-    static const uint32_t slot[8] = {
-        [1] = 0x08000018, [2] = 0x08000010, [3] = 0x08000020,
-        [4] = 0x08000028, [6] = 0x08000000, [7] = 0x08000008,
-    };
-    int i;
-
-    memset(buf, 0, BOOT9_STUB_SIZE);
-    for (i = 0; i < 8; i++) {
-        if (slot[i]) {
-            stl_le_p(buf + 4 * i, 0xe59ff018);   /* ldr pc, [pc, #0x18] */
-            stl_le_p(buf + 0x20 + 4 * i, slot[i]);
-        } else {
-            stl_le_p(buf + 4 * i, 0xeafffffe);   /* b . */
-        }
-    }
-    stl_le_p(buf + 0x830, 0xe12fff1e);           /* bx lr */
-    stl_le_p(buf + 0xab4, 0xe12fff1e);           /* bx lr */
-}
 
 static void n3ds_unimp(MemoryRegion *container, const char *name,
                        hwaddr base, hwaddr size, int priority)
@@ -319,7 +273,6 @@ static void n3ds_init(MachineState *machine)
     N3DSMachineState *s = N3DS_MACHINE(machine);
     MemoryRegion *sysmem = get_system_memory();
     Object *cluster;
-    uint8_t boot9[BOOT9_STUB_SIZE];
     DriveInfo *di;
     DeviceState *dev;
     I2CBus *i2cbus;
@@ -409,7 +362,7 @@ static void n3ds_init(MachineState *machine)
     memory_region_init_alias(&s->boot11_alias[1], NULL, "n3ds.boot11.high",
                              &s->boot11, 0, N3DS_BOOTROM_SIZE);
     memory_region_add_subregion(sysmem, N3DS_BOOTROM_BASE, &s->boot11_alias[1]);
-    rom_add_blob_fixed_as("n3ds.boot11-stub", boot11_stub, sizeof(boot11_stub),
+    rom_add_blob_fixed_as("n3ds.boot11-stub", n3ds_boot11_stub, sizeof(n3ds_boot11_stub),
                           0, &address_space_memory);
 
     /* ---- memory, ARM9 only ---- */
@@ -435,8 +388,7 @@ static void n3ds_init(MachineState *machine)
     memory_region_init_rom(&s->boot9, NULL, "n3ds.boot9", N3DS_BOOTROM_SIZE,
                            &error_fatal);
     memory_region_add_subregion(&s->arm9_mem, N3DS_BOOTROM_BASE, &s->boot9);
-    n3ds_make_boot9(boot9);
-    rom_add_blob_fixed_as("n3ds.boot9-stub", boot9, sizeof(boot9),
+    rom_add_blob_fixed_as("n3ds.boot9-stub", n3ds_boot9_stub, sizeof(n3ds_boot9_stub),
                           N3DS_BOOTROM_BASE, &s->arm9_as);
 
     /* ---- shared IO window ---- */
@@ -478,6 +430,19 @@ static void n3ds_init(MachineState *machine)
     sysbus_connect_irq(SYS_BUS_DEVICE(s->irq9), 0,
                        qdev_get_gpio_in(DEVICE(&s->arm9), ARM_CPU_IRQ));
 
+    {
+        DeviceState *aes = qdev_new("n3ds-aes");
+        DeviceState *sha = qdev_new("n3ds-sha");
+
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(aes), &error_fatal);
+        n3ds_map(&s->arm9_mem, 0, aes, 0, N3DS_AES9_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(aes), 0,
+                           qdev_get_gpio_in(s->irq9, N3DS_IRQ9_AES));
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(sha), &error_fatal);
+        n3ds_map(&s->arm9_mem, 0, sha, 0, N3DS_SHA9_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(sha), 0,
+                           qdev_get_gpio_in(s->irq9, N3DS_IRQ9_SHA));
+    }
     s->timer9 = qdev_new(TYPE_N3DS_TIMER);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(s->timer9), &error_fatal);
     n3ds_map(&s->arm9_mem, 0, s->timer9, 0, N3DS_TIMER9_BASE);
@@ -560,7 +525,12 @@ static void n3ds_init(MachineState *machine)
         }
     }
     i2cbus = I2C_BUS(qdev_get_child_bus(s->i2c[1], "i2c"));
-    i2c_slave_create_simple(i2cbus, TYPE_N3DS_MCU, 0x25);
+    {
+        I2CSlave *mcu = i2c_slave_create_simple(i2cbus, TYPE_N3DS_MCU, 0x25);
+
+        /* MCU interrupt (GPIO on the real SoC) -> GIC 0x71 */
+        qdev_connect_gpio_out(DEVICE(mcu), 0, n3ds_gic_irq(s, 0x71));
+    }
 
     /* ---- SPI buses, GPIO, WiFi SDIO host ---- */
     {
