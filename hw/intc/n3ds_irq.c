@@ -94,8 +94,9 @@ static void n3ds_irq_reset(DeviceState *dev)
 {
     N3DSIrqState *s = N3DS_IRQ(dev);
 
-    s->ie = 0;
-    s->iflags = 0;
+    /* as left by Luma3DS on the console: timers 0/1 and SDIO1 enabled and pending */
+    s->ie = 0x00010300;
+    s->iflags = 0x00010300;
     s->level = 0;
     n3ds_irq_update(s);
 }

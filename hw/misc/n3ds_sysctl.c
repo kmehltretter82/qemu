@@ -273,11 +273,20 @@ static void n3ds_sysctl_reset(DeviceState *dev)
     memset(s->cfg_regs, 0, sizeof(s->cfg_regs));
     memset(s->cfg11_regs, 0, sizeof(s->cfg11_regs));
     memset(s->pdn_regs, 0, sizeof(s->pdn_regs));
-    /* PDN_LGR_CPU_CNT: cores 0 and 1 are up */
-    s->pdn_regs[PDN_LGR_CPU_CNT + 0] = 0x11;
-    s->pdn_regs[PDN_LGR_CPU_CNT + 1] = 0x11;
-    /* New 3DS default clock mode */
-    regs_write(s->pdn_regs, PDN_LGR_SOCMODE, 0x0001, 2);
+    /*
+     * Values read on a New 2DS XL right after the Luma3DS chainloader
+     * (n3ds-probes io_cfg9 / io_cfg11 / io_pdn snapshots).
+     */
+    regs_write(s->cfg9_regs, 0x000, 0x00000101, 4);   /* SYSPROT9/11 */
+    regs_write(s->cfg9_regs, 0x008, 0x0000000c, 4);
+    regs_write(s->cfg9_regs, 0x010, 0xffff0001, 4);
+    regs_write(s->cfg9_regs, 0x014, 0x0000ffff, 4);
+    regs_write(s->cfg11_regs, 0x000, 0x8c888480, 4); /* shared WRAM bank map */
+    regs_write(s->cfg11_regs, 0x004, 0x9c989490, 4);
+    regs_write(s->cfg11_regs, 0x008, 0x8c888480, 4);
+    regs_write(s->cfg11_regs, 0x00c, 0x9c989490, 4);
+    regs_write(s->pdn_regs, 0x200, 0x0001007f, 4);   /* PDN_GPU_CNT (Luma) */
+    /* PDN_LGR_CPU_CNT and PDN_LGR_SOCMODE read 0 at hand-off */
     if (s->extwram) {
         memory_region_set_enabled(s->extwram, false);
     }

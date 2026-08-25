@@ -101,21 +101,21 @@ struct N3DSMachineState {
 OBJECT_DECLARE_SIMPLE_TYPE(N3DSMachineState, N3DS_MACHINE)
 
 /*
- * boot11 stub: core 0 enables the GIC distributor (firmware chainloaded
- * by Luma3DS relies on interrupts being deliverable) and waits for the
- * Luma ARM11 entry mailbox; cores 1-3 park in WFI until their mailbox at
- * 0x1FFFFFDC is written and an SGI wakes them.
+ * boot11 stub: every core enables its GIC CPU interface (GICC_CTLR=1,
+ * PMR=0xF0 as found on the console); core 0 enables the GIC distributor
+ * and waits for the Luma ARM11 entry mailbox; cores 1-3 park in WFI
+ * until their mailbox at 0x1FFFFFDC is written and an SGI wakes them.
  */
 static const uint32_t boot11_stub[] = {
     0xea000006, 0xeafffffe, 0xeafffffe, 0xeafffffe,
     0xeafffffe, 0xeafffffe, 0xeafffffe, 0xeafffffe,
-    0xee100fb0, 0xe2000003, 0xe3500000, 0x1a000007,
-    0xe59f3044, 0xe3a04001, 0xe5834000, 0xe3e0123e,
-    0xe5912000, 0xe3520000, 0x0afffffc, 0xe12fff12,
-    0xe59f3028, 0xe3a04001, 0xe5834000, 0xe3a040f0,
-    0xe5834004, 0xe59f1018, 0xe320f003, 0xe5912000,
-    0xe3520000, 0x0afffffb, 0xe12fff12, 0x17e01000,
-    0x17e00100, 0x1fffffdc,
+    0xe59f3054, 0xe3a04001, 0xe5834000, 0xe3a040f0,
+    0xe5834004, 0xee100fb0, 0xe2000003, 0xe3500000,
+    0x1a000007, 0xe59f3034, 0xe3a04001, 0xe5834000,
+    0xe3e0123e, 0xe5912000, 0xe3520000, 0x0afffffc,
+    0xe12fff12, 0xe59f1018, 0xe320f003, 0xe5912000,
+    0xe3520000, 0x0afffffb, 0xe12fff12, 0x17e00100,
+    0x17e01000, 0x1fffffdc,
 };
 
 /*
@@ -214,8 +214,14 @@ static void n3ds_cpu_reset(void *opaque)
         cpu_reset(cs);
         env->regs[15] = 0;               /* boot11 stub at physical 0 */
         if (i == 0) {
+            /* CP15 state as Luma3DS leaves it (n3ds-probes cp15_entry) */
             env->cp15.sctlr_ns = N3DS_ARM11_SCTLR;
             env->cp15.sctlr_s = N3DS_ARM11_SCTLR;
+            env->cp15.c1_auxcr = 0xF;
+            env->cp15.cpacr_el1 = 0x00F00000;
+            env->cp15.ttbr0_ns = 0x1FFF4002;
+            env->cp15.ttbr1_ns = 0x1FFF4002;
+            env->cp15.dacr_ns = 0x55555555;
         }
         arm_rebuild_hflags(env);
     }

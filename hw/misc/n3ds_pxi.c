@@ -239,6 +239,10 @@ static void n3ds_pxi_reset(DeviceState *dev)
         s->side[i].sync_irqen = false;
         s->side[i].last_recv = 0;
     }
+    /* console after Luma3DS: PXI9 SYNC = 0x8000000e, CNT = 0x8101 */
+    s->side[1].sync_out = 0x0e;
+    s->side[0].sync_irqen = true;
+    s->side[0].cnt = CNT_ENABLE;
     pxi_update_irqs(s);
 }
 
