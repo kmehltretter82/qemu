@@ -141,6 +141,28 @@ config OMAP
     select SD
     select SERIAL_MM
 
+config N3DS
+    bool
+    default y
+    depends on TCG && ARM
+    select ARM11MPCORE
+    select ARM11SCU
+    select ARM_GIC
+    select ARM_MPTIMER
+    select CPU_CLUSTER
+    select PL330
+    select PL310
+    select UNIMP
+    select N3DS_SYSCTL
+    select N3DS_TMIO
+    select N3DS_I2C
+    select N3DS_MCU
+    select N3DS_HID
+    select N3DS_LCD
+    select N3DS_PXI
+    select N3DS_IRQ
+    select N3DS_TIMER
+
 config REALVIEW
     bool
     default y

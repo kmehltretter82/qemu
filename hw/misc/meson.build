@@ -176,3 +176,7 @@ system_ss.add(when: 'CONFIG_SBSA_REF', if_true: files('sbsa_ec.c'))
 system_ss.add(when: 'CONFIG_LASI', if_true: files('lasi.c'))
 
 system_ss.add(when: 'CONFIG_AXIADO_CLK', if_true: files('axiado_clk.c'))
+
+system_ss.add(when: 'CONFIG_N3DS_SYSCTL', if_true: files('n3ds_sysctl.c'))
+system_ss.add(when: 'CONFIG_N3DS_MCU', if_true: files('n3ds_mcu.c'))
+system_ss.add(when: 'CONFIG_N3DS_PXI', if_true: files('n3ds_pxi.c'))

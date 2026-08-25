@@ -143,3 +143,4 @@ endif
 system_ss.add(when: 'CONFIG_OMAP', if_true: files('omap_lcdc.c'))
 
 modules += { 'hw-display': hw_display_modules }
+system_ss.add(when: 'CONFIG_N3DS_LCD', if_true: files('n3ds_lcd.c'))

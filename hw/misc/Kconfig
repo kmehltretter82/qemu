@@ -264,3 +264,13 @@ config K230_DECOMP_GZIP
     bool
 
 source macio/Kconfig
+
+config N3DS_SYSCTL
+    bool
+
+config N3DS_MCU
+    bool
+    select I2C
+
+config N3DS_PXI
+    bool
