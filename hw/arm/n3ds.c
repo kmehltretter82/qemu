@@ -50,6 +50,7 @@
 #define N3DS_BOOTARGS_SIZE   0x300
 #define N3DS_ARM9_MAGIC      0x4BEEF
 #define N3DS_ARM9_SCTLR      0x00052078  /* ITCM, DTCM, high vectors */
+#define N3DS_ARM11_MIDR      0x410FB025  /* ARM11 MPCore r0p5, read on a New 2DS XL */
 #define N3DS_ARM11_SCTLR     0x00054078  /* as set by Luma3DS' start.s */
 
 struct N3DSMachineState {
@@ -336,6 +337,7 @@ static void n3ds_init(MachineState *machine)
                                 ARM_CPU_TYPE_NAME("arm11mpcore"));
         cpu = OBJECT(&s->arm11[i]);
         object_property_set_int(cpu, "mp-affinity", i, &error_abort);
+        object_property_set_int(cpu, "midr", N3DS_ARM11_MIDR, &error_abort);
         object_property_set_link(cpu, "memory", OBJECT(sysmem), &error_abort);
         /* New 3DS: cores 2 and 3 are held in reset until PDN releases them */
         object_property_set_bool(cpu, "start-powered-off", i >= 2, &error_abort);
