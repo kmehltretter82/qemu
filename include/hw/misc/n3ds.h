@@ -60,6 +60,8 @@
 #define N3DS_CTRCARD_BASE     0x10004000
 #define N3DS_SDMMC_BASE       0x10006000
 #define N3DS_PXI9_BASE        0x10008000
+#define N3DS_AES9_BASE        0x10009000
+#define N3DS_SHA9_BASE        0x1000A000
 #define N3DS_AES_BASE         0x10009000
 #define N3DS_SHA_BASE         0x1000A000
 #define N3DS_RSA_BASE         0x1000B000
