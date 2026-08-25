@@ -1267,9 +1267,24 @@ do_fault:
     return false;
 }
 
+/*
+ * Memory type of a short-descriptor translation without TEX remap
+ * (DDI 0100I B4.4.1, DDI 0406C B3.8.2): TEX=0 C=0 B=0 is Strongly-ordered,
+ * TEX=0 C=0 B=1 is Shareable Device, TEX=2 C=0 B=0 is Non-shareable
+ * Device, everything else is Normal.
+ */
+static bool short_desc_attrs_are_device(unsigned tex, bool c, bool b)
+{
+    if (c) {
+        return false;
+    }
+    return (tex == 0 && !b) || (tex == 0 && b) || (tex == 2 && !b);
+}
+
 static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
                              uint32_t address, MMUAccessType access_type,
-                             GetPhysAddrResult *result, ARMMMUFaultInfo *fi)
+                             MemOp memop, GetPhysAddrResult *result,
+                             ARMMMUFaultInfo *fi)
 {
     ARMCPU *cpu = env_archcpu(env);
     ARMMMUIdx mmu_idx = ptw->in_mmu_idx;
@@ -1278,6 +1293,8 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
     uint32_t desc;
     uint32_t xn;
     uint32_t pxn = 0;
+    unsigned tex = 0;
+    bool attr_c = true, attr_b = true, device = false;
     int type;
     int ap;
     int domain = 0;
@@ -1347,6 +1364,9 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
         xn = desc & (1 << 4);
         pxn = desc & 1;
         ns = extract32(desc, 19, 1);
+        tex = extract32(desc, 12, 3);
+        attr_c = extract32(desc, 3, 1);
+        attr_b = extract32(desc, 2, 1);
     } else {
         if (cpu_isar_feature(aa32_pxn, cpu)) {
             pxn = (desc >> 2) & 1;
@@ -1370,16 +1390,20 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
             phys_addr = (desc & 0xffff0000) | (address & 0xffff);
             xn = desc & (1 << 15);
             result->f.lg_page_size = 16;
+            tex = extract32(desc, 12, 3);
             break;
         case 2: case 3: /* 4k page.  */
             phys_addr = (desc & 0xfffff000) | (address & 0xfff);
             xn = desc & 1;
             result->f.lg_page_size = 12;
+            tex = extract32(desc, 6, 3);
             break;
         default:
             /* Never happens, but compiler isn't smart enough to tell.  */
             g_assert_not_reached();
         }
+        attr_c = extract32(desc, 3, 1);
+        attr_b = extract32(desc, 2, 1);
         /*
          * Domain is checked here, now that a valid second-level
          * descriptor has been returned (DDI 0100I, Figure B4-2): an
@@ -1391,6 +1415,30 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
             goto do_fault;
         }
     }
+    /*
+     * Without TEX remap the descriptor gives the memory type directly.
+     * Unaligned accesses to Strongly-ordered or Device memory take an
+     * Alignment fault, whatever SCTLR.A says (DDI 0100I A2-40 for U=1;
+     * with U=0 the address was already truncated by the translator).
+     */
+    if (!(regime_sctlr(env, mmu_idx) & SCTLR_TRE)) {
+        device = short_desc_attrs_are_device(tex, attr_c, attr_b);
+    }
+    if (device) {
+        unsigned a_bits = memop_tlb_alignment_bits(memop, true);
+
+        if (address & ((1 << a_bits) - 1)) {
+            fi->type = ARMFault_Alignment;
+            goto do_fault;
+        }
+        result->f.tlb_fill_flags = TLB_CHECK_ALIGNED;
+        result->cacheattrs.attrs = 0;            /* Device-nGnRnE */
+        result->cacheattrs.shareability = 2;
+    } else {
+        result->f.tlb_fill_flags = 0;
+        result->cacheattrs.attrs = 0x44;         /* Normal, non-cacheable */
+    }
+    result->cacheattrs.is_s2_format = false;
     out_space = ptw->cur_space;
     if (ns) {
         /*
@@ -1641,7 +1689,12 @@ static int get_S1prot(CPUARMState *env, ARMMMUIdx mmu_idx, bool is_aa64,
             break;
         }
     } else {
-        xn = wxn = 0;
+        /*
+         * VMSAv6 (DDI 0100I B4.9.3): the XN bit of the descriptor applies,
+         * and an instruction fetch also needs read permission.
+         */
+        xn = xn || !(prot_rw & PAGE_READ);
+        wxn = 0;
     }
 
     if (xn || (wxn && (prot_rw & PAGE_WRITE))) {
@@ -3962,7 +4015,8 @@ static bool get_phys_addr_nogpc(CPUARMState *env, S1Translate *ptw,
                                   memop, result, fi);
     } else if (arm_feature(env, ARM_FEATURE_V7) ||
                regime_sctlr(env, mmu_idx) & SCTLR_XP) {
-        return get_phys_addr_v6(env, ptw, address, access_type, result, fi);
+        return get_phys_addr_v6(env, ptw, address, access_type, memop,
+                                result, fi);
     } else {
         return get_phys_addr_v5(env, ptw, address, access_type, result, fi);
     }
