@@ -27,7 +27,7 @@ static uint64_t mpcore_scu_read(void *opaque, hwaddr offset,
         id = ((1 << s->num_cpu) - 1) << 4;
         return id | (s->num_cpu - 1);
     case 0x08: /* CPU status.  */
-        return 0;
+        return s->cpu_status;
     case 0x0c: /* Invalidate all.  */
         return 0;
     default:
@@ -45,6 +45,9 @@ static void mpcore_scu_write(void *opaque, hwaddr offset,
     switch (offset) {
     case 0: /* Control register.  */
         s->control = value & 1;
+        break;
+    case 0x08: /* CPU status: per-CPU power status bits, stored only.  */
+        s->cpu_status = value & 0xff;
         break;
     case 0x0c: /* Invalidate all.  */
         /* This is a no-op as cache is not emulated.  */

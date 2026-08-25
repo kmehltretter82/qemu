@@ -23,6 +23,7 @@ struct ARM11SCUState {
     /*< public >*/
 
     uint32_t control;
+    uint32_t cpu_status;
     uint32_t num_cpu;
     MemoryRegion iomem;
 };
