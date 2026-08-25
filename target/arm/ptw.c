@@ -2705,6 +2705,13 @@ static bool get_phys_addr_pmsav5(CPUARMState *env,
         return false;
     }
     result->f.prot |= PAGE_EXEC;
+    /* The requested access must be permitted (e.g. a store to a
+     * read-only region); the softmmu relies on the walker to fault. */
+    if (ptw->in_prot_check & ~result->f.prot) {
+        fi->type = ARMFault_Permission;
+        fi->level = 1;
+        return false;
+    }
     return true;
 }
 
