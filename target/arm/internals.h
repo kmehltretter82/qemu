@@ -410,6 +410,7 @@ void arm_cpu_register(const ARMCPUInfo *info);
 
 void arm_do_plugin_vcpu_discon_cb(CPUState *cs, uint64_t from);
 void register_cp_regs_for_features(ARMCPU *cpu);
+void arm_cp_regs_apply_quirks(ARMCPU *cpu);
 void arm_init_cpreg_list(ARMCPU *cpu);
 
 void arm_cpu_register_gdb_regs_for_features(ARMCPU *cpu);

@@ -422,6 +422,7 @@ typedef struct CPUArchState {
         };
 
         uint32_t c9_insn; /* Cache lockdown registers.  */
+        uint32_t c1_auxcr; /* pre-v7 ACTLR (writable, IMPDEF bits) */
         uint32_t c9_data;
         uint64_t c9_pmcr; /* performance monitor control register */
         uint64_t c9_pmcnten; /* perf monitor counter enables */
@@ -1116,6 +1117,17 @@ struct ArchCPU {
     uint64_t ccsidr[16];
     uint64_t reset_cbar;
     uint32_t reset_auxcr;
+    /*
+     * Values of the TCM Type (c0,c0,2) and TLB Type (c0,c0,3) registers;
+     * tcmtr_reads_midr: this core returns the MIDR for c0,c0,2.
+     * no_ifar / no_cache_lockdown: the core has no IFAR (c6,c0,2) or
+     * cache lockdown registers (c9,c0,*); accesses are UNDEFINED.
+     */
+    uint32_t tcmtr;
+    uint32_t tlbtr;
+    bool tcmtr_reads_midr;
+    bool no_ifar;
+    bool no_cache_lockdown;
     /*
      * PMSAv5 (ARM946E-S) TCM region register writes: the TCMs are board
      * memory whose window moves with c9,c1,{0,1}; the board can hook

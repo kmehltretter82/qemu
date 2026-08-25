@@ -64,7 +64,9 @@ static void arm946_initfn(Object *obj)
     set_feature(&cpu->env, ARM_FEATURE_PMSA);
     set_feature(&cpu->env, ARM_FEATURE_DUMMY_C15_REGS);
     cpu->midr = 0x41059461;
-    cpu->ctr = 0x0f004006;
+    /* CTR/TCMTR as read on the 3DS ARM9: 16K DTCM, 32K ITCM */
+    cpu->ctr = 0x0f0d2112;
+    cpu->tcmtr = 0x00140180;
     cpu->reset_sctlr = 0x00000078;
 }
 
@@ -228,11 +230,18 @@ static void arm11mpcore_initfn(Object *obj)
     cpu->reset_fpsid = 0x410120b4;
     cpu->isar.mvfr0 = 0x11111111;
     cpu->isar.mvfr1 = 0x00000000;
-    cpu->ctr = 0x1d192992; /* 32K icache 32K dcache */
+    /* Measured on a New 2DS XL: 16K/16K caches, no TCM type register
+     * (c0,c0,2 reads the MIDR), TLBTR 0x800, no IFAR, no cache lockdown */
+    cpu->ctr = 0x1d152152;
+    cpu->tcmtr_reads_midr = true;
+    cpu->tlbtr = 0x00000800;
+    cpu->no_ifar = true;
+    cpu->no_cache_lockdown = true;
     SET_IDREG(isar, ID_PFR0, 0x111);
     SET_IDREG(isar, ID_PFR1, 0x1);
-    SET_IDREG(isar, ID_DFR0, 0);
-    SET_IDREG(isar, ID_AFR0, 0x2);
+    /* ID_DFR0 = 2, ID_AFR0 = 0 as read on a New 2DS XL (they were swapped) */
+    SET_IDREG(isar, ID_DFR0, 0x2);
+    SET_IDREG(isar, ID_AFR0, 0);
     SET_IDREG(isar, ID_MMFR0, 0x01100103);
     SET_IDREG(isar, ID_MMFR1, 0x10020302);
     SET_IDREG(isar, ID_MMFR2, 0x01222000);

@@ -576,7 +576,10 @@ static void cpacr_write(CPUARMState *env, const ARMCPRegInfo *ri,
             mask |= R_CPACR_CP11_MASK |
                     R_CPACR_CP10_MASK;
 
-            if (!arm_feature(env, ARM_FEATURE_NEON)) {
+            if (!arm_feature(env, ARM_FEATURE_V7)) {
+                /* v6: bits 31:30 do not exist; plain read/write here */
+                mask |= R_CPACR_ASEDIS_MASK | R_CPACR_D32DIS_MASK;
+            } else if (!arm_feature(env, ARM_FEATURE_NEON)) {
                 /* ASEDIS [31] bit is RAO/WI */
                 value |= R_CPACR_ASEDIS_MASK;
                 mask |= R_CPACR_ASEDIS_MASK;
@@ -592,7 +595,9 @@ static void cpacr_write(CPUARMState *env, const ARMCPRegInfo *ri,
              * VFPv3 and upwards with NEON implement 32 double precision
              * registers (D0-D31).
              */
-            if (!cpu_isar_feature(aa32_simd_r32, env_archcpu(env))) {
+            if (!arm_feature(env, ARM_FEATURE_V7)) {
+                /* handled above */
+            } else if (!cpu_isar_feature(aa32_simd_r32, env_archcpu(env))) {
                 /* D32DIS [30] is RAO/WI if D16-31 are not implemented. */
                 value |= R_CPACR_D32DIS_MASK;
                 mask |= R_CPACR_D32DIS_MASK;
@@ -3420,6 +3425,10 @@ static void sctlr_write(CPUARMState *env, const ARMCPRegInfo *ri,
     if (arm_feature(env, ARM_FEATURE_PMSA) && !cpu->has_mpu) {
         /* M bit is RAZ/WI for PMSA with no MPU implemented */
         value &= ~SCTLR_M;
+    }
+    if (arm_feature(env, ARM_FEATURE_PMSA) && !arm_feature(env, ARM_FEATURE_V6)) {
+        /* ARM946E-S: no alignment fault checking, A reads as 0 */
+        value &= ~SCTLR_A;
     }
 
     /* ??? Lots of these bits are not implemented.  */
@@ -7363,7 +7372,8 @@ void register_cp_regs_for_features(ARMCPU *cpu)
               .cp = 15, .crn = 0, .crm = 0, .opc1 = 0, .opc2 = 2,
               .access = PL1_R,
               .accessfn = access_tid1,
-              .type = ARM_CP_CONST, .resetvalue = 0 },
+              .type = ARM_CP_CONST,
+              .resetvalue = cpu->tcmtr_reads_midr ? cpu->midr : cpu->tcmtr },
         };
         /* TLBTR is specific to VMSA */
         ARMCPRegInfo id_tlbtr_reginfo = {
@@ -7371,7 +7381,7 @@ void register_cp_regs_for_features(ARMCPU *cpu)
               .cp = 15, .crn = 0, .crm = 0, .opc1 = 0, .opc2 = 3,
               .access = PL1_R,
               .accessfn = access_tid1,
-              .type = ARM_CP_CONST, .resetvalue = 0,
+              .type = ARM_CP_CONST, .resetvalue = cpu->tlbtr,
         };
         /* MPUIR is specific to PMSA V6+ */
         ARMCPRegInfo id_mpuir_reginfo = {
@@ -7538,6 +7548,12 @@ void register_cp_regs_for_features(ARMCPU *cpu)
               .access = PL1_RW, .accessfn = access_tacr,
               .nv2_redirect_offset = 0x118,
               .type = ARM_CP_CONST, .resetvalue = cpu->reset_auxcr },
+            /* pre-v7: the IMPDEF bits are plain read/write */
+            { .name = "ACTLR_v6", .state = ARM_CP_STATE_AA32,
+              .cp = 15, .opc1 = 0, .crn = 1, .crm = 0, .opc2 = 1,
+              .access = PL1_RW, .type = ARM_CP_OVERRIDE,
+              .fieldoffset = offsetof(CPUARMState, cp15.c1_auxcr),
+              .resetvalue = cpu->reset_auxcr },
             { .name = "ACTLR_EL2", .state = ARM_CP_STATE_BOTH,
               .opc0 = 3, .opc1 = 4, .crn = 1, .crm = 0, .opc2 = 1,
               .access = PL2_RW, .type = ARM_CP_CONST,
@@ -7547,7 +7563,13 @@ void register_cp_regs_for_features(ARMCPU *cpu)
               .access = PL3_RW, .type = ARM_CP_CONST,
               .resetvalue = 0 },
         };
-        define_arm_cp_regs(cpu, auxcr_reginfo);
+        if (arm_feature(env, ARM_FEATURE_V7)) {
+            /* the v6 override is the last entry: keep the CONST version */
+            define_arm_cp_regs_len(cpu, auxcr_reginfo,
+                                   ARRAY_SIZE(auxcr_reginfo) - 1);
+        } else {
+            define_arm_cp_regs(cpu, auxcr_reginfo);
+        }
         if (cpu_isar_feature(aa32_ac2, cpu)) {
             define_arm_cp_regs(cpu, actlr2_hactlr2_reginfo);
         }
@@ -8276,6 +8298,33 @@ void define_one_arm_cp_reg(ARMCPU *cpu, const ARMCPRegInfo *r)
 }
 
 /* Define a whole list of registers */
+/*
+ * Remove a 32-bit cp15 register defined by the generic tables when the
+ * hardware oracle shows that a particular core does not have it
+ * (accesses are then UNDEFINED).
+ */
+static void arm_cp_reg_remove32(ARMCPU *cpu, int cp, int crn, int crm,
+                                int opc1, int opc2)
+{
+    int ns;
+
+    for (ns = 0; ns < 2; ns++) {
+        uint32_t key = ENCODE_CP_REG(cp, 0, ns, crn, crm, opc1, opc2);
+        g_hash_table_remove(cpu->cp_regs, (gpointer)(uintptr_t)key);
+    }
+}
+
+void arm_cp_regs_apply_quirks(ARMCPU *cpu)
+{
+    if (cpu->no_ifar) {
+        arm_cp_reg_remove32(cpu, 15, 6, 0, 0, 2);
+    }
+    if (cpu->no_cache_lockdown) {
+        arm_cp_reg_remove32(cpu, 15, 9, 0, 0, 0);
+        arm_cp_reg_remove32(cpu, 15, 9, 0, 0, 1);
+    }
+}
+
 void define_arm_cp_regs_len(ARMCPU *cpu, const ARMCPRegInfo *regs, size_t len)
 {
     for (size_t i = 0; i < len; ++i) {
