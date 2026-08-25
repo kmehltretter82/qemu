@@ -209,6 +209,8 @@ static void arm11mpcore_initfn(Object *obj)
     ARMISARegisters *isar = &cpu->isar;
 
     cpu->dtb_compatible = "arm,arm11mpcore";
+    /* DDI 0360F 3.3.11: SCTLR reset value, bits 18/16 and [6:3] SBO */
+    cpu->reset_sctlr = 0x00050078;
     set_feature(&cpu->env, ARM_FEATURE_V6K);
     set_feature(&cpu->env, ARM_FEATURE_VAPA);
     set_feature(&cpu->env, ARM_FEATURE_MPIDR);
