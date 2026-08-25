@@ -4,7 +4,7 @@
  * 0x10142000 (bus 1: touchscreen/codec), 0x10143000 (bus 2),
  * 0x10160000 (bus 3: NVRAM).
  *
- *   0x800 CNT     bit 15 start/busy, bit 13 direction (1 = read),
+ *   0x800 CNT     bit 15 start/busy, bit 13 direction (1 = write),
  *                 bits 7:6 chip select, bits 2:0 baud rate
  *   0x804 DONE    write 0 to finish a transfer
  *   0x808 BLKLEN  transfer length in bytes
@@ -12,7 +12,8 @@
  *   0x810 STATUS  bit 0: FIFO busy
  *
  * Transfers complete synchronously over a QEMU SSI bus; without a
- * peripheral attached, reads return zeros.
+ * peripheral attached, reads return zeros. The interrupt is raised when
+ * the busy bit clears (the linux-3ds driver sleeps on it).
  *
  * Documentation: 3dbrew SPI_Registers.
  *
@@ -39,7 +40,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(N3DSSpiState, N3DS_SPI)
 #define REG_STATUS  0x810
 
 #define CNT_START   (1u << 15)
-#define CNT_READ    (1u << 13)
+#define CNT_WRITE   (1u << 13)
 
 #define FIFO_MAX    0x40000
 
@@ -72,7 +73,7 @@ static uint64_t n3ds_spi_read(void *opaque, hwaddr off, unsigned size)
     case REG_BLKLEN:
         return s->blklen;
     case REG_FIFO:
-        if (!(s->cnt & CNT_START) || !(s->cnt & CNT_READ)) {
+        if (!(s->cnt & CNT_START) || (s->cnt & CNT_WRITE)) {
             return 0;
         }
         for (i = 0; i < 4 && s->pos < s->blklen; i++, s->pos++) {
@@ -80,6 +81,7 @@ static uint64_t n3ds_spi_read(void *opaque, hwaddr off, unsigned size)
         }
         if (s->pos >= s->blklen) {
             s->cnt &= ~CNT_START;
+            qemu_irq_pulse(s->irq);
         }
         return v;
     case REG_STATUS:
@@ -104,6 +106,7 @@ static void n3ds_spi_write(void *opaque, hwaddr off, uint64_t val, unsigned size
             s->pos = 0;
             if (s->blklen == 0) {
                 s->cnt &= ~CNT_START;
+                qemu_irq_pulse(s->irq);
             }
         }
         break;
@@ -115,7 +118,7 @@ static void n3ds_spi_write(void *opaque, hwaddr off, uint64_t val, unsigned size
         s->blklen = MIN(val, FIFO_MAX);
         break;
     case REG_FIFO:
-        if (!(s->cnt & CNT_START) || (s->cnt & CNT_READ)) {
+        if (!(s->cnt & CNT_START) || !(s->cnt & CNT_WRITE)) {
             break;
         }
         for (i = 0; i < 4 && s->pos < s->blklen; i++, s->pos++) {
@@ -123,6 +126,7 @@ static void n3ds_spi_write(void *opaque, hwaddr off, uint64_t val, unsigned size
         }
         if (s->pos >= s->blklen) {
             s->cnt &= ~CNT_START;
+            qemu_irq_pulse(s->irq);
         }
         break;
     case REG_STATUS:

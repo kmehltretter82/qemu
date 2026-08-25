@@ -106,6 +106,7 @@ struct N3DSTmioState {
 
     int xfer;
     bool xfer_multi;
+    bool data_done;         /* card side of the transfer complete */
     uint32_t blocks_left;
     uint32_t blk_len;
     uint32_t fifo_pos;
@@ -152,22 +153,38 @@ static void tmio_clear_status(N3DSTmioState *s, uint16_t st0, uint16_t st1)
     W16(s, REG_STATUS1, R16(s, REG_STATUS1) & ~st1);
 }
 
-static void tmio_xfer_end(N3DSTmioState *s)
+/*
+ * The card side of the data phase is complete: the last block has been
+ * received into the FIFO (reads) or sent to the card (writes). DATAEND
+ * is signalled here; for reads the CPU may still drain the FIFO
+ * afterwards, as firmware that ignores the data (e.g. the CMD6 switch
+ * status) relies on.
+ */
+static void tmio_data_done(N3DSTmioState *s)
 {
     SDBus *bus = tmio_bus(s);
 
+    if (s->data_done) {
+        return;
+    }
+    s->data_done = true;
     if (s->xfer_multi && (R16(s, REG_STOP) & STOP_AUTO) && bus) {
         SDRequest req = { .cmd = 12, .arg = 0 };
         uint8_t resp[16];
 
         sdbus_do_command(bus, &req, resp, sizeof(resp));
     }
+    tmio_set_status(s, STAT0_DATAEND, 0);
+    trace_n3ds_tmio_xfer_end();
+}
+
+static void tmio_xfer_end(N3DSTmioState *s)
+{
+    tmio_data_done(s);
     s->xfer = XFER_NONE;
     s->fifo_pos = 0;
     s->blocks_left = 0;
     tmio_clear_status(s, 0, STAT1_RXRDY | STAT1_TXRQ);
-    tmio_set_status(s, STAT0_DATAEND, 0);
-    trace_n3ds_tmio_xfer_end();
 }
 
 static void tmio_load_block(N3DSTmioState *s)
@@ -181,6 +198,9 @@ static void tmio_load_block(N3DSTmioState *s)
     sdbus_read_data(bus, s->fifo, s->blk_len);
     s->fifo_pos = 0;
     tmio_set_status(s, 0, STAT1_RXRDY);
+    if (s->blocks_left <= 1) {
+        tmio_data_done(s);
+    }
 }
 
 static void tmio_store_block(N3DSTmioState *s)
@@ -228,6 +248,7 @@ static void tmio_send_command(N3DSTmioState *s, uint16_t cmd)
 
     /* Abort any transfer still pending from a previous command. */
     s->xfer = XFER_NONE;
+    s->data_done = false;
     s->fifo_pos = 0;
     s->blocks_left = 0;
     tmio_clear_status(s, 0, STAT1_RXRDY | STAT1_TXRQ);
@@ -268,7 +289,12 @@ static void tmio_send_command(N3DSTmioState *s, uint16_t cmd)
         if (s->blocks_left == 0) {
             s->blocks_left = 1;
         }
-        s->blk_len = R16(s, REG_BLKLEN);
+        /* In 32-bit FIFO mode the block length comes from SDBLKLEN32 */
+        if (R16(s, REG_DATACTL32) & DATACTL32_32BIT) {
+            s->blk_len = R16(s, REG_BLKLEN32);
+        } else {
+            s->blk_len = R16(s, REG_BLKLEN);
+        }
         if (s->blk_len == 0 || s->blk_len > FIFO_MAX) {
             s->blk_len = 512;
         }
@@ -301,7 +327,8 @@ static uint32_t tmio_fifo_read(N3DSTmioState *s, unsigned width)
     if (s->fifo_pos >= s->blk_len) {
         tmio_clear_status(s, 0, STAT1_RXRDY);
         if (--s->blocks_left == 0) {
-            tmio_xfer_end(s);
+            s->xfer = XFER_NONE;
+            s->fifo_pos = 0;
         } else {
             tmio_load_block(s);
         }
@@ -497,6 +524,7 @@ static void n3ds_tmio_reset(DeviceState *dev)
 
     memset(s->regs, 0, sizeof(s->regs));
     s->xfer = XFER_NONE;
+    s->data_done = false;
     s->fifo_pos = 0;
     s->blocks_left = 0;
     s->blk_len = 512;

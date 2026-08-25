@@ -117,16 +117,32 @@ static const uint32_t boot11_stub[] = {
     0x17e00100, 0x1fffffdc,
 };
 
-/* boot9 stub: hanging exception vectors, `bx lr` at the two cache
- * maintenance entry points Luma3DS calls (0x830, 0xAB4). */
+/*
+ * boot9 stub: like the real boot ROM, the exception vectors branch to
+ * 8-byte slots in ARM9 WRAM where firmware (Kernel9, arm9linuxfw, ...)
+ * installs `ldr pc, [pc, #-4]; .word handler` pairs, in the boot ROM's
+ * order: IRQ 0x08000000, FIQ 0x08000008, SVC 0x08000010,
+ * UNDEF 0x08000018, PABT 0x08000020, DABT 0x08000028. The reset vector
+ * hangs. `bx lr` sits at the two cache maintenance entry points Luma3DS
+ * calls (0x830, 0xAB4).
+ */
 #define BOOT9_STUB_SIZE 0xB00
 static void n3ds_make_boot9(uint8_t *buf)
 {
+    static const uint32_t slot[8] = {
+        [1] = 0x08000018, [2] = 0x08000010, [3] = 0x08000020,
+        [4] = 0x08000028, [6] = 0x08000000, [7] = 0x08000008,
+    };
     int i;
 
     memset(buf, 0, BOOT9_STUB_SIZE);
     for (i = 0; i < 8; i++) {
-        stl_le_p(buf + 4 * i, 0xeafffffe);       /* b . */
+        if (slot[i]) {
+            stl_le_p(buf + 4 * i, 0xe59ff018);   /* ldr pc, [pc, #0x18] */
+            stl_le_p(buf + 0x20 + 4 * i, slot[i]);
+        } else {
+            stl_le_p(buf + 4 * i, 0xeafffffe);   /* b . */
+        }
     }
     stl_le_p(buf + 0x830, 0xe12fff1e);           /* bx lr */
     stl_le_p(buf + 0xab4, 0xe12fff1e);           /* bx lr */
@@ -540,14 +556,19 @@ static void n3ds_init(MachineState *machine)
 
     /* ---- SPI buses, GPIO, WiFi SDIO host ---- */
     {
-        static const hwaddr spi_bases[3] = {
-            N3DS_SPI2_BASE, N3DS_SPI3_BASE, N3DS_SPI1_BASE
+        static const struct { hwaddr base; int irq; } spi_defs[3] = {
+            { N3DS_SPI2_BASE, 0x57 },   /* spi@10142800: touchscreen/codec */
+            { N3DS_SPI3_BASE, 0x24 },   /* spi@10143800 */
+            { N3DS_SPI1_BASE, 0x56 },   /* spi@10160800: NVRAM */
         };
 
         for (i = 0; i < 3; i++) {
             dev = qdev_new(TYPE_N3DS_SPI);
             sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
-            n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, dev, 0, spi_bases[i]);
+            n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, dev, 0,
+                     spi_defs[i].base);
+            sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                               n3ds_gic_irq(s, spi_defs[i].irq));
         }
     }
     dev = qdev_new(TYPE_N3DS_GPIO);
