@@ -236,14 +236,18 @@ static void pdn_write(void *opaque, hwaddr off, uint64_t v, unsigned size)
         uint16_t new = (old & 0x8000) | (v & 0x7FFF);
 
         if ((old & 7) != (v & 7)) {
-            /* Clock mode change: acknowledge and interrupt. */
+            /*
+             * Clock mode change: set the acknowledge bit and hold the
+             * interrupt until the guest writes the bit back.
+             */
             new |= 0x8000;
             regs_write(s->pdn_regs, PDN_LGR_SOCMODE, new, 2);
-            qemu_irq_pulse(s->socmode_irq);
+            qemu_set_irq(s->socmode_irq, 1);
             return;
         }
         if (v & 0x8000) {
             new &= ~0x8000;
+            qemu_set_irq(s->socmode_irq, 0);
         }
         regs_write(s->pdn_regs, PDN_LGR_SOCMODE, new, 2);
         return;

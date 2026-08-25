@@ -93,24 +93,27 @@ struct N3DSMachineState {
 
     uint32_t arm9_entry;
     uint32_t arm11_entry;
+    bool dtcm_mapped;
 };
 
 #define TYPE_N3DS_MACHINE MACHINE_TYPE_NAME("n3ds")
 OBJECT_DECLARE_SIMPLE_TYPE(N3DSMachineState, N3DS_MACHINE)
 
 /*
- * boot11 stub (see boot11.S in the machine documentation): core 0
- * waits for the Luma ARM11 entry mailbox, cores 1-3 park in WFI until
- * their mailbox at 0x1FFFFFDC is written and an SGI wakes them.
+ * boot11 stub: core 0 enables the GIC distributor (firmware chainloaded
+ * by Luma3DS relies on interrupts being deliverable) and waits for the
+ * Luma ARM11 entry mailbox; cores 1-3 park in WFI until their mailbox at
+ * 0x1FFFFFDC is written and an SGI wakes them.
  */
 static const uint32_t boot11_stub[] = {
     0xea000006, 0xeafffffe, 0xeafffffe, 0xeafffffe,
     0xeafffffe, 0xeafffffe, 0xeafffffe, 0xeafffffe,
-    0xee100fb0, 0xe2000003, 0xe3500000, 0x1a000004,
-    0xe3e0123e, 0xe5912000, 0xe3520000, 0x0afffffc,
-    0xe12fff12, 0xe59f3024, 0xe3a04001, 0xe5834000,
-    0xe3a040f0, 0xe5834004, 0xe59f1014, 0xe320f003,
-    0xe5912000, 0xe3520000, 0x0afffffb, 0xe12fff12,
+    0xee100fb0, 0xe2000003, 0xe3500000, 0x1a000007,
+    0xe59f3044, 0xe3a04001, 0xe5834000, 0xe3e0123e,
+    0xe5912000, 0xe3520000, 0x0afffffc, 0xe12fff12,
+    0xe59f3028, 0xe3a04001, 0xe5834000, 0xe3a040f0,
+    0xe5834004, 0xe59f1018, 0xe320f003, 0xe5912000,
+    0xe3520000, 0x0afffffb, 0xe12fff12, 0x17e01000,
     0x17e00100, 0x1fffffdc,
 };
 
@@ -153,6 +156,35 @@ static qemu_irq n3ds_gic_irq(N3DSMachineState *s, int gic_id)
     return qdev_get_gpio_in(s->mpcore, N3DS_GIC_SPI(gic_id));
 }
 
+/*
+ * ARM946E-S DTCM region register: [31:12] base, [5:1] size code. The
+ * 16 KiB DTCM is mapped at the window base (mirroring inside larger
+ * windows is not modelled). The ITCM window is fixed at 0 on this core.
+ */
+static void n3ds_arm9_map_dtcm(N3DSMachineState *s, uint32_t reg)
+{
+    hwaddr base = reg & 0xFFFFF000u;
+
+    if (s->dtcm_mapped) {
+        memory_region_del_subregion(&s->arm9_mem, &s->dtcm);
+    }
+    memory_region_add_subregion_overlap(&s->arm9_mem, base, &s->dtcm, 2);
+    s->dtcm_mapped = true;
+}
+
+static void n3ds_arm9_tcm_changed(ARMCPU *cpu, int which, uint32_t value,
+                                  void *opaque)
+{
+    N3DSMachineState *s = opaque;
+
+    if (which == 0) {
+        n3ds_arm9_map_dtcm(s, value);
+    }
+}
+
+#define N3DS_ARM9_DTCM_REGION 0xFFF0000Au   /* 16 KiB at 0xFFF00000 (Luma3DS) */
+#define N3DS_ARM9_ITCM_REGION 0x00000024u   /* 128 MiB window at 0 */
+
 static void n3ds_cpu_reset(void *opaque)
 {
     N3DSMachineState *s = opaque;
@@ -178,6 +210,9 @@ static void n3ds_cpu_reset(void *opaque)
         cpu_reset(cs);
         env->cp15.sctlr_ns = N3DS_ARM9_SCTLR;
         env->cp15.sctlr_s = N3DS_ARM9_SCTLR;
+        env->cp15.pmsav5_tcm[0] = N3DS_ARM9_DTCM_REGION;
+        env->cp15.pmsav5_tcm[1] = N3DS_ARM9_ITCM_REGION;
+        n3ds_arm9_map_dtcm(s, N3DS_ARM9_DTCM_REGION);
         if (s->arm9_entry) {
             env->regs[0] = 2;
             env->regs[1] = N3DS_BOOTARGS_ARGV;
@@ -304,6 +339,8 @@ static void n3ds_init(MachineState *machine)
                             ARM_CPU_TYPE_NAME("arm946"));
     object_property_set_link(OBJECT(&s->arm9), "memory", OBJECT(&s->arm9_mem),
                              &error_abort);
+    s->arm9.tcm_region_changed = n3ds_arm9_tcm_changed;
+    s->arm9.tcm_region_opaque = s;
     qdev_realize(DEVICE(&s->arm9), NULL, &error_fatal);
     qdev_realize(DEVICE(cluster), NULL, &error_fatal);
 
@@ -370,7 +407,7 @@ static void n3ds_init(MachineState *machine)
                                 &s->arm9_wram_ext);
     memory_region_init_ram(&s->dtcm, NULL, "n3ds.dtcm", N3DS_DTCM_SIZE,
                            &error_fatal);
-    memory_region_add_subregion(&s->arm9_mem, N3DS_DTCM_BASE, &s->dtcm);
+    n3ds_arm9_map_dtcm(s, N3DS_ARM9_DTCM_REGION);
     memory_region_init_rom(&s->boot9, NULL, "n3ds.boot9", N3DS_BOOTROM_SIZE,
                            &error_fatal);
     memory_region_add_subregion(&s->arm9_mem, N3DS_BOOTROM_BASE, &s->boot9);
