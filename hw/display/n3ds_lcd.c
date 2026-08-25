@@ -19,6 +19,8 @@
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
+#include "hw/core/irq.h"
 #include "ui/console.h"
 #include "ui/surface.h"
 #include "system/address-spaces.h"
@@ -42,6 +44,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(N3DSLcdState, N3DS_LCD)
 #define PDC_STRIDE      0x90
 #define PDC_FB_B0       0x94
 #define PDC_FB_B1       0x98
+#define PDC_CNT         0x74      /* bit0 enable, bit9 VBlank IRQ mask (0 = enabled) */
+#define PDC_STAT        0x7C      /* bit17 VBlank IRQ status */
+#define PDC_CNT_ENABLE  (1u << 0)
+#define PDC_CNT_VB_MASK (1u << 9)
+#define VBLANK_PERIOD_NS (NANOSECONDS_PER_SECOND / 60)
+
 
 #define TOP_WIDTH       400
 #define BOT_WIDTH       320
@@ -58,6 +66,8 @@ struct N3DSLcdState {
 
     uint32_t lcd_regs[0x1000 / 4];
     uint32_t gpu_regs[GPU_EXT_SIZE / 4];
+    QEMUTimer *vblank_timer;
+    qemu_irq pdc_irq[2];      /* PDC0 / PDC1 VBlank (GIC 0x2A / 0x2B) */
     uint8_t linebuf[TOP_WIDTH * 4 * SCREEN_HEIGHT];
 };
 
@@ -110,6 +120,26 @@ static void psc_fill(N3DSLcdState *s, unsigned base)
     r[3] = (r[3] & ~1u) | 2;  /* done */
 }
 
+static void n3ds_lcd_vblank(void *opaque)
+{
+    N3DSLcdState *s = opaque;
+    int i;
+
+    for (i = 0; i < 2; i++) {
+        uint32_t base = i ? PDC1_BASE : PDC0_BASE;
+        uint32_t cnt = s->gpu_regs[(base + PDC_CNT) >> 2];
+
+        if (cnt & PDC_CNT_ENABLE) {
+            s->gpu_regs[(base + PDC_STAT) >> 2] |= 1u << 17;
+            if (!(cnt & PDC_CNT_VB_MASK)) {
+                qemu_irq_pulse(s->pdc_irq[i]);   /* edge-triggered line */
+            }
+        }
+    }
+    timer_mod(s->vblank_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VBLANK_PERIOD_NS);
+}
+
 static uint64_t gpu_read(void *opaque, hwaddr off, unsigned size)
 {
     N3DSLcdState *s = opaque;
@@ -120,6 +150,10 @@ static void gpu_write(void *opaque, hwaddr off, uint64_t v, unsigned size)
 {
     N3DSLcdState *s = opaque;
 
+    if ((off & 0xFF) == PDC_STAT && (off >= PDC0_BASE && off < PDC1_BASE + PDC_SIZE)) {
+        s->gpu_regs[off >> 2] &= ~(uint32_t)v;      /* write 1 to acknowledge */
+        return;
+    }
     s->gpu_regs[off >> 2] = v;
     if ((off == PSC0_BASE + 0xC || off == PSC1_BASE + 0xC) && (v & 1)) {
         psc_fill(s, off - 0xC);
@@ -228,6 +262,8 @@ static void n3ds_lcd_reset(DeviceState *dev)
     memset(s->lcd_regs, 0, sizeof(s->lcd_regs));
     memset(s->gpu_regs, 0, sizeof(s->gpu_regs));
     /* Framebuffer setup as left behind by the Luma3DS chainloader. */
+    timer_mod(s->vblank_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VBLANK_PERIOD_NS);
     s->gpu_regs[(PDC0_BASE + PDC_FB_A0) >> 2] = 0x18300000;
     s->gpu_regs[(PDC0_BASE + PDC_FB_A1) >> 2] = 0x18400000;
     s->gpu_regs[(PDC0_BASE + PDC_FB_B0) >> 2] = 0x18300000;
@@ -258,6 +294,9 @@ static void n3ds_lcd_init(Object *obj)
                           GPU_EXT_SIZE);
     sysbus_init_mmio(sbd, &s->lcd_iomem);
     sysbus_init_mmio(sbd, &s->gpu_iomem);
+    sysbus_init_irq(sbd, &s->pdc_irq[0]);
+    sysbus_init_irq(sbd, &s->pdc_irq[1]);
+    s->vblank_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, n3ds_lcd_vblank, s);
 }
 
 static void n3ds_lcd_class_init(ObjectClass *klass, const void *data)

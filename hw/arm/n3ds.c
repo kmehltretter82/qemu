@@ -569,6 +569,8 @@ static void n3ds_init(MachineState *machine)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(s->lcd), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->lcd), 0, N3DS_LCD_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->lcd), 1, N3DS_GPU_BASE);
+    sysbus_connect_irq(SYS_BUS_DEVICE(s->lcd), 0, n3ds_gic_irq(s, 0x2A));
+    sysbus_connect_irq(SYS_BUS_DEVICE(s->lcd), 1, n3ds_gic_irq(s, 0x2B));
 
     /* ---- everything else logs as unimplemented ---- */
     n3ds_unimp(&s->arm9_mem, "n3ds.io9", N3DS_IO9_BASE, 0x100000, -10);
