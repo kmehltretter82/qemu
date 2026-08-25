@@ -21,6 +21,7 @@
 #include "qemu/module.h"
 #include "hw/misc/n3ds.h"
 #include "qom/object.h"
+#include "trace.h"
 
 OBJECT_DECLARE_SIMPLE_TYPE(N3DSTmioState, N3DS_TMIO)
 
@@ -166,6 +167,7 @@ static void tmio_xfer_end(N3DSTmioState *s)
     s->blocks_left = 0;
     tmio_clear_status(s, 0, STAT1_RXRDY | STAT1_TXRQ);
     tmio_set_status(s, STAT0_DATAEND, 0);
+    trace_n3ds_tmio_xfer_end();
 }
 
 static void tmio_load_block(N3DSTmioState *s)
@@ -234,6 +236,8 @@ static void tmio_send_command(N3DSTmioState *s, uint16_t cmd)
     tmio_set_status(s, 0, STAT1_CMD_BUSY);
 
     if (!bus || !sdbus_get_inserted(bus)) {
+        trace_n3ds_tmio_cmd_timeout(R16(s, REG_PORTSEL) & 3, CMD_INDEX(cmd),
+                                    bus ? "no card" : "bad port");
         tmio_clear_status(s, 0, STAT1_CMD_BUSY);
         tmio_set_status(s, 0, STAT1_CMDTIMEOUT);
         tmio_update_irq(s);
@@ -245,7 +249,11 @@ static void tmio_send_command(N3DSTmioState *s, uint16_t cmd)
     req.crc = 0;
     rlen = sdbus_do_command(bus, &req, resp, sizeof(resp));
 
+    trace_n3ds_tmio_cmd(R16(s, REG_PORTSEL) & 3, cmd, req.cmd, req.arg, rlen,
+                        rlen >= 4 ? ldl_be_p(resp) : 0);
     if (resp_type != 0 && rlen == 0) {
+        trace_n3ds_tmio_cmd_timeout(R16(s, REG_PORTSEL) & 3, req.cmd,
+                                    "no response");
         tmio_clear_status(s, 0, STAT1_CMD_BUSY);
         tmio_set_status(s, 0, STAT1_CMDTIMEOUT);
         tmio_update_irq(s);
@@ -264,6 +272,8 @@ static void tmio_send_command(N3DSTmioState *s, uint16_t cmd)
         if (s->blk_len == 0 || s->blk_len > FIFO_MAX) {
             s->blk_len = 512;
         }
+        trace_n3ds_tmio_xfer((cmd & CMD_READ) ? "read" : "write",
+                             s->blocks_left, s->blk_len);
         if (cmd & CMD_READ) {
             s->xfer = XFER_READ;
             tmio_load_block(s);
@@ -381,6 +391,9 @@ static uint64_t tmio_read(void *opaque, hwaddr off, unsigned size)
 
 static void tmio_write16(N3DSTmioState *s, hwaddr off, uint16_t v)
 {
+    if (off != REG_FIFO16) {
+        trace_n3ds_tmio_reg_write(off, v);
+    }
     switch (off) {
     case REG_CMD:
         tmio_send_command(s, v);

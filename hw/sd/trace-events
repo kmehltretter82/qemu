@@ -75,3 +75,10 @@ pl181_data_engine_idle(void) "data engine idle"
 # aspeed_sdhci.c
 aspeed_sdhci_read(uint64_t addr, uint32_t size, uint64_t data) "@0x%" PRIx64 " size %u: 0x%" PRIx64
 aspeed_sdhci_write(uint64_t addr, uint32_t size, uint64_t data) "@0x%" PRIx64 " size %u: 0x%" PRIx64
+
+# n3ds_tmio.c
+n3ds_tmio_cmd(unsigned port, unsigned cmd, unsigned idx, uint32_t arg, size_t rlen, uint32_t r0) "port %u cmd 0x%04x idx %u arg 0x%08x rlen %zu resp0 0x%08x"
+n3ds_tmio_cmd_timeout(unsigned port, unsigned idx, const char *why) "port %u idx %u: %s"
+n3ds_tmio_xfer(const char *dir, uint32_t blocks, uint32_t blklen) "%s blocks %u blklen %u"
+n3ds_tmio_xfer_end(void) "data end"
+n3ds_tmio_reg_write(uint32_t off, uint32_t val) "reg 0x%03x <- 0x%04x"
