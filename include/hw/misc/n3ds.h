@@ -19,6 +19,8 @@
 #define TYPE_N3DS_PXI    "n3ds-pxi"
 #define TYPE_N3DS_IRQ    "n3ds-irq"
 #define TYPE_N3DS_TIMER  "n3ds-timer"
+#define TYPE_N3DS_SPI    "n3ds-spi"
+#define TYPE_N3DS_GPIO   "n3ds-gpio"
 
 /* Physical memory map (both CPUs unless noted) */
 #define N3DS_ITCM_BASE        0x00000000  /* ARM9, 32K mirrored */

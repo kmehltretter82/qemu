@@ -538,6 +538,29 @@ static void n3ds_init(MachineState *machine)
     i2cbus = I2C_BUS(qdev_get_child_bus(s->i2c[1], "i2c"));
     i2c_slave_create_simple(i2cbus, TYPE_N3DS_MCU, 0x25);
 
+    /* ---- SPI buses, GPIO, WiFi SDIO host ---- */
+    {
+        static const hwaddr spi_bases[3] = {
+            N3DS_SPI2_BASE, N3DS_SPI3_BASE, N3DS_SPI1_BASE
+        };
+
+        for (i = 0; i < 3; i++) {
+            dev = qdev_new(TYPE_N3DS_SPI);
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+            n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, dev, 0, spi_bases[i]);
+        }
+    }
+    dev = qdev_new(TYPE_N3DS_GPIO);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, dev, 0, N3DS_GPIO_BASE);
+
+    dev = qdev_new(TYPE_N3DS_TMIO);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, dev, 0, N3DS_WIFI_BASE);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, n3ds_gic_irq(s, N3DS_GIC_SDIO3));
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1,
+                       n3ds_gic_irq(s, N3DS_GIC_SDIO3_ASYNC));
+
     /* ---- HID, LCD/GPU ---- */
     s->hid = qdev_new(TYPE_N3DS_HID);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(s->hid), &error_fatal);

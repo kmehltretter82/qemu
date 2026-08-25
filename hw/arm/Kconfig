@@ -162,6 +162,8 @@ config N3DS
     select N3DS_PXI
     select N3DS_IRQ
     select N3DS_TIMER
+    select N3DS_SPI
+    select N3DS_GPIO
 
 config REALVIEW
     bool
