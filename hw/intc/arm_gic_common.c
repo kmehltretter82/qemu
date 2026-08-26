@@ -285,18 +285,6 @@ static void arm_gic_common_reset_hold(Object *obj, ResetType type)
     memset(s->irq_state, 0, GIC_MAXIRQ * sizeof(gic_irq_state));
     arm_gic_common_reset_irq_state(s, 0, resetprio);
 
-    if (s->revision == REV_11MPCORE) {
-        /*
-         * The ARM11 MPCore distributor's interrupt configuration registers
-         * reset to all-ones (every interrupt edge-triggered, 1-N model);
-         * measured on a New 2DS XL, where they are also writable.
-         */
-        for (i = GIC_NR_SGIS; i < s->num_irq; i++) {
-            GIC_DIST_SET_EDGE_TRIGGER(i);
-            GIC_DIST_SET_MODEL(i);
-        }
-    }
-
     if (s->virt_extn) {
         /* vCPU states are stored at indexes GIC_NCPU .. GIC_NCPU+num_cpu.
          * The exposed vCPU interface does not have security extensions.
