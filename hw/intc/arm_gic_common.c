@@ -285,6 +285,23 @@ static void arm_gic_common_reset_hold(Object *obj, ResetType type)
     memset(s->irq_state, 0, GIC_MAXIRQ * sizeof(gic_irq_state));
     arm_gic_common_reset_irq_state(s, 0, resetprio);
 
+    if (s->revision == REV_11MPCORE) {
+        /*
+         * The ARM11 MPCore distributor resets its shared-peripheral
+         * configuration to edge-triggered, 1-N: GICD_ICFGR reads all ones
+         * for the SPI range and is writable (measured on a New 2DS XL,
+         * n3ds-probes gic_icfgr).
+         *
+         * Only SPIs - the probe read the SPI registers, and the private
+         * interrupts must keep their architectural configuration or the
+         * per-CPU timer stops delivering.
+         */
+        for (i = GIC_INTERNAL; i < s->num_irq; i++) {
+            GIC_DIST_SET_EDGE_TRIGGER(i);
+            GIC_DIST_SET_MODEL(i);
+        }
+    }
+
     if (s->virt_extn) {
         /* vCPU states are stored at indexes GIC_NCPU .. GIC_NCPU+num_cpu.
          * The exposed vCPU interface does not have security extensions.
