@@ -163,16 +163,19 @@ static void sha_compress(N3DSShaState *s, const uint8_t *block)
     }
 }
 
-static void sha_push_bytes(N3DSShaState *s, const uint8_t *p, int n)
+static void sha_push_bytes(N3DSShaState *s, const uint8_t *p, int n, bool visible)
 {
     while (n--) {
         s->buf[s->buf_len++] = *p++;
         s->total++;
         if (s->buf_len == 64) {
             sha_compress(s, s->buf);
-            memcpy(s->rfifo, s->buf, 64);
-            s->rfifo_len = 64;
-            s->rfifo_pos = 0;
+            if (visible) {
+                /* completed input block can be read back through the FIFO */
+                memcpy(s->rfifo, s->buf, 64);
+                s->rfifo_len = 64;
+                s->rfifo_pos = 0;
+            }
             s->buf_len = 0;
         }
     }
@@ -188,7 +191,7 @@ static void sha_final(N3DSShaState *s)
     /* push without counting towards the message length */
     {
         uint64_t saved = s->total;
-        sha_push_bytes(s, pad, padlen + 8);
+        sha_push_bytes(s, pad, padlen + 8, false);
         s->total = saved;
     }
 }
@@ -244,7 +247,7 @@ static void n3ds_sha_write(void *opaque, hwaddr off, uint64_t val,
         uint8_t b[4];
 
         stl_le_p(b, v);
-        sha_push_bytes(s, b, size);
+        sha_push_bytes(s, b, size, true);
         return;
     }
     if (off >= REG_HASH && off < REG_HASH + 32) {

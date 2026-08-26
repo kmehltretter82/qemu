@@ -157,6 +157,7 @@ static void pxi_write(N3DSPxiState *s, int idx, hwaddr off, uint64_t v,
                       unsigned size)
 {
     N3DSPxiSide *me = &s->side[idx];
+    uint8_t old_sync = me->sync_out;
     N3DSPxiSide *other = &s->side[1 - idx];
     unsigned shift = 8 * (off & 3);
     uint32_t mask = (size == 4 ? 0xFFFFFFFF : size == 2 ? 0xFFFF : 0xFF) << shift;
@@ -179,7 +180,14 @@ static void pxi_write(N3DSPxiState *s, int idx, hwaddr off, uint64_t v,
          * otherwise run on and overwrite the byte before the other core
          * ever polls it. Give the other vCPUs a turn right away.
          */
-        if (current_cpu) {
+        /*
+         * Only the boot ROMs need this: they hand-shake through the sync
+         * bytes with tight poll loops on both CPUs, and under round-robin
+         * TCG the writer would run on before the other core ever polls.
+         * Firmware booted the Luma way uses interrupts and must not pay
+         * the round-trip cost.
+         */
+        if (current_cpu && !s->luma_state && old_sync != me->sync_out) {
             cpu_exit(current_cpu);
         }
         break;

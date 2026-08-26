@@ -109,7 +109,8 @@ struct N3DSTmioState {
 
     int xfer;
     bool xfer_multi;
-    bool data_done;         /* card side of the transfer complete */
+    bool data_done;
+    bool data32_irq;   /* guest uses the DATA32 FIFO interrupts */         /* card side of the transfer complete */
     uint32_t blocks_left;
     uint32_t blk_len;
     uint32_t fifo_pos;
@@ -146,7 +147,7 @@ static void tmio_update_irq(N3DSTmioState *s)
     bool rx = (d32 & DATACTL32_RXRDY) && (d32 & DATACTL32_RX_IRQEN);
     bool tx = !(d32 & DATACTL32_TXBUSY) && (d32 & DATACTL32_TX_IRQEN);
 
-    qemu_set_irq(s->irq, (st0 | st1) != 0 || rx || tx);
+    qemu_set_irq(s->irq, (st0 | st1) != 0 || ((rx || tx) && s->data32_irq));
 }
 
 static void tmio_set_status(N3DSTmioState *s, uint16_t st0, uint16_t st1)
@@ -501,6 +502,7 @@ static void tmio_write16(N3DSTmioState *s, hwaddr off, uint16_t v)
         return;
     case REG_DATACTL32:
         W16(s, REG_DATACTL32, v & ~DATACTL32_LIVE_MASK);
+        s->data32_irq = (v & (DATACTL32_RX_IRQEN | DATACTL32_TX_IRQEN)) != 0;
         return;
     case REG_RESP0 ... REG_RESP0 + 14:
         return;
