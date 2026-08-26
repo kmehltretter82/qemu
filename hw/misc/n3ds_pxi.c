@@ -116,18 +116,17 @@ static uint64_t pxi_read(N3DSPxiState *s, int idx, hwaddr off, unsigned size)
     switch (off) {
     case REG_SYNC:
         /*
-         * Bits 7-0 are the byte received from the other side, bits 15-8 the
-         * byte we sent, which reads back: boot9 does a read-modify-write on
-         * this register (0xffff172c) and would otherwise clear its own sync
-         * byte, hanging boot11's wait for it.
+         * Only the byte received from the other side is readable; the send
+         * field is write-only and reads as zero. Measured on a New 2DS XL
+         * three ways - byte, halfword and 32-bit stores of a marker into
+         * bits 15-8 all leave SYNC unchanged (n3ds-probes pxi11_sync /
+         * pxi11_sync32).
          *
-         * The round-4 probe wrote 0x5a to the send byte through a *byte*
-         * store at +1 and saw no change, which looked like a write-only
-         * field - but a byte store evidently does not reach the latch. Left
-         * as a question for a probe that uses a 32-bit write.
+         * boot9 does a read-modify-write of this register at 0xffff172c and
+         * therefore writes its own send byte back as zero. That is harmless:
+         * by then boot11 has already consumed the value it was waiting for.
          */
-        v = other->sync_out | (me->sync_out << 8) |
-            (me->sync_irqen ? SYNC_IRQEN : 0);
+        v = other->sync_out | (me->sync_irqen ? SYNC_IRQEN : 0);
         break;
     case REG_CNT:
         v = me->cnt & (CNT_RW_MASK | CNT_ERROR);
