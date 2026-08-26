@@ -145,7 +145,8 @@ static void tmio_update_irq(N3DSTmioState *s)
     uint16_t st1 = R16(s, REG_STATUS1) & ~R16(s, REG_IRMASK1);
     uint16_t d32 = tmio_datactl32(s);
     bool rx = (d32 & DATACTL32_RXRDY) && (d32 & DATACTL32_RX_IRQEN);
-    bool tx = !(d32 & DATACTL32_TXRQ) && (d32 & DATACTL32_TX_IRQEN);
+    bool tx = s->xfer == XFER_WRITE && !(d32 & DATACTL32_TXRQ) &&
+              (d32 & DATACTL32_TX_IRQEN);
 
     qemu_set_irq(s->irq, (st0 | st1) != 0 || ((rx || tx) && s->data32_irq));
 }
@@ -407,16 +408,14 @@ static uint16_t tmio_datactl32(N3DSTmioState *s)
      * data - otherwise the driver writes into a transfer that has not been
      * set up yet.
      *
-     * Note this differs from the console at idle, where both flags read as
-     * zero (DATA32 = 0x0002, n3ds-probes io_sdmmc32/sdmmc32_bits). Matching
-     * that exactly needs the driver-visible handshake to be driven by the
-     * transfer state rather than by this register; recorded in
-     * golden/FINDINGS-round4.md as a known difference.
+     * Both therefore read as zero when no transfer is running, which is
+     * what the console reports (DATA32 = 0x0002, just the 32-bit mode bit;
+     * n3ds-probes io_sdmmc32 / sdmmc32_bits).
      */
     if (s->xfer == XFER_READ && s->fifo_pos == 0) {
         v |= DATACTL32_RXRDY;
     }
-    if (s->xfer != XFER_WRITE || s->fifo_pos != 0) {
+    if (s->xfer == XFER_WRITE && s->fifo_pos != 0) {
         v |= DATACTL32_TXRQ;
     }
     return v;
@@ -583,6 +582,13 @@ static void n3ds_tmio_reset(DeviceState *dev)
     s->blk_len = 512;
     W16(s, REG_BLKLEN, 512);
     W16(s, REG_BLKLEN32, 512);
+    /*
+     * State Luma3DS leaves behind on the console (n3ds-probes io_sdmmc32):
+     * 32-bit FIFO mode selected, one block, data control 0x1012.
+     */
+    W16(s, REG_DATACTL32, DATACTL32_32BIT);
+    W16(s, REG_BLKCOUNT32, 1);
+    W16(s, REG_DATACTL, 0x1012);
     W16(s, REG_IRMASK0, 0x031D);
     W16(s, REG_IRMASK1, 0x837F);
     W16(s, REG_PROTECTED, 0);
