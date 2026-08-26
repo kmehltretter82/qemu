@@ -72,9 +72,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(N3DSTmioState, N3DS_TMIO)
 #define STAT1_ILL_ACCESS    0x8000
 
 #define DATACTL32_32BIT     0x0002
-#define DATACTL32_RXRDY     0x0100
-#define DATACTL32_TXBUSY    0x0200
-#define DATACTL32_LIVE_MASK (DATACTL32_RXRDY | DATACTL32_TXBUSY)
+#define DATACTL32_RXRDY     0x0100   /* FIFO32 holds a full block (IRQ flag) */
+#define DATACTL32_TXBUSY    0x0200   /* 0 = FIFO32 empty (TX request flag) */
+#define DATACTL32_CLEAR     0x0400
+#define DATACTL32_RX_IRQEN  0x0800
+#define DATACTL32_TX_IRQEN  0x1000
+#define DATACTL32_LIVE_MASK (DATACTL32_RXRDY | DATACTL32_TXBUSY | DATACTL32_CLEAR)
 
 #define CMD_INDEX(c)    ((c) & 0x3F)
 #define CMD_RESP(c)     (((c) >> 8) & 7)
@@ -133,12 +136,17 @@ static SDBus *tmio_bus(N3DSTmioState *s)
     return &s->sdbus[port];
 }
 
+static uint16_t tmio_datactl32(N3DSTmioState *s);
+
 static void tmio_update_irq(N3DSTmioState *s)
 {
     uint16_t st0 = R16(s, REG_STATUS0) & ~R16(s, REG_IRMASK0);
     uint16_t st1 = R16(s, REG_STATUS1) & ~R16(s, REG_IRMASK1);
+    uint16_t d32 = tmio_datactl32(s);
+    bool rx = (d32 & DATACTL32_RXRDY) && (d32 & DATACTL32_RX_IRQEN);
+    bool tx = !(d32 & DATACTL32_TXBUSY) && (d32 & DATACTL32_TX_IRQEN);
 
-    qemu_set_irq(s->irq, (st0 | st1) != 0);
+    qemu_set_irq(s->irq, (st0 | st1) != 0 || rx || tx);
 }
 
 static void tmio_set_status(N3DSTmioState *s, uint16_t st0, uint16_t st1)
@@ -199,7 +207,7 @@ static void tmio_load_block(N3DSTmioState *s)
     s->fifo_pos = 0;
     tmio_set_status(s, 0, STAT1_RXRDY);
     if (s->blocks_left <= 1) {
-        tmio_data_done(s);
+        tmio_data_done(s);      /* last block received from the card */
     }
 }
 
@@ -272,7 +280,12 @@ static void tmio_send_command(N3DSTmioState *s, uint16_t cmd)
 
     trace_n3ds_tmio_cmd(R16(s, REG_PORTSEL) & 3, cmd, req.cmd, req.arg, rlen,
                         rlen >= 4 ? ldl_be_p(resp) : 0);
-    if (resp_type != 0 && rlen == 0) {
+    /*
+     * Response type 0 = automatic (by command index: only CMD0 has no
+     * response), 3 = none. Anything else with no reply from the card is a
+     * response timeout (boot9 relies on it to tell SD from eMMC).
+     */
+    if (rlen == 0 && (resp_type == 0 ? req.cmd != 0 : resp_type != 3)) {
         trace_n3ds_tmio_cmd_timeout(R16(s, REG_PORTSEL) & 3, req.cmd,
                                     "no response");
         tmio_clear_status(s, 0, STAT1_CMD_BUSY);
@@ -283,6 +296,20 @@ static void tmio_send_command(N3DSTmioState *s, uint16_t cmd)
     tmio_set_response(s, resp, rlen);
     tmio_set_status(s, STAT0_CMDRESPEND, 0);
 
+    /*
+     * Response type 0 (automatic) also implies the data transfer mode from
+     * the command index (boot9 sends plain CMD18 and expects a multi-block
+     * read to start).
+     */
+    if (resp_type == 0) {
+        switch (req.cmd) {
+        case 17: cmd |= CMD_DATA | CMD_READ; break;
+        case 18: cmd |= CMD_DATA | CMD_READ | CMD_MULTI; break;
+        case 24: cmd |= CMD_DATA; break;
+        case 25: cmd |= CMD_DATA | CMD_MULTI; break;
+        default: break;
+        }
+    }
     if (cmd & CMD_DATA) {
         s->xfer_multi = (cmd & CMD_MULTI) != 0;
         s->blocks_left = s->xfer_multi ? R16(s, REG_BLKCOUNT) : 1;
@@ -324,6 +351,7 @@ static uint32_t tmio_fifo_read(N3DSTmioState *s, unsigned width)
     for (i = 0; i < width && s->fifo_pos < s->blk_len; i++) {
         v |= (uint32_t)s->fifo[s->fifo_pos++] << (8 * i);
     }
+    tmio_update_irq(s);
     if (s->fifo_pos >= s->blk_len) {
         tmio_clear_status(s, 0, STAT1_RXRDY);
         if (--s->blocks_left == 0) {
@@ -371,10 +399,12 @@ static uint16_t tmio_datactl32(N3DSTmioState *s)
 {
     uint16_t v = R16(s, REG_DATACTL32) & ~DATACTL32_LIVE_MASK;
 
-    if (s->xfer == XFER_READ) {
+    /* RX32RDY: a full block sits in the FIFO and nothing was read yet */
+    if (s->xfer == XFER_READ && s->fifo_pos == 0) {
         v |= DATACTL32_RXRDY;
     }
-    if (s->xfer != XFER_WRITE) {
+    /* TX32RQ (bit 9 low) only while a write transfer waits for data */
+    if (s->xfer != XFER_WRITE || s->fifo_pos != 0) {
         v |= DATACTL32_TXBUSY;
     }
     return v;
@@ -394,7 +424,7 @@ static uint64_t tmio_read16(N3DSTmioState *s, hwaddr off)
     }
 }
 
-static uint64_t tmio_read(void *opaque, hwaddr off, unsigned size)
+static uint64_t tmio_read_inner(void *opaque, hwaddr off, unsigned size)
 {
     N3DSTmioState *s = opaque;
 
@@ -441,6 +471,7 @@ static void tmio_write16(N3DSTmioState *s, hwaddr off, uint16_t v)
         return;
     case REG_STOP:
         W16(s, REG_STOP, v);
+        trace_n3ds_tmio_stop(v, s->xfer, s->xfer_multi);
         if ((v & STOP_MANUAL) && s->xfer != XFER_NONE) {
             SDBus *bus = tmio_bus(s);
 
@@ -506,6 +537,15 @@ static void tmio_write(void *opaque, hwaddr off, uint64_t v, unsigned size)
         unsigned shift = 8 * (off & 1);
         tmio_write16(s, off & ~1, (old & ~(0xFF << shift)) | ((v & 0xFF) << shift));
     }
+}
+
+
+static uint64_t tmio_read(void *opaque, hwaddr off, unsigned size)
+{
+    uint64_t v = tmio_read_inner(opaque, off, size);
+
+    trace_n3ds_tmio_reg_read((uint32_t)off, (uint32_t)v, size);
+    return v;
 }
 
 static const MemoryRegionOps tmio_ops = {

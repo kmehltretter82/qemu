@@ -20,6 +20,7 @@
 #include "qemu/log.h"
 #include "crypto/aes.h"
 #include "hw/misc/n3ds.h"
+#include "trace.h"
 
 #define TYPE_N3DS_AES "n3ds-aes"
 OBJECT_DECLARE_SIMPLE_TYPE(N3DSAesState, N3DS_AES)
@@ -297,6 +298,7 @@ static void aes_write_keyfifo(N3DSAesState *s, int which, uint32_t value)
         return;
     }
     s->keyfifo_ctr[which] = 0;
+    trace_n3ds_aes_keyfifo(which, slot, s->keycnt);
     switch (which) {
     case 0:
         memcpy(s->key[slot].normal, s->keyfifo[0], 16);
@@ -329,8 +331,11 @@ static uint64_t n3ds_aes_read(void *opaque, hwaddr off, unsigned size)
     case REG_BLKCNT:
         v = s->mac_blkcnt | ((uint32_t)s->blkcnt << 16);
         break;
-    case REG_RDFIFO:
-        return aes_read_fifo(s);
+    case REG_RDFIFO: {
+        uint32_t r = aes_read_fifo(s);
+        trace_n3ds_aes_rdfifo(r);
+        return r;
+    }
     case REG_KEYSEL:
         v = s->keysel | ((uint32_t)s->keycnt << 8);
         break;
@@ -346,6 +351,8 @@ static void n3ds_aes_write(void *opaque, hwaddr off, uint64_t val,
 {
     N3DSAesState *s = opaque;
     uint32_t v = val;
+
+    trace_n3ds_aes_write((uint32_t)off, v, size);
 
     if (off >= REG_CTR && off < REG_CTR + 16) {
         aes_input_word(s, s->ctr, 3 - ((off - REG_CTR) / 4), v, true);
@@ -390,6 +397,9 @@ static void n3ds_aes_write(void *opaque, hwaddr off, uint64_t val,
         if (v & CNT_KEY_UPDATE) {
             aes_select_key(s);
         }
+        if (v & CNT_START) {
+            trace_n3ds_aes_start((v >> CNT_MODE_SHIFT) & 7, s->keysel, s->blkcnt, v);
+        }
         aes_process(s);
         break;
     case REG_BLKCNT:
@@ -404,6 +414,7 @@ static void n3ds_aes_write(void *opaque, hwaddr off, uint64_t val,
         s->blkcnt = v & 0xFFFF;
         break;
     case REG_WRFIFO:
+        trace_n3ds_aes_wrfifo(v);
         aes_write_fifo(s, v);
         break;
     case REG_KEYSEL:

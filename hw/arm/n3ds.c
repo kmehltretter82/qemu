@@ -59,6 +59,10 @@ struct N3DSMachineState {
 
     CPUClusterState arm11_cluster;
     CPUClusterState arm9_cluster;
+    char *boot9_path;            /* real boot ROM images instead of the stubs */
+    char *boot11_path;
+    char *otp_path;
+    char *nand_cid;              /* 16 bytes hex as the console reads them */
     ARMCPU arm11[N3DS_NUM_ARM11];
     ARMCPU arm9;
 
@@ -72,6 +76,12 @@ struct N3DSMachineState {
     MemoryRegion boot9;
     MemoryRegion boot11;
     MemoryRegion boot11_alias[2];
+    MemoryRegion boot11_lock;        /* protected-half overlays (CFG9_SYSPROT*) */
+    MemoryRegion boot11_lock_alias[3];
+    MemoryRegion boot11_zero;
+    MemoryRegion boot9_lock;
+    MemoryRegion boot9_lock_alias;
+    MemoryRegion boot9_zero;
     MemoryRegion vram;
     MemoryRegion qtm;
     MemoryRegion dsp;
@@ -167,7 +177,7 @@ static void n3ds_cpu_reset(void *opaque)
 
         cpu_reset(cs);
         env->regs[15] = 0;               /* boot11 stub at physical 0 */
-        if (i == 0) {
+        if (i == 0 && !s->boot9_path) {
             /* CP15 state as Luma3DS leaves it (n3ds-probes cp15_entry) */
             env->cp15.sctlr_ns = N3DS_ARM11_SCTLR;
             env->cp15.sctlr_s = N3DS_ARM11_SCTLR;
@@ -268,6 +278,63 @@ static void n3ds_load_firm(N3DSMachineState *s, const char *filename)
                           N3DS_CORE1_ENTRY_MAILBOX, &address_space_memory);
 }
 
+/*
+ * The 3DS DMA-330s are configured with all peripheral requests and
+ * interrupts usable from the non-secure manager/channels (the boot ROMs
+ * issue non-secure DMAGO and DMAFLUSHP on peripheral 0).
+ */
+static void n3ds_pl330_config(DeviceState *dev)
+{
+    qdev_prop_set_uint8(dev, "num_periph_req", 32);
+    qdev_prop_set_uint8(dev, "num_events", 32);
+    qdev_prop_set_uint32(dev, "PNS", 0xFFFFFFFF);
+    qdev_prop_set_uint32(dev, "INS", 0xFFFFFFFF);
+}
+
+/* Load a boot ROM dump (at most 64 KiB) at the given address. */
+static void n3ds_load_rom(const char *path, const char *name, hwaddr addr,
+                          AddressSpace *as)
+{
+    g_autofree char *data = NULL;
+    gsize len = 0;
+    GError *gerr = NULL;
+
+    if (!g_file_get_contents(path, &data, &len, &gerr)) {
+        error_report("n3ds: cannot read %s: %s", path, gerr->message);
+        exit(1);
+    }
+    if (len == 0 || len > N3DS_BOOTROM_SIZE) {
+        error_report("n3ds: %s: bad boot ROM size %zu", path, (size_t)len);
+        exit(1);
+    }
+    rom_add_blob_fixed_as(name, data, len, addr, as);
+}
+
+#define N3DS_PATH_PROP(field)                                              \
+static char *n3ds_get_##field(Object *obj, Error **errp)                   \
+{                                                                          \
+    return g_strdup(N3DS_MACHINE(obj)->field##_path);                      \
+}                                                                          \
+static void n3ds_set_##field(Object *obj, const char *v, Error **errp)     \
+{                                                                          \
+    N3DSMachineState *s = N3DS_MACHINE(obj);                               \
+    g_free(s->field##_path);                                               \
+    s->field##_path = g_strdup(v);                                         \
+}
+N3DS_PATH_PROP(boot9)
+N3DS_PATH_PROP(boot11)
+N3DS_PATH_PROP(otp)
+static char *n3ds_get_nand_cid(Object *obj, Error **errp)
+{
+    return g_strdup(N3DS_MACHINE(obj)->nand_cid);
+}
+static void n3ds_set_nand_cid(Object *obj, const char *v, Error **errp)
+{
+    N3DSMachineState *s = N3DS_MACHINE(obj);
+    g_free(s->nand_cid);
+    s->nand_cid = g_strdup(v);
+}
+
 static void n3ds_init(MachineState *machine)
 {
     N3DSMachineState *s = N3DS_MACHINE(machine);
@@ -362,8 +429,28 @@ static void n3ds_init(MachineState *machine)
     memory_region_init_alias(&s->boot11_alias[1], NULL, "n3ds.boot11.high",
                              &s->boot11, 0, N3DS_BOOTROM_SIZE);
     memory_region_add_subregion(sysmem, N3DS_BOOTROM_BASE, &s->boot11_alias[1]);
-    rom_add_blob_fixed_as("n3ds.boot11-stub", n3ds_boot11_stub, sizeof(n3ds_boot11_stub),
-                          0, &address_space_memory);
+    /* reads-as-zero overlay on the protected upper 32 KiB of boot11 and its mirrors */
+    memory_region_init_rom(&s->boot11_zero, NULL, "n3ds.boot11.locked",
+                           N3DS_BOOTROM_SIZE / 2, &error_fatal);
+    memory_region_init(&s->boot11_lock, OBJECT(machine), "n3ds.boot11-lock", 1ull << 32);
+    {
+        static const hwaddr lock11[3] = { N3DS_BOOTROM_SIZE / 2,
+                                          N3DS_BOOTROM_SIZE + N3DS_BOOTROM_SIZE / 2,
+                                          N3DS_BOOTROM_BASE + N3DS_BOOTROM_SIZE / 2 };
+        for (i = 0; i < 3; i++) {
+            memory_region_init_alias(&s->boot11_lock_alias[i], NULL, "n3ds.boot11.lock",
+                                     &s->boot11_zero, 0, N3DS_BOOTROM_SIZE / 2);
+            memory_region_add_subregion(&s->boot11_lock, lock11[i], &s->boot11_lock_alias[i]);
+        }
+    }
+    memory_region_add_subregion_overlap(sysmem, 0, &s->boot11_lock, 1);
+    memory_region_set_enabled(&s->boot11_lock, false);
+    if (s->boot11_path) {
+        n3ds_load_rom(s->boot11_path, "n3ds.boot11", 0, &address_space_memory);
+    } else {
+        rom_add_blob_fixed_as("n3ds.boot11-stub", n3ds_boot11_stub, sizeof(n3ds_boot11_stub),
+                              0, &address_space_memory);
+    }
 
     /* ---- memory, ARM9 only ---- */
     memory_region_init_ram(&s->itcm, NULL, "n3ds.itcm", N3DS_ITCM_SIZE,
@@ -388,8 +475,21 @@ static void n3ds_init(MachineState *machine)
     memory_region_init_rom(&s->boot9, NULL, "n3ds.boot9", N3DS_BOOTROM_SIZE,
                            &error_fatal);
     memory_region_add_subregion(&s->arm9_mem, N3DS_BOOTROM_BASE, &s->boot9);
-    rom_add_blob_fixed_as("n3ds.boot9-stub", n3ds_boot9_stub, sizeof(n3ds_boot9_stub),
-                          N3DS_BOOTROM_BASE, &s->arm9_as);
+    memory_region_init_rom(&s->boot9_zero, NULL, "n3ds.boot9.locked",
+                           N3DS_BOOTROM_SIZE / 2, &error_fatal);
+    memory_region_init(&s->boot9_lock, OBJECT(machine), "n3ds.boot9-lock", 1ull << 32);
+    memory_region_init_alias(&s->boot9_lock_alias, NULL, "n3ds.boot9.lock",
+                             &s->boot9_zero, 0, N3DS_BOOTROM_SIZE / 2);
+    memory_region_add_subregion(&s->boot9_lock, N3DS_BOOTROM_BASE + N3DS_BOOTROM_SIZE / 2,
+                                &s->boot9_lock_alias);
+    memory_region_add_subregion_overlap(&s->arm9_mem, 0, &s->boot9_lock, 1);
+    memory_region_set_enabled(&s->boot9_lock, false);
+    if (s->boot9_path) {
+        n3ds_load_rom(s->boot9_path, "n3ds.boot9", N3DS_BOOTROM_BASE, &s->arm9_as);
+    } else {
+        rom_add_blob_fixed_as("n3ds.boot9-stub", n3ds_boot9_stub, sizeof(n3ds_boot9_stub),
+                              N3DS_BOOTROM_BASE, &s->arm9_as);
+    }
 
     /* ---- shared IO window ---- */
     memory_region_init(&s->shared_io, OBJECT(machine), "n3ds.io-shared",
@@ -418,6 +518,7 @@ static void n3ds_init(MachineState *machine)
             dev = qdev_new("pl330");
             object_property_set_link(OBJECT(dev), "memory", OBJECT(sysmem),
                                      &error_abort);
+            n3ds_pl330_config(dev);
             sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
             sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, cdma_bases[i]);
         }
@@ -425,6 +526,7 @@ static void n3ds_init(MachineState *machine)
 
     /* ---- ARM9 interrupt controller and timers ---- */
     s->irq9 = qdev_new(TYPE_N3DS_IRQ);
+    qdev_prop_set_bit(s->irq9, "luma-state", !s->boot9_path);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(s->irq9), &error_fatal);
     n3ds_map(&s->arm9_mem, 0, s->irq9, 0, N3DS_IRQ9_BASE);
     sysbus_connect_irq(SYS_BUS_DEVICE(s->irq9), 0,
@@ -453,6 +555,11 @@ static void n3ds_init(MachineState *machine)
 
     /* ---- system control ---- */
     s->sysctl = qdev_new(TYPE_N3DS_SYSCTL);
+    object_property_set_link(OBJECT(s->sysctl), "boot9-lock", OBJECT(&s->boot9_lock),
+                             &error_abort);
+    object_property_set_link(OBJECT(s->sysctl), "boot11-lock", OBJECT(&s->boot11_lock),
+                             &error_abort);
+    qdev_prop_set_bit(s->sysctl, "luma-state", !s->boot9_path);
     object_property_set_link(OBJECT(s->sysctl), "extwram",
                              OBJECT(&s->arm9_wram_ext), &error_abort);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(s->sysctl), &error_fatal);
@@ -461,6 +568,46 @@ static void n3ds_init(MachineState *machine)
     n3ds_map(&s->arm9_mem, 0, s->sysctl, 2, N3DS_PRNG_BASE);
     n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, s->sysctl, 3, N3DS_CFG11_BASE);
     n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, s->sysctl, 4, N3DS_PDN_BASE);
+    n3ds_map(&s->arm9_mem, 0, s->sysctl, 5, N3DS_OTP9_BASE);
+    if (s->otp_path) {
+        g_autofree char *otp = NULL;
+        gsize len = 0;
+        GError *gerr = NULL;
+
+        if (!g_file_get_contents(s->otp_path, &otp, &len, &gerr)) {
+            error_report("n3ds: cannot read %s: %s", s->otp_path, gerr->message);
+            exit(1);
+        }
+        n3ds_sysctl_set_otp(s->sysctl, (const uint8_t *)otp, len);
+    }
+    {
+        DeviceState *ndma = qdev_new("n3ds-ndma");
+        DeviceState *xdma = qdev_new("pl330");
+        int ch;
+
+        object_property_set_link(OBJECT(ndma), "memory", OBJECT(&s->arm9_mem),
+                                 &error_abort);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(ndma), &error_fatal);
+        n3ds_map(&s->arm9_mem, 0, ndma, 0, N3DS_NDMA9_BASE);
+        for (ch = 0; ch < 8; ch++) {
+            sysbus_connect_irq(SYS_BUS_DEVICE(ndma), ch,
+                               qdev_get_gpio_in(s->irq9, ch));
+        }
+        /* ARM9 XDMA: a PL330 in the ARM9 address space */
+        object_property_set_link(OBJECT(xdma), "memory", OBJECT(&s->arm9_mem),
+                                 &error_abort);
+        n3ds_pl330_config(xdma);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(xdma), &error_fatal);
+        n3ds_map(&s->arm9_mem, 0, xdma, 0, N3DS_XDMA_BASE);
+    }
+    {
+        DeviceState *rsa = qdev_new("n3ds-rsa");
+
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(rsa), &error_fatal);
+        n3ds_map(&s->arm9_mem, 0, rsa, 0, N3DS_RSA9_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(rsa), 0,
+                           qdev_get_gpio_in(s->irq9, N3DS_IRQ9_RSA));
+    }
     sysbus_connect_irq(SYS_BUS_DEVICE(s->sysctl), 0,
                        n3ds_gic_irq(s, N3DS_GIC_SOCMODE));
 
@@ -482,6 +629,21 @@ static void n3ds_init(MachineState *machine)
     }
     di = drive_get(IF_SD, 0, 1);
     dev = qdev_new(TYPE_EMMC);
+    if (s->nand_cid && strlen(s->nand_cid) == 32) {
+        /*
+         * The console reads the CID as R2 response bits 127..8 in little-
+         * endian byte order (byte 15 = 0); convert back to raw CID bytes.
+         */
+        char raw[33];
+        int i;
+
+        for (i = 0; i < 15; i++) {
+            memcpy(raw + 2 * i, s->nand_cid + 2 * (14 - i), 2);
+        }
+        memcpy(raw + 30, "00", 2);
+        raw[32] = 0;
+        qdev_prop_set_string(dev, "cid", raw);
+    }
     if (di) {
         qdev_prop_set_drive_err(dev, "drive", blk_by_legacy_dinfo(di),
                                 &error_fatal);
@@ -491,6 +653,7 @@ static void n3ds_init(MachineState *machine)
 
     /* ---- PXI ---- */
     s->pxi = qdev_new(TYPE_N3DS_PXI);
+    qdev_prop_set_bit(s->pxi, "luma-state", !s->boot9_path);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(s->pxi), &error_fatal);
     n3ds_map(&s->arm9_mem, 0, s->pxi, 0, N3DS_PXI9_BASE);
     n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, s->pxi, 1, N3DS_PXI11_BASE);
@@ -600,6 +763,18 @@ static void n3ds_machine_class_init(ObjectClass *oc, const void *data)
     mc->no_parallel = 1;
     mc->no_floppy = 1;
     mc->no_cdrom = 1;
+    object_class_property_add_str(oc, "boot9", n3ds_get_boot9, n3ds_set_boot9);
+    object_class_property_set_description(oc, "boot9",
+        "ARM9 boot ROM dump (boot9.bin) used instead of the built-in stub");
+    object_class_property_add_str(oc, "boot11", n3ds_get_boot11, n3ds_set_boot11);
+    object_class_property_set_description(oc, "boot11",
+        "ARM11 boot ROM dump (boot11.bin) used instead of the built-in stub");
+    object_class_property_add_str(oc, "otp", n3ds_get_otp, n3ds_set_otp);
+    object_class_property_add_str(oc, "nand-cid", n3ds_get_nand_cid, n3ds_set_nand_cid);
+    object_class_property_set_description(oc, "nand-cid",
+        "eMMC CID (32 hex digits) as the console reports it (essential.exefs nand_cid)");
+    object_class_property_set_description(oc, "otp",
+        "OTP dump (256 bytes) presented at 0x10012000");
 }
 
 static const TypeInfo n3ds_machine_type = {

@@ -1146,6 +1146,13 @@ static int pl330_chan_exec(PL330Chan *ch)
         pl330_fault(ch, PL330_FAULT_UNDEF_INSTR);
         return 0;
     }
+    if (trace_event_get_state_backends(TRACE_PL330_INSN)) {
+        uint8_t ib[6] = { 0 };
+
+        dma_memory_read(ch->parent->mem_as, ch->pc, ib, sizeof(ib), MEMTXATTRS_UNSPECIFIED);
+        trace_pl330_insn(ch->tag, ch->pc, ib[0], ib[1], ib[2] | (ib[3] << 8) |
+                         (ib[4] << 16) | ((uint32_t)ib[5] << 24));
+    }
     pl330_exec_insn(ch, insn);
     if (!ch->stall) {
         pl330_update_pc(ch, insn);

@@ -53,3 +53,4 @@ k230_gsdma_read(uint64_t addr, unsigned int size, uint64_t data) "K230 GSDMA rea
 k230_gsdma_write(uint64_t addr, unsigned int size, uint64_t data) "K230 GSDMA write: [0x%"PRIx64"] size %u <- 0x%"PRIx64
 k230_gsdma_read_sdma_llt(uint64_t addr, uint32_t cfg, uint32_t src_addr, uint32_t line_size, uint32_t line_cfg, uint32_t dst_addr, uint32_t next_llt_addr) "K230 GSDMA read SDMA LLT: addr=0x%"PRIx64" cfg=0x%"PRIx32" src=0x%"PRIx32" line_size=0x%"PRIx32" line_cfg=0x%"PRIx32" dst=0x%"PRIx32" next=0x%"PRIx32
 k230_gsdma_read_sdma_llt_failed(uint64_t addr) "K230 GSDMA read SDMA LLT failed: addr=0x%"PRIx64
+pl330_insn(uint8_t ch, uint32_t pc, uint8_t op, uint8_t arg0, uint32_t imm) "ch %u pc 0x%08x op 0x%02x arg0 0x%02x imm 0x%08x"

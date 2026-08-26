@@ -41,7 +41,11 @@ struct N3DSSysctlState {
     MemoryRegion prng;
     MemoryRegion cfg11;
     MemoryRegion pdn;
+    MemoryRegion otp;
     MemoryRegion *extwram;
+    MemoryRegion *boot9_lock;    /* reads-as-zero overlay on the protected boot ROM halves */
+    MemoryRegion *boot11_lock;
+    bool luma_state;             /* reset to the state Luma3DS leaves (stub ROMs) */
     qemu_irq socmode_irq;
 
     uint8_t cfg9_regs[0x1000];
@@ -49,8 +53,12 @@ struct N3DSSysctlState {
     uint8_t cfg11_regs[0x1000];
     uint8_t pdn_regs[0x1000];
     uint32_t socinfo;
+    uint8_t otp_data[0x100];     /* console-unique OTP (encrypted, as read) */
+    uint8_t twl_console_id[8];   /* 0x10012100 */
 };
 
+
+static void regs_write(uint8_t *regs, hwaddr off, uint64_t v, unsigned size);
 static uint64_t regs_read(const uint8_t *regs, hwaddr off, unsigned size)
 {
     uint64_t v = 0;
@@ -73,6 +81,52 @@ static void regs_write(uint8_t *regs, hwaddr off, uint64_t v, unsigned size)
 
 /* ---- CONFIG9 (0x10000000, ARM9 only) ---- */
 
+/*
+ * OTP (0x10012000): 0x100 bytes of console-unique data readable until the
+ * ARM9 sets CFG9_SYSPROT9 bit 1, then the region reads as zero; the TWL
+ * console ID words at +0x100 stay accessible.
+ */
+static uint64_t otp_read(void *opaque, hwaddr off, unsigned size)
+{
+    N3DSSysctlState *s = opaque;
+
+    if (off < 0x100) {
+        if (s->cfg9_regs[0] & 2) {
+            return 0;
+        }
+        return regs_read(s->otp_data, off, size);
+    }
+    if (off < 0x108) {
+        return regs_read(s->twl_console_id, off - 0x100, size);
+    }
+    return 0;
+}
+
+static void otp_write(void *opaque, hwaddr off, uint64_t v, unsigned size)
+{
+    N3DSSysctlState *s = opaque;
+
+    if (off >= 0x100 && off + size <= 0x108) {
+        regs_write(s->twl_console_id, off - 0x100, v, size);
+    }
+}
+
+static const MemoryRegionOps otp_ops = {
+    .read = otp_read,
+    .write = otp_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+};
+
+void n3ds_sysctl_set_otp(void *dev, const uint8_t *data, size_t len)
+{
+    N3DSSysctlState *s = N3DS_SYSCTL(dev);
+
+    memset(s->otp_data, 0, sizeof(s->otp_data));
+    memcpy(s->otp_data, data, MIN(len, sizeof(s->otp_data)));
+}
+
 static uint64_t cfg9_read(void *opaque, hwaddr off, unsigned size)
 {
     N3DSSysctlState *s = opaque;
@@ -86,6 +140,15 @@ static void cfg9_write(void *opaque, hwaddr off, uint64_t v, unsigned size)
     regs_write(s->cfg9_regs, off, v, size);
     if (off <= CFG9_EXTMEMCNT9 && off + size > CFG9_EXTMEMCNT9 && s->extwram) {
         memory_region_set_enabled(s->extwram, s->cfg9_regs[CFG9_EXTMEMCNT9] & 1);
+    }
+    /* CFG9_SYSPROT9/11 bit 0: hide the protected boot ROM halves */
+    if (off < 2) {
+        if (s->boot9_lock) {
+            memory_region_set_enabled(s->boot9_lock, s->cfg9_regs[0] & 1);
+        }
+        if (s->boot11_lock) {
+            memory_region_set_enabled(s->boot11_lock, s->cfg9_regs[1] & 1);
+        }
     }
 }
 
@@ -275,17 +338,26 @@ static void n3ds_sysctl_reset(DeviceState *dev)
     memset(s->pdn_regs, 0, sizeof(s->pdn_regs));
     /*
      * Values read on a New 2DS XL right after the Luma3DS chainloader
-     * (n3ds-probes io_cfg9 / io_cfg11 / io_pdn snapshots).
+     * (n3ds-probes io_cfg9 / io_cfg11 / io_pdn snapshots); with the real
+     * boot ROMs everything starts from the hardware reset state (zero).
      */
-    regs_write(s->cfg9_regs, 0x000, 0x00000101, 4);   /* SYSPROT9/11 */
-    regs_write(s->cfg9_regs, 0x008, 0x0000000c, 4);
-    regs_write(s->cfg9_regs, 0x010, 0xffff0001, 4);
-    regs_write(s->cfg9_regs, 0x014, 0x0000ffff, 4);
-    regs_write(s->cfg11_regs, 0x000, 0x8c888480, 4); /* shared WRAM bank map */
-    regs_write(s->cfg11_regs, 0x004, 0x9c989490, 4);
-    regs_write(s->cfg11_regs, 0x008, 0x8c888480, 4);
-    regs_write(s->cfg11_regs, 0x00c, 0x9c989490, 4);
-    regs_write(s->pdn_regs, 0x200, 0x0001007f, 4);   /* PDN_GPU_CNT (Luma) */
+    if (s->luma_state) {
+        regs_write(s->cfg9_regs, 0x000, 0x00000101, 4);   /* SYSPROT9/11 */
+        regs_write(s->cfg9_regs, 0x008, 0x0000000c, 4);
+        regs_write(s->cfg9_regs, 0x010, 0xffff0001, 4);
+        regs_write(s->cfg9_regs, 0x014, 0x0000ffff, 4);
+        regs_write(s->cfg11_regs, 0x000, 0x8c888480, 4); /* shared WRAM bank map */
+        regs_write(s->cfg11_regs, 0x004, 0x9c989490, 4);
+        regs_write(s->cfg11_regs, 0x008, 0x8c888480, 4);
+        regs_write(s->cfg11_regs, 0x00c, 0x9c989490, 4);
+        regs_write(s->pdn_regs, 0x200, 0x0001007f, 4);   /* PDN_GPU_CNT (Luma) */
+    }
+    if (s->boot9_lock) {
+        memory_region_set_enabled(s->boot9_lock, s->cfg9_regs[0] & 1);
+    }
+    if (s->boot11_lock) {
+        memory_region_set_enabled(s->boot11_lock, s->cfg9_regs[1] & 1);
+    }
     /* PDN_LGR_CPU_CNT and PDN_LGR_SOCMODE read 0 at hand-off */
     if (s->extwram) {
         memory_region_set_enabled(s->extwram, false);
@@ -302,11 +374,13 @@ static void n3ds_sysctl_init(Object *obj)
     memory_region_init_io(&s->prng, obj, &prng_ops, s, "n3ds.prng", 0x1000);
     memory_region_init_io(&s->cfg11, obj, &cfg11_ops, s, "n3ds.cfg11", 0x1000);
     memory_region_init_io(&s->pdn, obj, &pdn_ops, s, "n3ds.pdn", 0x1000);
+    memory_region_init_io(&s->otp, obj, &otp_ops, s, "n3ds.otp", 0x1000);
     sysbus_init_mmio(sbd, &s->cfg9);
     sysbus_init_mmio(sbd, &s->cfg);
     sysbus_init_mmio(sbd, &s->prng);
     sysbus_init_mmio(sbd, &s->cfg11);
     sysbus_init_mmio(sbd, &s->pdn);
+    sysbus_init_mmio(sbd, &s->otp);
     sysbus_init_irq(sbd, &s->socmode_irq);
 }
 
@@ -315,6 +389,11 @@ static const Property n3ds_sysctl_properties[] = {
                      TYPE_MEMORY_REGION, MemoryRegion *),
     /* CFG11_SOCINFO: 1 = CTR, 3 = LGR1 (New 3DS proto), 7 = LGR2 (New 3DS) */
     DEFINE_PROP_UINT32("socinfo", N3DSSysctlState, socinfo, 7),
+    DEFINE_PROP_LINK("boot9-lock", N3DSSysctlState, boot9_lock,
+                     TYPE_MEMORY_REGION, MemoryRegion *),
+    DEFINE_PROP_LINK("boot11-lock", N3DSSysctlState, boot11_lock,
+                     TYPE_MEMORY_REGION, MemoryRegion *),
+    DEFINE_PROP_BOOL("luma-state", N3DSSysctlState, luma_state, true),
 };
 
 static void n3ds_sysctl_class_init(ObjectClass *klass, const void *data)

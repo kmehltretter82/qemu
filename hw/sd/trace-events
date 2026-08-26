@@ -82,3 +82,5 @@ n3ds_tmio_cmd_timeout(unsigned port, unsigned idx, const char *why) "port %u idx
 n3ds_tmio_xfer(const char *dir, uint32_t blocks, uint32_t blklen) "%s blocks %u blklen %u"
 n3ds_tmio_xfer_end(void) "data end"
 n3ds_tmio_reg_write(uint32_t off, uint32_t val) "reg 0x%03x <- 0x%04x"
+n3ds_tmio_stop(uint32_t v, int xfer, bool multi) "STOP write 0x%x xfer %d multi %d"
+n3ds_tmio_reg_read(uint32_t off, uint32_t val, unsigned size) "reg 0x%03x -> 0x%08x (%u)"

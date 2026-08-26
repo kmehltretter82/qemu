@@ -9,6 +9,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
@@ -25,7 +26,7 @@ struct N3DSIrqState {
     qemu_irq irq;
     uint32_t ie;
     uint32_t iflags;
-    uint32_t level;
+    uint32_t level;    bool luma_state;
 };
 
 static void n3ds_irq_update(N3DSIrqState *s)
@@ -95,8 +96,8 @@ static void n3ds_irq_reset(DeviceState *dev)
     N3DSIrqState *s = N3DS_IRQ(dev);
 
     /* as left by Luma3DS on the console: timers 0/1 and SDIO1 enabled and pending */
-    s->ie = 0x00010300;
-    s->iflags = 0x00010300;
+    s->ie = s->luma_state ? 0x00010300 : 0;
+    s->iflags = s->luma_state ? 0x00010300 : 0;
     s->level = 0;
     n3ds_irq_update(s);
 }
@@ -112,9 +113,15 @@ static void n3ds_irq_init(Object *obj)
     qdev_init_gpio_in(DEVICE(obj), n3ds_irq_set, 32);
 }
 
+static const Property n3ds_irq_properties[] = {
+    DEFINE_PROP_BOOL("luma-state", N3DSIrqState, luma_state, true),
+};
+
 static void n3ds_irq_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+
+    device_class_set_props(dc, n3ds_irq_properties);
 
     device_class_set_legacy_reset(dc, n3ds_irq_reset);
 }

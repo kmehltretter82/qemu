@@ -62,6 +62,9 @@
 #define N3DS_PXI9_BASE        0x10008000
 #define N3DS_AES9_BASE        0x10009000
 #define N3DS_SHA9_BASE        0x1000A000
+#define N3DS_NDMA9_BASE       0x10002000
+#define N3DS_RSA9_BASE        0x1000B000
+#define N3DS_OTP9_BASE        0x10012000
 #define N3DS_AES_BASE         0x10009000
 #define N3DS_SHA_BASE         0x1000A000
 #define N3DS_RSA_BASE         0x1000B000
@@ -123,5 +126,7 @@
 /* Luma3DS chainloader hand-off protocol (AXI WRAM top) */
 #define N3DS_ARM11_ENTRY_MAILBOX 0x1FFFFFFC
 #define N3DS_CORE1_ENTRY_MAILBOX 0x1FFFFFDC
+
+void n3ds_sysctl_set_otp(void *dev, const uint8_t *data, size_t len);
 
 #endif

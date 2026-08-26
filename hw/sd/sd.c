@@ -206,6 +206,7 @@ struct SDState {
     uint8_t dat_lines;
     bool cmd_line;
     char *preset_auth_key;
+    char *preset_cid;
 };
 
 static void sd_realize(DeviceState *dev, Error **errp);
@@ -481,6 +482,22 @@ static void sd_set_cid(SDState *sd)
 
 static void emmc_set_cid(SDState *sd)
 {
+    /* a board may present a specific card identity (16 raw CID bytes, hex) */
+    if (sd->preset_cid && strlen(sd->preset_cid) == 32) {
+        int i;
+
+        for (i = 0; i < 16; i++) {
+            unsigned v;
+
+            if (sscanf(sd->preset_cid + 2 * i, "%2x", &v) != 1) {
+                break;
+            }
+            sd->cid[i] = v;
+        }
+        if (i == 16) {
+            return;
+        }
+    }
     sd->cid[0] = MID;       /* Fake card manufacturer ID (MID) */
     sd->cid[1] = 0b01;      /* CBX: soldered BGA */
     sd->cid[2] = OID[0];    /* OEM/Application ID (OID) */
@@ -3218,6 +3235,7 @@ static const Property emmc_properties[] = {
     DEFINE_PROP_UINT8("boot-config", SDState, boot_config, 0x0),
     DEFINE_PROP_UINT64("rpmb-partition-size", SDState, rpmb_part_size, 0),
     DEFINE_PROP_STRING("auth-key", SDState, preset_auth_key),
+    DEFINE_PROP_STRING("cid", SDState, preset_cid),
 };
 
 static void sdmmc_common_class_init(ObjectClass *klass, const void *data)

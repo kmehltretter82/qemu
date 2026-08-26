@@ -278,5 +278,11 @@ config N3DS_AES
 config N3DS_SHA
     bool
 
+config N3DS_RSA
+    bool
+
+config N3DS_NDMA
+    bool
+
 config N3DS_PXI
     bool

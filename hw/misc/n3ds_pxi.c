@@ -24,6 +24,8 @@
 
 #include "qemu/osdep.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/cpu.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
@@ -73,7 +75,7 @@ typedef struct N3DSPxiSide {
 
 struct N3DSPxiState {
     SysBusDevice parent_obj;
-    N3DSPxiSide side[2];   /* 0 = ARM9, 1 = ARM11 */
+    N3DSPxiSide side[2];   /* 0 = ARM9, 1 = ARM11 */    bool luma_state;
 };
 
 static void pxi_update_irqs(N3DSPxiState *s)
@@ -171,6 +173,15 @@ static void pxi_write(N3DSPxiState *s, int idx, hwaddr off, uint64_t v,
         if ((val & (SYNC_IRQ_A | SYNC_IRQ_B)) && other->sync_irqen) {
             qemu_irq_pulse(other->irq_sync);
         }
+        /*
+         * The boot ROMs hand-shake through the sync bytes with tight
+         * poll loops on both CPUs; with round-robin TCG the writer would
+         * otherwise run on and overwrite the byte before the other core
+         * ever polls it. Give the other vCPUs a turn right away.
+         */
+        if (current_cpu) {
+            cpu_exit(current_cpu);
+        }
         break;
     case REG_CNT:
         if (mask & 0xFF) {
@@ -260,9 +271,11 @@ static void n3ds_pxi_reset(DeviceState *dev)
         s->side[i].recv_lvl = false;
     }
     /* console after Luma3DS: PXI9 SYNC = 0x8000000e, CNT = 0x8101 */
-    s->side[1].sync_out = 0x0e;
-    s->side[0].sync_irqen = true;
-    s->side[0].cnt = CNT_ENABLE;
+    if (s->luma_state) {
+        s->side[1].sync_out = 0x0e;
+        s->side[0].sync_irqen = true;
+        s->side[0].cnt = CNT_ENABLE;
+    }
     pxi_update_irqs(s);
 }
 
@@ -286,9 +299,15 @@ static void n3ds_pxi_init(Object *obj)
     }
 }
 
+static const Property n3ds_pxi_properties[] = {
+    DEFINE_PROP_BOOL("luma-state", N3DSPxiState, luma_state, true),
+};
+
 static void n3ds_pxi_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+
+    device_class_set_props(dc, n3ds_pxi_properties);
 
     device_class_set_legacy_reset(dc, n3ds_pxi_reset);
 }

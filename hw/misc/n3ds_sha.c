@@ -15,6 +15,7 @@
 #include "qemu/bswap.h"
 #include "qemu/log.h"
 #include "hw/misc/n3ds.h"
+#include "trace.h"
 
 #define TYPE_N3DS_SHA "n3ds-sha"
 OBJECT_DECLARE_SIMPLE_TYPE(N3DSShaState, N3DS_SHA)
@@ -40,6 +41,14 @@ struct N3DSShaState {
     uint8_t buf[64];
     int buf_len;
     uint64_t total;      /* bytes hashed so far */
+    /*
+     * Read-back FIFO: every completed 64-byte input block can be read back
+     * through the FIFO window (CNT bit 9 reads 1 while data is there).
+     * boot9 streams NAND data SD -> AES -> SHA FIFO -> memory this way.
+     */
+    uint8_t rfifo[64];
+    int rfifo_pos;
+    int rfifo_len;
 };
 
 /* ---- SHA-256 / SHA-1 compression ---- */
@@ -142,6 +151,7 @@ static void sha_init_state(N3DSShaState *s)
     }
     s->buf_len = 0;
     s->total = 0;
+    s->rfifo_len = s->rfifo_pos = 0;
 }
 
 static void sha_compress(N3DSShaState *s, const uint8_t *block)
@@ -160,6 +170,9 @@ static void sha_push_bytes(N3DSShaState *s, const uint8_t *p, int n)
         s->total++;
         if (s->buf_len == 64) {
             sha_compress(s, s->buf);
+            memcpy(s->rfifo, s->buf, 64);
+            s->rfifo_len = 64;
+            s->rfifo_pos = 0;
             s->buf_len = 0;
         }
     }
@@ -185,17 +198,28 @@ static uint64_t n3ds_sha_read(void *opaque, hwaddr off, unsigned size)
     N3DSShaState *s = opaque;
     uint32_t v = 0;
 
+    trace_n3ds_sha_read((uint32_t)off, size);
+
     if (off >= REG_HASH && off < REG_HASH + 32) {
         v = s->h[(off - REG_HASH) / 4];
         if (s->cnt & CNT_OUT_BE) {
             v = bswap32(v);
         }
     } else if (off >= REG_FIFO && off < REG_FIFO + 64) {
-        v = 0;
+        unsigned i;
+
+        for (i = 0; i < size && s->rfifo_pos < s->rfifo_len; i++) {
+            v |= (uint32_t)s->rfifo[s->rfifo_pos++] << (8 * i);
+        }
+        if (s->rfifo_pos >= s->rfifo_len) {
+            s->rfifo_len = s->rfifo_pos = 0;
+        }
+        return v;
     } else {
         switch (off & ~3) {
         case REG_CNT:
-            v = s->cnt;      /* start/final read as done */
+            /* start/final read as done; bit 9: read-back data available */
+            v = (s->cnt & ~(1u << 9)) | (s->rfifo_len ? 1u << 9 : 0);
             break;
         case REG_BLKCNT:
             v = s->total;
@@ -213,6 +237,8 @@ static void n3ds_sha_write(void *opaque, hwaddr off, uint64_t val,
 {
     N3DSShaState *s = opaque;
     uint32_t v = val;
+
+    trace_n3ds_sha_write((uint32_t)off, v, size);
 
     if (off >= REG_FIFO && off < REG_FIFO + 64) {
         uint8_t b[4];
@@ -233,6 +259,7 @@ static void n3ds_sha_write(void *opaque, hwaddr off, uint64_t val,
         }
         if (v & CNT_FINAL) {
             sha_final(s);
+            trace_n3ds_sha_final(CNT_MODE(s->cnt), (uint32_t)s->total, s->h[0]);
         }
         break;
     case REG_BLKCNT:

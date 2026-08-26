@@ -450,3 +450,17 @@ k230_decomp_gzip_write(uint64_t offset, unsigned int size, uint64_t value) "K230
 # n3ds_pxi.c
 n3ds_pxi_irq(int side, bool send_lvl, bool recv_lvl, int my_used, int other_used) "side %d send_irq %d recv_irq %d my_fifo %d other_fifo %d"
 n3ds_pxi_send(int side, uint32_t val) "side %d send 0x%08x"
+
+# n3ds crypto / dma
+n3ds_rsa_start(int slot, uint32_t cnt, uint32_t txt0, uint32_t txt_last, uint32_t mod0, uint32_t exp_last) "slot %d cnt 0x%x txt[0] 0x%08x txt[last] 0x%08x mod[0] 0x%08x exp[last] 0x%08x"
+n3ds_rsa_done(uint32_t out0, uint32_t out_last) "out[0] 0x%08x out[last] 0x%08x"
+n3ds_aes_start(int mode, int keysel, int blocks, uint32_t cnt) "mode %d keyslot 0x%02x blocks %d cnt 0x%08x"
+n3ds_aes_keyfifo(int which, int slot, int keycnt) "keyfifo %d slot 0x%02x keycnt 0x%02x"
+n3ds_sha_final(int mode, uint32_t total, uint32_t h0) "mode %d bytes %u h0 0x%08x"
+n3ds_ndma_start(int ch, uint32_t cnt, uint32_t sad, uint32_t dad, uint32_t tcnt, uint32_t wcnt) "ch %d cnt 0x%08x sad 0x%08x dad 0x%08x tcnt %u wcnt %u"
+n3ds_rsa_write(uint32_t off, uint32_t val) "write 0x%03x = 0x%08x"
+n3ds_aes_write(uint32_t off, uint32_t val, unsigned size) "write 0x%03x = 0x%08x (%u)"
+n3ds_aes_rdfifo(uint32_t v) "rdfifo 0x%08x"
+n3ds_aes_wrfifo(uint32_t v) "wrfifo 0x%08x"
+n3ds_sha_write(uint32_t off, uint32_t val, unsigned size) "write 0x%02x = 0x%08x (%u)"
+n3ds_sha_read(uint32_t off, unsigned size) "read 0x%02x (%u)"
