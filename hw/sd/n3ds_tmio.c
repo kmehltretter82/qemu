@@ -218,7 +218,11 @@ static void tmio_load_block(N3DSTmioState *s)
         tmio_xfer_end(s);
         return;
     }
-    sdbus_read_data(bus, s->fifo, s->blk_len);
+    if (tmio_have_sdio(s)) {
+        n3ds_sdio_read_data(s->sdio, s->fifo, s->blk_len);
+    } else {
+        sdbus_read_data(bus, s->fifo, s->blk_len);
+    }
     s->fifo_pos = 0;
     tmio_set_status(s, 0, STAT1_RXRDY);
     if (s->blocks_left <= 1) {
@@ -230,7 +234,9 @@ static void tmio_store_block(N3DSTmioState *s)
 {
     SDBus *bus = tmio_bus(s);
 
-    if (bus) {
+    if (tmio_have_sdio(s)) {
+        n3ds_sdio_write_data(s->sdio, s->fifo, s->blk_len);
+    } else if (bus) {
         sdbus_write_data(bus, s->fifo, s->blk_len);
     }
     s->fifo_pos = 0;

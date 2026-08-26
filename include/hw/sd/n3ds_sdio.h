@@ -32,9 +32,25 @@ struct N3DSSdioState {
     uint8_t bus_iface;
     uint16_t fn0_blksz;
     uint16_t fn1_blksz;
+
+    /* CMD53 transfer in progress */
+    bool xfer_write;
+    bool xfer_incr;
+    unsigned xfer_fn;
+    uint32_t xfer_addr;
+    uint32_t xfer_left;
+
+    /*
+     * Backing store for function 1. The real part exposes the AR6K
+     * mailboxes and register window here; this is plain memory, enough for
+     * a driver's accesses to succeed rather than error out.
+     */
+    uint8_t fn1_mem[0x20000];
 };
 
 int n3ds_sdio_command(N3DSSdioState *s, uint32_t cmd, uint32_t arg,
                       uint8_t *resp, size_t respsz);
+void n3ds_sdio_read_data(N3DSSdioState *s, uint8_t *buf, size_t len);
+void n3ds_sdio_write_data(N3DSSdioState *s, const uint8_t *buf, size_t len);
 
 #endif

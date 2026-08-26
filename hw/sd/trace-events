@@ -86,3 +86,4 @@ n3ds_tmio_stop(uint32_t v, int xfer, bool multi) "STOP write 0x%x xfer %d multi 
 n3ds_tmio_reg_read(uint32_t base, uint32_t off, uint32_t val, unsigned size) "[%05x] reg 0x%03x -> 0x%08x (%u)"
 n3ds_sdio_cmd(uint32_t cmd, uint32_t arg, uint32_t resp) "CMD%u arg 0x%08x -> 0x%08x"
 n3ds_sdio_cmd52(int write, unsigned fn, uint32_t addr, uint8_t data) "CMD52 %s fn%u addr 0x%05x data 0x%02x"
+n3ds_sdio_cmd53(int write, unsigned fn, uint32_t addr, uint32_t len, int incr) "CMD53 %s fn%u addr 0x%05x len %u incr %d"

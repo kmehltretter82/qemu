@@ -228,15 +228,31 @@ int n3ds_sdio_command(N3DSSdioState *s, uint32_t cmd, uint32_t arg,
         trace_n3ds_sdio_cmd52(!!(arg & IO_RW_WRITE), fn, addr, r & 0xFF);
         break;
     }
-    case 53:                                  /* IO_RW_EXTENDED */
-        /*
-         * Bulk access is what the firmware download and the data path use;
-         * neither is modelled, so report out-of-range rather than pretend.
-         */
-        qemu_log_mask(LOG_UNIMP,
-                      "n3ds-sdio: CMD53 (extended I/O) not implemented\n");
-        r = R5_STATE_CMD | R5_ERR_RANGE;
+    case 53: {                                /* IO_RW_EXTENDED */
+        unsigned fn = IO_RW_FUNC(arg);
+        uint32_t count = IO_RW_EXT_COUNT(arg);
+        uint32_t blksz = fn == 0 ? s->fn0_blksz : s->fn1_blksz;
+
+        if (fn > 1) {
+            r = R5_ERR_FUNC;
+            break;
+        }
+        if (arg & IO_RW_EXT_BLOCK) {
+            /* block mode: count is a block count, 0 means 512 blocks */
+            s->xfer_left = (count ? count : 512) * (blksz ? blksz : 512);
+        } else {
+            /* byte mode: count is a byte count, 0 means 512 */
+            s->xfer_left = count ? count : 512;
+        }
+        s->xfer_write = !!(arg & IO_RW_WRITE);
+        s->xfer_incr = !!(arg & IO_RW_EXT_INCR);
+        s->xfer_fn = fn;
+        s->xfer_addr = IO_RW_ADDR(arg);
+        trace_n3ds_sdio_cmd53(s->xfer_write, fn, s->xfer_addr, s->xfer_left,
+                              s->xfer_incr);
+        r = R5_STATE_CMD;
         break;
+    }
     default:
         return 0;                             /* unknown command: no answer */
     }
@@ -247,6 +263,66 @@ int n3ds_sdio_command(N3DSSdioState *s, uint32_t cmd, uint32_t arg,
     resp[3] = r;
     trace_n3ds_sdio_cmd(cmd, arg, r);
     return 4;
+}
+
+/* one byte of the transfer window, honouring the fixed/incrementing mode */
+static uint8_t *sdio_xfer_ptr(N3DSSdioState *s)
+{
+    uint32_t addr = s->xfer_addr & (sizeof(s->fn1_mem) - 1);
+
+    if (s->xfer_incr) {
+        s->xfer_addr++;
+    }
+    return &s->fn1_mem[addr];
+}
+
+void n3ds_sdio_read_data(N3DSSdioState *s, uint8_t *buf, size_t len)
+{
+    size_t i;
+
+    for (i = 0; i < len; i++) {
+        if (!s->xfer_left) {
+            buf[i] = 0;
+            continue;
+        }
+        /*
+         * Function 0 reads come from the register map, so a driver walking
+         * the CCCR with CMD53 sees the same values CMD52 gives it.
+         */
+        if (s->xfer_fn == 0) {
+            uint32_t addr = s->xfer_addr;
+
+            if (s->xfer_incr) {
+                s->xfer_addr++;
+            }
+            buf[i] = sdio_read_reg(s, 0, addr);
+        } else {
+            buf[i] = *sdio_xfer_ptr(s);
+        }
+        s->xfer_left--;
+    }
+}
+
+void n3ds_sdio_write_data(N3DSSdioState *s, const uint8_t *buf, size_t len)
+{
+    size_t i;
+
+    for (i = 0; i < len; i++) {
+        if (!s->xfer_left) {
+            return;
+        }
+        if (s->xfer_fn == 0) {
+            uint32_t addr = s->xfer_addr;
+
+            if (s->xfer_incr) {
+                s->xfer_addr++;
+            }
+            sdio_write_reg(s, 0, addr, buf[i]);
+        } else {
+            *sdio_xfer_ptr(s) = buf[i];
+        }
+        s->xfer_left--;
+    }
 }
 
 static void n3ds_sdio_reset(DeviceState *dev)
@@ -260,6 +336,9 @@ static void n3ds_sdio_reset(DeviceState *dev)
     s->bus_iface = 0;
     s->fn0_blksz = 0;
     s->fn1_blksz = 0;
+    s->xfer_left = 0;
+    s->xfer_addr = 0;
+    memset(s->fn1_mem, 0, sizeof(s->fn1_mem));
 }
 
 static const Property n3ds_sdio_properties[] = {
