@@ -25,6 +25,9 @@ struct ARM11SCUState {
     uint32_t control;
     uint32_t cpu_status;
     uint32_t num_cpu;
+    uint32_t control_reset;
+    uint32_t config;
+    uint8_t cpu_status_reset;
     MemoryRegion iomem;
 };
 

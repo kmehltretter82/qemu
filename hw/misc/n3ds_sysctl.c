@@ -42,7 +42,9 @@ struct N3DSSysctlState {
     MemoryRegion cfg11;
     MemoryRegion pdn;
     MemoryRegion otp;
+    MemoryRegion fcramcfg;
     MemoryRegion *extwram;
+    MemoryRegion *l2c;           /* answers only once PDN_LGR_CNT enables it */
     MemoryRegion *boot9_lock;    /* reads-as-zero overlay on the protected boot ROM halves */
     MemoryRegion *boot11_lock;
     bool luma_state;             /* reset to the state Luma3DS leaves (stub ROMs) */
@@ -52,6 +54,7 @@ struct N3DSSysctlState {
     uint8_t cfg_regs[0x1000];
     uint8_t cfg11_regs[0x1000];
     uint8_t pdn_regs[0x1000];
+    uint8_t fcramcfg_regs[0x1000];
     uint32_t socinfo;
     uint8_t otp_data[0x100];     /* console-unique OTP (encrypted, as read) */
     uint8_t twl_console_id[8];   /* 0x10012100 */
@@ -255,9 +258,14 @@ static void pdn_cpu_cnt_write(N3DSSysctlState *s, int core, uint8_t v)
 {
     uint8_t *reg = &s->pdn_regs[PDN_LGR_CPU_CNT + core];
 
+    /*
+     * The two low bits are the request - power on, and release from reset -
+     * and the two above them acknowledge each. The console answers a write
+     * of 0x03 with 0x33 (n3ds-probes core23_boot).
+     */
     if (core < 2) {
         /* Cores 0/1 are always powered on this SoC model. */
-        *reg = 0x10 | (v & 1);
+        *reg = 0x10 | (v & 3) | ((v & 2) << 4);
         return;
     }
     if ((v & 1) && !(*reg & 0x10)) {
@@ -271,10 +279,10 @@ static void pdn_cpu_cnt_write(N3DSSysctlState *s, int core, uint8_t v)
                           core, ret);
             return;
         }
-        *reg = 0x11;
+        *reg = 0x10 | (v & 3) | ((v & 2) << 4);
         return;
     }
-    *reg = (*reg & 0x10) | (v & 1);
+    *reg = (*reg & 0x30) | (v & 3) | ((v & 2) << 4);
 }
 
 static uint64_t pdn_read(void *opaque, hwaddr off, unsigned size)
@@ -282,6 +290,30 @@ static uint64_t pdn_read(void *opaque, hwaddr off, unsigned size)
     N3DSSysctlState *s = opaque;
     return regs_read(s->pdn_regs, off, size);
 }
+
+/*
+ * FCRAM configuration. Only that the console reads 1 in the first register
+ * is known; the block is otherwise undocumented.
+ */
+static uint64_t fcramcfg_read(void *opaque, hwaddr off, unsigned size)
+{
+    N3DSSysctlState *s = opaque;
+    return regs_read(s->fcramcfg_regs, off, size);
+}
+
+static void fcramcfg_write(void *opaque, hwaddr off, uint64_t v, unsigned size)
+{
+    N3DSSysctlState *s = opaque;
+    regs_write(s->fcramcfg_regs, off, v, size);
+}
+
+static const MemoryRegionOps fcramcfg_ops = {
+    .read = fcramcfg_read,
+    .write = fcramcfg_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+};
 
 static void pdn_write(void *opaque, hwaddr off, uint64_t v, unsigned size)
 {
@@ -293,6 +325,14 @@ static void pdn_write(void *opaque, hwaddr off, uint64_t v, unsigned size)
             pdn_cpu_cnt_write(s, off + i - PDN_LGR_CPU_CNT, v >> (8 * i));
         }
         return;
+    }
+    if (off == PDN_LGR_CNT && s->l2c) {
+        /*
+         * The L2 cache controller does not answer until this is written:
+         * reading its registers before that aborts on the console
+         * (n3ds-probes io_l2c).
+         */
+        memory_region_set_enabled(s->l2c, v & 1);
     }
     if (off == PDN_LGR_SOCMODE) {
         uint16_t old = regs_read(s->pdn_regs, PDN_LGR_SOCMODE, 2);
@@ -336,6 +376,8 @@ static void n3ds_sysctl_reset(DeviceState *dev)
     memset(s->cfg_regs, 0, sizeof(s->cfg_regs));
     memset(s->cfg11_regs, 0, sizeof(s->cfg11_regs));
     memset(s->pdn_regs, 0, sizeof(s->pdn_regs));
+    memset(s->fcramcfg_regs, 0, sizeof(s->fcramcfg_regs));
+    regs_write(s->fcramcfg_regs, 0x000, 0x00000001, 4);   /* io_axi */
     /*
      * Values read on a New 2DS XL right after the Luma3DS chainloader
      * (n3ds-probes io_cfg9 / io_cfg11 / io_pdn snapshots); with the real
@@ -350,7 +392,10 @@ static void n3ds_sysctl_reset(DeviceState *dev)
         regs_write(s->cfg11_regs, 0x004, 0x9c989490, 4);
         regs_write(s->cfg11_regs, 0x008, 0x8c888480, 4);
         regs_write(s->cfg11_regs, 0x00c, 0x9c989490, 4);
+        regs_write(s->cfg11_regs, 0x100, 0x00010000, 4);
+        regs_write(s->cfg11_regs, 0x104, 0x00000003, 4);
         regs_write(s->pdn_regs, 0x200, 0x0001007f, 4);   /* PDN_GPU_CNT (Luma) */
+        regs_write(s->pdn_regs, 0x210, 0x00000007, 4);
     }
     if (s->boot9_lock) {
         memory_region_set_enabled(s->boot9_lock, s->cfg9_regs[0] & 1);
@@ -361,6 +406,9 @@ static void n3ds_sysctl_reset(DeviceState *dev)
     /* PDN_LGR_CPU_CNT and PDN_LGR_SOCMODE read 0 at hand-off */
     if (s->extwram) {
         memory_region_set_enabled(s->extwram, false);
+    }
+    if (s->l2c) {
+        memory_region_set_enabled(s->l2c, false);
     }
 }
 
@@ -375,16 +423,21 @@ static void n3ds_sysctl_init(Object *obj)
     memory_region_init_io(&s->cfg11, obj, &cfg11_ops, s, "n3ds.cfg11", 0x1000);
     memory_region_init_io(&s->pdn, obj, &pdn_ops, s, "n3ds.pdn", 0x1000);
     memory_region_init_io(&s->otp, obj, &otp_ops, s, "n3ds.otp", 0x1000);
+    memory_region_init_io(&s->fcramcfg, obj, &fcramcfg_ops, s,
+                          "n3ds.fcramcfg", 0x1000);
     sysbus_init_mmio(sbd, &s->cfg9);
     sysbus_init_mmio(sbd, &s->cfg);
     sysbus_init_mmio(sbd, &s->prng);
     sysbus_init_mmio(sbd, &s->cfg11);
     sysbus_init_mmio(sbd, &s->pdn);
     sysbus_init_mmio(sbd, &s->otp);
+    sysbus_init_mmio(sbd, &s->fcramcfg);
     sysbus_init_irq(sbd, &s->socmode_irq);
 }
 
 static const Property n3ds_sysctl_properties[] = {
+    DEFINE_PROP_LINK("l2c", N3DSSysctlState, l2c,
+                     TYPE_MEMORY_REGION, MemoryRegion *),
     DEFINE_PROP_LINK("extwram", N3DSSysctlState, extwram,
                      TYPE_MEMORY_REGION, MemoryRegion *),
     /* CFG11_SOCINFO: 1 = CTR, 3 = LGR1 (New 3DS proto), 7 = LGR2 (New 3DS) */

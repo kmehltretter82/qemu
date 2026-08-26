@@ -5,6 +5,12 @@
  * anywhere - so a guest can never enumerate the Atheros part sitting on the
  * controller at 0x10122000. This provides just enough of an SDIO card for
  * the SDIO stack to find it: the operation-condition handshake, direct
+ * The ids and the function interface code are what the console reports:
+ * 0x0271:0x0201, an Atheros AR6002. Its CIS also carries CISTPL_DEVICE,
+ * CISTPL_CONFIG, CISTPL_CFTABLE_ENTRY, CISTPL_NO_LINK and three vendor
+ * tuples 0x80..0x82, which are not modelled here because only their codes
+ * and lengths were read back from hardware, not their contents.
+ *
  * register access, the CCCR, and a CIS carrying the vendor and device ids a
  * driver matches on.
  *
@@ -133,7 +139,7 @@ static uint8_t sdio_read_reg(N3DSSdioState *s, unsigned fn, uint32_t addr)
         /* function 1 basic registers */
         if (addr >= FBR_BASE(1) && addr < FBR_BASE(2)) {
             switch (addr - FBR_BASE(1)) {
-            case 0x00: return 0x0C;               /* interface code */
+            case 0x00: return 0x00;               /* interface code, as measured */
             case 0x09: return FN1_CIS_ADDR & 0xFF;
             case 0x0A: return (FN1_CIS_ADDR >> 8) & 0xFF;
             case 0x0B: return (FN1_CIS_ADDR >> 16) & 0xFF;
@@ -189,12 +195,13 @@ int n3ds_sdio_command(N3DSSdioState *s, uint32_t cmd, uint32_t arg,
         return 0;                             /* no response */
     case 5:                                   /* IO_SEND_OP_COND */
         /*
-         * First call carries no OCR and reports the card busy; once the
-         * host echoes the voltage window back the card comes ready.
+         * One I/O function and the voltage window the console reports.
+         * The card does not come ready on the first echo of the window -
+         * hardware still answers busy there - so a host has to poll, which
+         * is what both the mmc core and our probe do.
          */
-        r = (1u << 28) |                      /* one I/O function */
-            0x00300000;                       /* 3.2-3.4 V */
-        if (arg & 0x00FFFF00) {
+        r = (1u << 28) | s->ocr;
+        if (arg & 0x00FFFF00 && ++s->ocr_polls >= 2) {
             r |= 1u << 31;                    /* ready */
             s->state = SDIO_ST_READY;
         }
@@ -210,6 +217,13 @@ int n3ds_sdio_command(N3DSSdioState *s, uint32_t cmd, uint32_t arg,
         break;
     case 52: {                                /* IO_RW_DIRECT */
         unsigned fn = IO_RW_FUNC(arg);
+        /*
+         * Before the card is selected it does not answer - a CCCR read
+         * attempted straight after CMD5 times out on hardware.
+         */
+        if (s->state < SDIO_ST_SELECTED) {
+            return 0;
+        }
         uint32_t addr = IO_RW_ADDR(arg);
         uint8_t data = IO_RW_DATA(arg);
 
@@ -330,6 +344,7 @@ static void n3ds_sdio_reset(DeviceState *dev)
     N3DSSdioState *s = N3DS_SDIO(dev);
 
     s->state = SDIO_ST_IDLE;
+    s->ocr_polls = 0;
     s->rca = 0;
     s->io_enable = 0;
     s->int_enable = 0;
@@ -347,7 +362,8 @@ static const Property n3ds_sdio_properties[] = {
      * New3DS carries (an AR6014) and what ath6kl binds.
      */
     DEFINE_PROP_UINT16("vendor-id", N3DSSdioState, vendor_id, 0x0271),
-    DEFINE_PROP_UINT16("device-id", N3DSSdioState, device_id, 0x0400),
+    DEFINE_PROP_UINT16("device-id", N3DSSdioState, device_id, 0x0201),
+    DEFINE_PROP_UINT32("ocr", N3DSSdioState, ocr, 0x00FFFF00),
 };
 
 static void n3ds_sdio_class_init(ObjectClass *klass, const void *data)

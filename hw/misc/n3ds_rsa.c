@@ -395,11 +395,14 @@ static void n3ds_rsa_reset(DeviceState *dev)
     N3DSRsaState *s = N3DS_RSA(dev);
     int i;
 
-    s->cnt = 0;
+    /* RSA_CNT as the chainloader leaves it (n3ds-probes io_crypto) */
+    s->cnt = 0x00000030;
     memset(s->txt, 0, sizeof(s->txt));
     for (i = 0; i < 4; i++) {
         memset(&s->slot[i], 0, sizeof(s->slot[i]));
         s->slot[i].size = 0x40;
+        /* the boot ROM leaves a key in every slot (n3ds-probes rsa_regs) */
+        s->slot[i].cnt = SLOTCNT_KEYSET;
     }
 }
 

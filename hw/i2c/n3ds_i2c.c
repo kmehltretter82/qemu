@@ -19,6 +19,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
 #include "hw/i2c/i2c.h"
@@ -52,6 +53,7 @@ struct N3DSI2CState {
 
     uint8_t data;
     uint8_t cnt;
+    uint8_t cnt_reset;
     uint16_t cntex;
     uint16_t scl;
     bool in_xfer;
@@ -158,11 +160,17 @@ static void n3ds_i2c_reset(DeviceState *dev)
     N3DSI2CState *s = N3DS_I2C(dev);
 
     s->data = 0;
-    s->cnt = 0;
-    s->cntex = 0;
-    s->scl = 0;
+    s->cnt = s->cnt_reset;
+    /* CNTEX and SCL read this on all three buses (n3ds-probes io_i2c) */
+    s->cntex = 0x0003;
+    s->scl = 0x0500;
     s->in_xfer = false;
 }
+
+static const Property n3ds_i2c_extra_properties[] = {
+    /* CNT keeps whatever the last transfer left; the MCU bus reads 0x61 */
+    DEFINE_PROP_UINT8("cnt-reset", N3DSI2CState, cnt_reset, 0),
+};
 
 static void n3ds_i2c_init(Object *obj)
 {
@@ -180,6 +188,7 @@ static void n3ds_i2c_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     device_class_set_legacy_reset(dc, n3ds_i2c_reset);
+    device_class_set_props(dc, n3ds_i2c_extra_properties);
 }
 
 static const TypeInfo n3ds_i2c_info = {

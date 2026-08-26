@@ -274,6 +274,22 @@ static void n3ds_lcd_reset(DeviceState *dev)
     s->gpu_regs[(PDC1_BASE + PDC_FB_A1) >> 2] = 0x18446500;
     s->gpu_regs[(PDC1_BASE + PDC_FORMAT) >> 2] = 0x80301;
     s->gpu_regs[(PDC1_BASE + PDC_STRIDE) >> 2] = 0x2D0;
+    /*
+     * Timing and control as the chainloader leaves them: both controllers
+     * are running with the VBlank interrupt unmasked (n3ds-probes io_pdc0,
+     * io_pdc1), and the LCD block keeps its own configuration (io_lcd_a,
+     * io_lcd_b).
+     */
+    s->gpu_regs[(PDC0_BASE + 0x00) >> 2] = 0x1C2;
+    s->gpu_regs[(PDC0_BASE + 0x04) >> 2] = 0xD1;
+    s->gpu_regs[(PDC0_BASE + PDC_CNT) >> 2] = 0x00010501;
+    s->gpu_regs[(PDC1_BASE + 0x00) >> 2] = 0x1C2;
+    s->gpu_regs[(PDC1_BASE + 0x04) >> 2] = 0xD1;
+    s->gpu_regs[(PDC1_BASE + PDC_CNT) >> 2] = 0x00010501;
+    s->lcd_regs[0x010 >> 2] = 0x00000900;
+    s->lcd_regs[0x014 >> 2] = 0x00000001;
+    s->lcd_regs[0x240 >> 2] = 0x0000005F;
+    s->lcd_regs[0x244 >> 2] = 0x0001023E;
 }
 
 static void n3ds_lcd_realize(DeviceState *dev, Error **errp)

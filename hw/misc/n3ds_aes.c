@@ -459,7 +459,8 @@ static void n3ds_aes_reset(DeviceState *dev)
 {
     N3DSAesState *s = N3DS_AES(dev);
 
-    s->cnt = 0;
+    /* AES_CNT as the chainloader leaves it (n3ds-probes io_crypto) */
+    s->cnt = 0x33c03000;
     s->mac_blkcnt = s->blkcnt = 0;
     s->keysel = s->keycnt = 0;
     memset(s->ctr, 0, sizeof(s->ctr));

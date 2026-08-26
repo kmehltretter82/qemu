@@ -24,6 +24,9 @@ static uint64_t mpcore_scu_read(void *opaque, hwaddr offset,
     case 0x00: /* Control.  */
         return s->control;
     case 0x04: /* Configuration.  */
+        if (s->config) {
+            return s->config;
+        }
         id = ((1 << s->num_cpu) - 1) << 4;
         return id | (s->num_cpu - 1);
     case 0x08: /* CPU status.  */
@@ -44,7 +47,8 @@ static void mpcore_scu_write(void *opaque, hwaddr offset,
     /* SCU */
     switch (offset) {
     case 0: /* Control register.  */
-        s->control = value & 1;
+        /* only the enable bit is writable; the rest read back as reset */
+        s->control = (s->control & ~1u) | (value & 1);
         break;
     case 0x08: /* CPU status: per-CPU power status bits, stored only.  */
         s->cpu_status = value & 0xff;
@@ -68,6 +72,14 @@ static void arm11_scu_realize(DeviceState *dev, Error **errp)
 {
 }
 
+static void arm11_scu_reset(DeviceState *dev)
+{
+    ARM11SCUState *s = ARM11_SCU(dev);
+
+    s->control = s->control_reset;
+    s->cpu_status = s->cpu_status_reset;
+}
+
 static void arm11_scu_init(Object *obj)
 {
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
@@ -80,6 +92,14 @@ static void arm11_scu_init(Object *obj)
 
 static const Property arm11_scu_properties[] = {
     DEFINE_PROP_UINT32("num-cpu", ARM11SCUState, num_cpu, 1),
+    /*
+     * A board can describe what its SCU actually reads. The defaults keep
+     * the generic behaviour: control zero, configuration derived from the
+     * CPU count, no CPU marked powered down.
+     */
+    DEFINE_PROP_UINT32("control-reset", ARM11SCUState, control_reset, 0),
+    DEFINE_PROP_UINT32("config", ARM11SCUState, config, 0),
+    DEFINE_PROP_UINT8("cpu-status-reset", ARM11SCUState, cpu_status_reset, 0),
 };
 
 static void arm11_scu_class_init(ObjectClass *oc, const void *data)
@@ -87,6 +107,7 @@ static void arm11_scu_class_init(ObjectClass *oc, const void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = arm11_scu_realize;
+    device_class_set_legacy_reset(dc, arm11_scu_reset);
     device_class_set_props(dc, arm11_scu_properties);
 }
 

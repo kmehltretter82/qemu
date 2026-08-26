@@ -27,6 +27,8 @@ struct N3DSSdioState {
 
     int state;
     uint16_t rca;
+    uint32_t ocr;
+    unsigned ocr_polls;
     uint8_t io_enable;
     uint8_t int_enable;
     uint8_t bus_iface;

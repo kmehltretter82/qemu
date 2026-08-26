@@ -57,7 +57,11 @@ OBJECT_DECLARE_SIMPLE_TYPE(N3DSTmioState, N3DS_TMIO)
 #define STAT0_CARD_INSERT   0x0010
 #define STAT0_SIGSTATE      0x0020
 #define STAT0_WRPROTECT     0x0080
-#define STAT0_LIVE_MASK     (STAT0_SIGSTATE | STAT0_WRPROTECT)
+#define STAT0_CARD_INSERT_A 0x0200
+#define STAT0_SIGSTATE_A    0x0400
+#define STAT0_LIVE_MASK     (STAT0_SIGSTATE | STAT0_WRPROTECT | \
+                             STAT0_CARD_INSERT | STAT0_CARD_INSERT_A | \
+                             STAT0_SIGSTATE_A)
 
 #define STAT1_CMD_IDX_ERR   0x0001
 #define STAT1_CRCFAIL       0x0002
@@ -71,6 +75,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(N3DSTmioState, N3DS_TMIO)
 #define STAT1_ILL_FUNC      0x2000
 #define STAT1_CMD_BUSY      0x4000
 #define STAT1_ILL_ACCESS    0x8000
+/*
+ * Both controllers idle with these two set on the console, in every probe
+ * round and whether or not a card is in the slot (n3ds-probes io_tmio_a,
+ * io_wifi). The driver's error mask ignores them.
+ */
+#define STAT1_IDLE          0x2080
 
 #define DATACTL32_32BIT     0x0002
 #define DATACTL32_RXRDY     0x0100   /* FIFO32 holds a full block (IRQ flag) */
@@ -102,6 +112,9 @@ struct N3DSTmioState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
+    uint8_t nports;
+    bool port1_present;
+    bool luma_state;
     SDBus sdbus[N3DS_TMIO_NPORTS];
     /*
      * Optional SDIO function on port 0. The WiFi controller has an Atheros
@@ -290,6 +303,8 @@ static void tmio_send_command(N3DSTmioState *s, uint16_t cmd)
                                     bus ? "no card" : "bad port");
         tmio_clear_status(s, 0, STAT1_CMD_BUSY);
         tmio_set_status(s, STAT0_CMDRESPEND, STAT1_CMDTIMEOUT);
+        /* the response registers read back zero, not the previous reply */
+        tmio_set_response(s, NULL, 0);
         tmio_update_irq(s);
         return;
     }
@@ -322,6 +337,8 @@ static void tmio_send_command(N3DSTmioState *s, uint16_t cmd)
          */
         tmio_clear_status(s, 0, STAT1_CMD_BUSY);
         tmio_set_status(s, STAT0_CMDRESPEND, STAT1_CMDTIMEOUT);
+        /* the response registers read back zero, not the previous reply */
+        tmio_set_response(s, NULL, 0);
         tmio_update_irq(s);
         return;
     }
@@ -419,13 +436,28 @@ static uint16_t tmio_status0(N3DSTmioState *s)
     uint16_t v = R16(s, REG_STATUS0) & ~STAT0_LIVE_MASK;
 
     if (tmio_have_sdio(s)) {
-        /* the WiFi part is soldered on: always present, never write protected */
-        v |= STAT0_SIGSTATE | STAT0_WRPROTECT;
+        /*
+         * The WiFi part is soldered on, so the console reports it as present
+         * and inserted and never write protected: 0x0630.
+         */
+        v |= STAT0_CARD_INSERT | STAT0_CARD_INSERT_A |
+             STAT0_SIGSTATE | STAT0_SIGSTATE_A;
     } else if (bus && sdbus_get_inserted(bus)) {
-        v |= STAT0_SIGSTATE;
+        /*
+         * A card in the slot reads 0x04a0 - the insert bits are event flags
+         * the boot ROM has already cleared by this point, and write protect
+         * is the level of the pin, high meaning not protected.
+         */
+        v |= STAT0_SIGSTATE | STAT0_SIGSTATE_A;
         if (!sdbus_get_readonly(bus)) {
             v |= STAT0_WRPROTECT;
         }
+    } else if (s->port1_present) {
+        /*
+         * Nothing on port 0, but the controller reports something attached
+         * to port 1: 0x0600. What it is on the SDIO3 block is not known.
+         */
+        v |= STAT0_CARD_INSERT_A | STAT0_SIGSTATE_A;
     }
     return v;
 }
@@ -459,6 +491,8 @@ static uint64_t tmio_read16(N3DSTmioState *s, hwaddr off)
     switch (off) {
     case REG_STATUS0:
         return tmio_status0(s);
+    case REG_STATUS1:
+        return R16(s, REG_STATUS1) | STAT1_IDLE;
     case REG_DATACTL32:
         return tmio_datactl32(s);
     case REG_FIFO16:
@@ -479,6 +513,10 @@ static uint64_t tmio_read_inner(void *opaque, hwaddr off, unsigned size)
     }
     if (size == 4) {
         if (off == REG_FIFO32) {
+            /* an empty FIFO reads all ones (n3ds-probes io_tmio_b) */
+            if (s->xfer != XFER_READ) {
+                return 0xFFFFFFFF;
+            }
             return tmio_fifo_read(s, 4);
         }
         return tmio_read16(s, off) | (tmio_read16(s, off + 2) << 16);
@@ -623,9 +661,38 @@ static void n3ds_tmio_reset(DeviceState *dev)
     W16(s, REG_DATACTL32, DATACTL32_32BIT);
     W16(s, REG_BLKCOUNT32, 1);
     W16(s, REG_DATACTL, 0x1012);
-    W16(s, REG_IRMASK0, 0x031D);
-    W16(s, REG_IRMASK1, 0x837F);
+    /* both mask registers read zero on the console (io_tmio_a, io_sdmmc32) */
+    W16(s, REG_IRMASK0, 0);
+    W16(s, REG_IRMASK1, 0);
     W16(s, REG_PROTECTED, 0);
+    /*
+     * PORTSEL bits 8..9 read back the number of ports the controller has:
+     * two on the SD/eMMC and SDIO3 blocks, one on the WiFi block
+     * (n3ds-probes io_tmio_a, io_sdio3, io_wifi).
+     */
+    W16(s, REG_PORTSEL, s->nports << 8);
+    if (s->luma_state) {
+        /*
+         * What the SD controller still holds from the boot ROM's last read:
+         * the command and its argument, the block settings, the four
+         * response halves, and the clock and bus options it was left with
+         * (n3ds-probes io_tmio_a, io_tmio_b).
+         */
+        W16(s, REG_CMD, 0x3C12);
+        W16(s, REG_ARG0, 0xF640);
+        W16(s, REG_ARG1, 0x0001);
+        W16(s, REG_STOP, 0x0100);
+        W16(s, REG_BLKCOUNT, 0x0038);
+        W16(s, REG_RESP0 + 0, 0x0B00);
+        W16(s, REG_RESP0 + 4, 0x0900);
+        W16(s, REG_RESP0 + 8, 0x0B00);
+        W16(s, REG_RESP0 + 12, 0x0900);
+        W16(s, REG_CLKCTL, 0x0301);
+        W16(s, REG_OPT, 0x40EE);
+        W16(s, 0x02C, 0x2000);
+        W16(s, REG_RESET, 0x0007);
+        W16(s, 0x0E2, 0x0009);
+    }
     qemu_set_irq(s->irq, 0);
 }
 
@@ -647,6 +714,9 @@ static void n3ds_tmio_init(Object *obj)
 static const Property n3ds_tmio_properties[] = {
     DEFINE_PROP_LINK("sdio", N3DSTmioState, sdio, TYPE_N3DS_SDIO,
                      N3DSSdioState *),
+    DEFINE_PROP_UINT8("nports", N3DSTmioState, nports, 2),
+    DEFINE_PROP_BOOL("port1-present", N3DSTmioState, port1_present, false),
+    DEFINE_PROP_BOOL("luma-state", N3DSTmioState, luma_state, false),
 };
 
 static void n3ds_tmio_class_init(ObjectClass *klass, const void *data)

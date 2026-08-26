@@ -291,11 +291,12 @@ static void n3ds_pxi_reset(DeviceState *dev)
         s->side[i].recv_lvl = false;
     }
     /*
-     * Console after Luma3DS: the ARM9 reads SYNC 0x8000000e (0x0e received,
-     * sync IRQ enabled), the ARM11 reads 0x80000000, and both sides read
-     * CNT 0x8101.
+     * Console after Luma3DS: both sides read SYNC 0x8000000e - each has sent
+     * 0x0e and has the sync IRQ enabled - and both read CNT 0x8101
+     * (n3ds-probes io_pxi9, io_pxi11).
      */
     if (s->luma_state) {
+        s->side[0].sync_out = 0x0e;
         s->side[1].sync_out = 0x0e;
         s->side[0].sync_irqen = true;
         s->side[1].sync_irqen = true;

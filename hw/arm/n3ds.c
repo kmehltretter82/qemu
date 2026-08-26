@@ -344,6 +344,7 @@ static void n3ds_init(MachineState *machine)
     Object *cluster;
     DriveInfo *di;
     DeviceState *dev;
+    DeviceState *l2c_dev;
     I2CBus *i2cbus;
     int i;
 
@@ -369,6 +370,17 @@ static void n3ds_init(MachineState *machine)
         object_property_set_link(cpu, "memory", OBJECT(sysmem), &error_abort);
         /* New 3DS: cores 2 and 3 are held in reset until PDN releases them */
         object_property_set_bool(cpu, "start-powered-off", i >= 2, &error_abort);
+        /*
+         * The secondaries do not come up with the architectural SCTLR: the
+         * console's core 1 has the round-robin replacement bit set and cores
+         * 2 and 3 have that and high vectors as well (n3ds-probes
+         * core1_boot, core23_boot).
+         */
+        if (i == 1) {
+            ARM_CPU(cpu)->reset_sctlr = 0x00054078;
+        } else if (i >= 2) {
+            ARM_CPU(cpu)->reset_sctlr = 0x00056078;
+        }
         qdev_realize(DEVICE(cpu), NULL, &error_fatal);
     }
     qdev_realize(DEVICE(cluster), NULL, &error_fatal);
@@ -509,13 +521,28 @@ static void n3ds_init(MachineState *machine)
     s->mpcore = qdev_new(TYPE_ARM11MPCORE_PRIV);
     qdev_prop_set_uint32(s->mpcore, "num-cpu", N3DS_NUM_ARM11);
     qdev_prop_set_uint32(s->mpcore, "num-irq", 128);
+    {
+        /*
+         * What the console's SCU reads at hand-off (n3ds-probes io_scu):
+         * control 0x1ffe with the enable bit clear, a configuration whose
+         * "CPUs in coherency" nibble is still zero, and cores 2 and 3
+         * marked powered down.
+         */
+        Object *scu = object_resolve_path_component(OBJECT(s->mpcore), "scu");
+
+        object_property_set_uint(scu, "control-reset", 0x1ffe, &error_abort);
+        object_property_set_uint(scu, "config", 0x5003, &error_abort);
+        object_property_set_uint(scu, "cpu-status-reset", 0xf0, &error_abort);
+    }
     sysbus_realize_and_unref(SYS_BUS_DEVICE(s->mpcore), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->mpcore), 0, N3DS_MPCORE_BASE);
     for (i = 0; i < N3DS_NUM_ARM11; i++) {
         sysbus_connect_irq(SYS_BUS_DEVICE(s->mpcore), i,
                            qdev_get_gpio_in(DEVICE(&s->arm11[i]), ARM_CPU_IRQ));
     }
-    sysbus_create_simple("l2x0", N3DS_L2C_BASE, NULL);
+    l2c_dev = qdev_new("l2x0");
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(l2c_dev), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(l2c_dev), 0, N3DS_L2C_BASE);
     {
         static const hwaddr cdma_bases[2] = { N3DS_CDMA_BASE, N3DS_CDMA2_BASE };
 
@@ -565,6 +592,9 @@ static void n3ds_init(MachineState *machine)
     object_property_set_link(OBJECT(s->sysctl), "boot11-lock", OBJECT(&s->boot11_lock),
                              &error_abort);
     qdev_prop_set_bit(s->sysctl, "luma-state", !s->boot9_path);
+    object_property_set_link(OBJECT(s->sysctl), "l2c",
+                             OBJECT(sysbus_mmio_get_region(
+                                 SYS_BUS_DEVICE(l2c_dev), 0)), &error_abort);
     object_property_set_link(OBJECT(s->sysctl), "extwram",
                              OBJECT(&s->arm9_wram_ext), &error_abort);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(s->sysctl), &error_fatal);
@@ -574,6 +604,8 @@ static void n3ds_init(MachineState *machine)
     n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, s->sysctl, 3, N3DS_CFG11_BASE);
     n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, s->sysctl, 4, N3DS_PDN_BASE);
     n3ds_map(&s->arm9_mem, 0, s->sysctl, 5, N3DS_OTP9_BASE);
+    /* past the end of the shared I/O window, so map it directly */
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->sysctl), 6, N3DS_FCRAMCFG_BASE);
     if (s->otp_path) {
         g_autofree char *otp = NULL;
         gsize len = 0;
@@ -602,6 +634,8 @@ static void n3ds_init(MachineState *machine)
         object_property_set_link(OBJECT(xdma), "memory", OBJECT(&s->arm9_mem),
                                  &error_abort);
         n3ds_pl330_config(xdma);
+        /* the console's ARM9 DMA manager runs non-secure (io_xdma) */
+        qdev_prop_set_uint8(xdma, "mgr_ns_at_rst", 1);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(xdma), &error_fatal);
         n3ds_map(&s->arm9_mem, 0, xdma, 0, N3DS_XDMA_BASE);
     }
@@ -618,6 +652,7 @@ static void n3ds_init(MachineState *machine)
 
     /* ---- SD/MMC host (ARM9 side): SD card on port 0, eMMC on port 1 ---- */
     s->tmio = qdev_new(TYPE_N3DS_TMIO);
+    qdev_prop_set_bit(s->tmio, "luma-state", !s->boot9_path);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(s->tmio), &error_fatal);
     n3ds_map(&s->arm9_mem, 0, s->tmio, 0, N3DS_SDMMC_BASE);
     sysbus_connect_irq(SYS_BUS_DEVICE(s->tmio), 0,
@@ -685,6 +720,10 @@ static void n3ds_init(MachineState *machine)
 
         for (i = 0; i < 3; i++) {
             s->i2c[i] = qdev_new(TYPE_N3DS_I2C);
+            if (i2c_defs[i].base == N3DS_I2C2_BASE) {
+                /* the MCU bus keeps the boot ROM's last transfer state */
+                qdev_prop_set_uint8(s->i2c[i], "cnt-reset", 0x61);
+            }
             sysbus_realize_and_unref(SYS_BUS_DEVICE(s->i2c[i]), &error_fatal);
             n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, s->i2c[i], 0,
                      i2c_defs[i].base);
@@ -717,6 +756,17 @@ static void n3ds_init(MachineState *machine)
                                n3ds_gic_irq(s, spi_defs[i].irq));
         }
     }
+    {
+        /*
+         * The third SD host controller. Nothing is known to use it, but the
+         * console answers on it, so model it rather than leaving a hole.
+         */
+        DeviceState *sdio3 = qdev_new(TYPE_N3DS_TMIO);
+
+        qdev_prop_set_bit(sdio3, "port1-present", true);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(sdio3), &error_fatal);
+        n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, sdio3, 0, 0x10100000);
+    }
     dev = qdev_new(TYPE_N3DS_GPIO);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, dev, 0, N3DS_GPIO_BASE);
@@ -728,6 +778,7 @@ static void n3ds_init(MachineState *machine)
         dev = qdev_new(TYPE_N3DS_TMIO);
         object_property_set_link(OBJECT(dev), "sdio", OBJECT(sdio),
                                  &error_abort);
+        qdev_prop_set_uint8(dev, "nports", 1);   /* just the WiFi part */
     }
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, dev, 0, N3DS_WIFI_BASE);

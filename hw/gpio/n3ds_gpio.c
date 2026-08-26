@@ -66,7 +66,18 @@ static const MemoryRegionOps n3ds_gpio_ops = {
 static void n3ds_gpio_reset(DeviceState *dev)
 {
     N3DSGpioState *s = N3DS_GPIO(dev);
+
     memset(s->regs, 0, sizeof(s->regs));
+    /*
+     * What the console reads here after the Luma3DS chainloader
+     * (n3ds-probes io_gpio_a / io_gpio_b). The WiFi enables at 0x14 and
+     * 0x28 are zero at this point - the module is still powered down.
+     */
+    s->regs[0x00] = 0x03;
+    s->regs[0x10] = 0x02;
+    s->regs[0x20] = 0xba;
+    s->regs[0x21] = 0x0f;
+    s->regs[0x22] = 0x40;
 }
 
 static void n3ds_gpio_init(Object *obj)

@@ -289,7 +289,8 @@ static void n3ds_sha_reset(DeviceState *dev)
 {
     N3DSShaState *s = N3DS_SHA(dev);
 
-    s->cnt = 0;
+    /* SHA_CNT as the chainloader leaves it (n3ds-probes io_crypto) */
+    s->cnt = 0x00000008;
     sha_init_state(s);
 }
 

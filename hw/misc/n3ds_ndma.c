@@ -286,6 +286,15 @@ static void n3ds_ndma_reset(DeviceState *dev)
     /* global control as the console reports it (n3ds-probes ndma_regs) */
     s->global = 0x80060001;
     memset(s->ch, 0, sizeof(s->ch));
+    /*
+     * Channel 0 still holds the descriptor of the boot ROM's last SD read -
+     * the card FIFO into FCRAM - with the channel disabled (io_ndma).
+     */
+    s->ch[0].sad = 0x1000610c;
+    s->ch[0].dad = 0x2004bc00;
+    s->ch[0].cur_sad = s->ch[0].sad;
+    s->ch[0].cur_dad = s->ch[0].dad;
+    s->ch[0].cnt = 0x06074000;
     s->running = false;
 }
 
