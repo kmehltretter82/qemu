@@ -157,7 +157,14 @@ static void ndma_run(N3DSNdmaState *s)
                 continue;
             }
             if (c->cnt & CNT_IMMEDIATE) {
-                ndma_move(s, c, c->remaining);
+                /*
+                 * Immediate mode transfers the whole thing at once; the
+                 * length is the total count, or the write count when no
+                 * total is programmed (boot9strap's NDMA blob does this).
+                 */
+                uint32_t len = c->remaining ? c->remaining : c->wcnt;
+
+                ndma_move(s, c, len);
                 c->remaining = 0;
                 ndma_finish(s, n);
                 progress = true;
@@ -242,7 +249,7 @@ static void n3ds_ndma_write(void *opaque, hwaddr off, uint64_t val, unsigned siz
         }
         return;
     }
-    qemu_log_mask(LOG_UNIMP, "n3ds-ndma: unimplemented write 0x%02x\n", (unsigned)off);
+    /* 0xE4..0xFF is past the 8 channels: reserved, ignore quietly */
 }
 
 static const MemoryRegionOps n3ds_ndma_ops = {

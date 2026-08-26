@@ -82,6 +82,7 @@ struct N3DSMachineState {
     MemoryRegion boot9_lock;
     MemoryRegion boot9_lock_alias;
     MemoryRegion boot9_zero;
+    MemoryRegion b9s_scratch;        /* boot9strap loads a FIRM section at 0xC0000000 */
     MemoryRegion vram;
     MemoryRegion qtm;
     MemoryRegion dsp;
@@ -475,6 +476,9 @@ static void n3ds_init(MachineState *machine)
     memory_region_init_rom(&s->boot9, NULL, "n3ds.boot9", N3DS_BOOTROM_SIZE,
                            &error_fatal);
     memory_region_add_subregion(&s->arm9_mem, N3DS_BOOTROM_BASE, &s->boot9);
+    memory_region_init_ram(&s->b9s_scratch, NULL, "n3ds.b9s-scratch",
+                           0x1000, &error_fatal);
+    memory_region_add_subregion(&s->arm9_mem, 0xC0000000, &s->b9s_scratch);
     memory_region_init_rom(&s->boot9_zero, NULL, "n3ds.boot9.locked",
                            N3DS_BOOTROM_SIZE / 2, &error_fatal);
     memory_region_init(&s->boot9_lock, OBJECT(machine), "n3ds.boot9-lock", 1ull << 32);
