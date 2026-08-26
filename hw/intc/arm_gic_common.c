@@ -287,7 +287,14 @@ static void arm_gic_common_reset_hold(Object *obj, ResetType type)
      * priority_mask[] values, because if they are zero then NS
      * code cannot ever rewrite the priority to anything else.
      */
-    if (s->security_extn && s->irq_reset_nonsecure) {
+    if (s->priority_reset) {
+        /*
+         * A board can say what its firmware leaves in the priority
+         * registers, for a machine that starts from a hand-off rather than
+         * from a cold GIC.
+         */
+        resetprio = s->priority_reset;
+    } else if (s->security_extn && s->irq_reset_nonsecure) {
         resetprio = 0x80;
     } else {
         resetprio = 0;
@@ -389,6 +396,7 @@ static const Property arm_gic_common_properties[] = {
     /* True if the GIC should implement the virtualization extensions */
     DEFINE_PROP_BOOL("has-virtualization-extensions", GICState, virt_extn, 0),
     DEFINE_PROP_UINT32("num-priority-bits", GICState, n_prio_bits, 8),
+    DEFINE_PROP_UINT8("priority-reset", GICState, priority_reset, 0),
 };
 
 static void arm_gic_common_class_init(ObjectClass *klass, const void *data)

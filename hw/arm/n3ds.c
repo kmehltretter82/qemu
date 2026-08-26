@@ -531,6 +531,18 @@ static void n3ds_init(MachineState *machine)
         Object *scu = object_resolve_path_component(OBJECT(s->mpcore), "scu");
 
         object_property_set_uint(scu, "control-reset", 0x1ffe, &error_abort);
+        if (!s->boot9_path) {
+            /*
+             * Every interrupt priority reads 0x80 on a console booted through
+             * the chainloader - the firmware ranks them all equally before
+             * handing over (n3ds-probes gic_prio_bits).
+             */
+            Object *gic = object_resolve_path_component(OBJECT(s->mpcore),
+                                                        "gic");
+
+            object_property_set_uint(gic, "priority-reset", 0x80,
+                                     &error_abort);
+        }
         object_property_set_uint(scu, "config", 0x5003, &error_abort);
         object_property_set_uint(scu, "cpu-status-reset", 0xf0, &error_abort);
     }
