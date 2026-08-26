@@ -3055,6 +3055,75 @@ static const ARMCPRegInfo ttbcr2_reginfo = {
     },
 };
 
+/*
+ * ARM11 performance monitors (cp15 c15, crm 12): a control register, a
+ * cycle counter and two event counters. The event counters are storage
+ * only - nothing here counts real micro-architectural events - but the
+ * cycle counter advances, which is what firmware and Linux's ARMv6 perf
+ * back-end use it for.
+ */
+#define ARM11_PMU_HZ  268111856   /* nominal ARM11 clock on a 3DS */
+
+#define PMNC_ENABLE     (1u << 0)
+#define PMNC_RESET_PMN  (1u << 1)
+#define PMNC_RESET_CCNT (1u << 2)
+#define PMNC_CCNT_DIV64 (1u << 3)
+
+static uint64_t arm11_cycles_now(void)
+{
+    return muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
+                    ARM11_PMU_HZ, NANOSECONDS_PER_SECOND);
+}
+
+static uint64_t arm11_ccnt_read(CPUARMState *env, const ARMCPRegInfo *ri)
+{
+    uint64_t delta;
+
+    if (!(env->cp15.c15_pmnc & PMNC_ENABLE)) {
+        return env->cp15.c15_ccnt_base;
+    }
+    delta = arm11_cycles_now() - env->cp15.c15_ccnt_base;
+    if (env->cp15.c15_pmnc & PMNC_CCNT_DIV64) {
+        delta >>= 6;
+    }
+    return (uint32_t)delta;
+}
+
+static void arm11_ccnt_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                             uint64_t value)
+{
+    env->cp15.c15_ccnt_base = arm11_cycles_now() - value;
+}
+
+static void arm11_pmnc_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                             uint64_t value)
+{
+    if (value & PMNC_RESET_CCNT) {
+        env->cp15.c15_ccnt_base = arm11_cycles_now();
+    }
+    if (value & PMNC_RESET_PMN) {
+        env->cp15.c15_pmn[0] = 0;
+        env->cp15.c15_pmn[1] = 0;
+    }
+    /* the two reset bits are write-only and read back as zero */
+    env->cp15.c15_pmnc = value & ~(PMNC_RESET_PMN | PMNC_RESET_CCNT);
+}
+
+static const ARMCPRegInfo arm11_pmu_cp_reginfo[] = {
+    { .name = "PMNC", .cp = 15, .crn = 15, .crm = 12, .opc1 = 0, .opc2 = 0,
+      .access = PL1_RW, .fieldoffset = offsetof(CPUARMState, cp15.c15_pmnc),
+      .writefn = arm11_pmnc_write, .raw_writefn = raw_write, .resetvalue = 0 },
+    { .name = "CCNT", .cp = 15, .crn = 15, .crm = 12, .opc1 = 0, .opc2 = 1,
+      .access = PL1_RW, .type = ARM_CP_IO | ARM_CP_NO_RAW,
+      .readfn = arm11_ccnt_read, .writefn = arm11_ccnt_write },
+    { .name = "PMN0", .cp = 15, .crn = 15, .crm = 12, .opc1 = 0, .opc2 = 2,
+      .access = PL1_RW, .fieldoffset = offsetof(CPUARMState, cp15.c15_pmn[0]),
+      .resetvalue = 0 },
+    { .name = "PMN1", .cp = 15, .crn = 15, .crm = 12, .opc1 = 0, .opc2 = 3,
+      .access = PL1_RW, .fieldoffset = offsetof(CPUARMState, cp15.c15_pmn[1]),
+      .resetvalue = 0 },
+};
+
 static const ARMCPRegInfo dummy_c15_cp_reginfo[] = {
     /*
      * RAZ/WI the whole crn=15 space, when we don't have a more specific
@@ -7285,6 +7354,9 @@ void register_cp_regs_for_features(ARMCPU *cpu)
     }
     if (arm_feature(env, ARM_FEATURE_DUMMY_C15_REGS)) {
         define_arm_cp_regs(cpu, dummy_c15_cp_reginfo);
+    }
+    if (cpu->has_arm11_pmu) {
+        define_arm_cp_regs(cpu, arm11_pmu_cp_reginfo);
     }
     if (arm_feature(env, ARM_FEATURE_LPAE)) {
         define_arm_cp_regs(cpu, lpae_cp_reginfo);

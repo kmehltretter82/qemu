@@ -236,6 +236,7 @@ static void arm11mpcore_initfn(Object *obj)
     cpu->tcmtr_reads_midr = true;
     cpu->tlbtr = 0x00000800;
     cpu->no_ifar = true;
+    cpu->has_arm11_pmu = true;
     SET_IDREG(isar, ID_PFR0, 0x111);
     SET_IDREG(isar, ID_PFR1, 0x1);
     /* ID_DFR0 = 2, ID_AFR0 = 0 as read on a New 2DS XL (they were swapped) */

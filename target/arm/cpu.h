@@ -507,6 +507,10 @@ typedef struct CPUArchState {
         uint32_t c15_threadid; /* TI debugger thread-ID.  */
         uint32_t c15_config_base_address; /* SCU base address.  */
         uint32_t c15_diagnostic; /* diagnostic register */
+        /* ARM11 performance monitors (cp15 c15, crm 12) */
+        uint32_t c15_pmnc;       /* control register */
+        uint32_t c15_pmn[2];     /* event counters */
+        uint64_t c15_ccnt_base;  /* cycle counter origin */
         uint32_t c15_power_diagnostic;
         uint32_t c15_power_control; /* power control */
         uint64_t dbgbvr[16]; /* breakpoint value registers */
@@ -1127,6 +1131,8 @@ struct ArchCPU {
     uint32_t tlbtr;
     bool tcmtr_reads_midr;
     bool no_ifar;
+    /* ARM11-style performance monitors at cp15 c15, crm 12 */
+    bool has_arm11_pmu;
     bool no_cache_lockdown;
     /*
      * PMSAv5 (ARM946E-S) TCM region register writes: the TCMs are board
