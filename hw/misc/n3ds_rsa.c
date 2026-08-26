@@ -305,6 +305,8 @@ static uint64_t n3ds_rsa_read(void *opaque, hwaddr off, unsigned size)
         return rsa_area_read(s, s->slot[CNT_SLOT(s->cnt)].mod, off - REG_MOD, size);
     } else if ((off & ~3) == REG_CNT) {
         v = s->cnt;
+    } else if ((off & ~3) == REG_UNK_F0) {
+        v = 0x20000000;      /* fixed value read on a New 2DS XL */
     }
     return (v >> (8 * (off & 3))) & (size == 4 ? 0xFFFFFFFF : size == 2 ? 0xFFFF : 0xFF);
 }

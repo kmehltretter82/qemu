@@ -46,6 +46,14 @@ OBJECT_DECLARE_SIMPLE_TYPE(N3DSNdmaState, N3DS_NDMA)
 #define CNT_REPEAT        (1u << 29)
 #define CNT_IRQ_EN        (1u << 30)
 #define CNT_BUSY          (1u << 31)
+/*
+ * Implemented CNT bits, measured on a New 2DS XL (n3ds-probes ndma_regs:
+ * writing 0x7fffffff reads back 0x7f0ffc1f): device-to-device startup
+ * (4-0), address modes and reloads (15-10), block size (19-16), startup
+ * mode, immediate/repeat/IRQ (30-24).
+ */
+#define CNT_IMPL_MASK     0x7F0FFC1Fu
+#define BCNT_MASK         0x0003FFFFu
 
 #define STARTUP_AES_IN    8
 #define STARTUP_AES_OUT   9
@@ -55,8 +63,15 @@ OBJECT_DECLARE_SIMPLE_TYPE(N3DSNdmaState, N3DS_NDMA)
 #define AES_CNT_ADDR      0x10009000u
 
 typedef struct {
+    /*
+     * Writes land in the latches; the internal working registers are loaded
+     * from them when the channel starts, and reads return the working ones
+     * (measured: writing 0xffffffff to SAD/TCNT/WCNT while idle does not
+     * change what they read back, and after a transfer SAD/DAD show the
+     * advanced addresses and WCNT the words left).
+     */
     uint32_t sad, dad, tcnt, wcnt, bcnt, fdata, cnt;
-    uint32_t cur_sad, cur_dad, remaining;
+    uint32_t cur_sad, cur_dad, remaining, cur_wcnt;
 } NdmaChannel;
 
 struct N3DSNdmaState {
@@ -158,19 +173,18 @@ static void ndma_run(N3DSNdmaState *s)
             }
             if (c->cnt & CNT_IMMEDIATE) {
                 /*
-                 * Immediate mode transfers the whole thing at once; the
-                 * length is the total count, or the write count when no
-                 * total is programmed (boot9strap's NDMA blob does this).
+                 * Immediate mode always moves the write count, whatever the
+                 * total count says (measured: with tcnt 6 / wcnt 2 exactly
+                 * two words move). boot9strap's register image relies on it.
                  */
-                uint32_t len = c->remaining ? c->remaining : c->wcnt;
-
-                ndma_move(s, c, len);
-                c->remaining = 0;
+                ndma_move(s, c, c->cur_wcnt);
+                c->cur_wcnt = 0;
                 ndma_finish(s, n);
                 progress = true;
                 continue;
             }
-            words = MIN(c->wcnt ? c->wcnt : 1, c->remaining ? c->remaining : c->wcnt);
+            words = MIN(c->cur_wcnt ? c->cur_wcnt : 1,
+                        c->remaining ? c->remaining : c->cur_wcnt);
             if (!ndma_ready(s, c, words)) {
                 continue;
             }
@@ -181,6 +195,7 @@ static void ndma_run(N3DSNdmaState *s)
                 if (c->remaining == 0) {
                     if (c->cnt & CNT_REPEAT) {
                         c->remaining = c->tcnt;
+                        c->cur_wcnt = c->wcnt;
                         if (c->cnt & CNT_SRC_RELOAD) c->cur_sad = c->sad;
                         if (c->cnt & CNT_DST_RELOAD) c->cur_dad = c->dad;
                     } else {
@@ -204,10 +219,10 @@ static uint64_t n3ds_ndma_read(void *opaque, hwaddr off, unsigned size)
     } else if (off < 4 + NDMA_CHANNELS * CH_STRIDE) {
         NdmaChannel *c = &s->ch[(off - 4) / CH_STRIDE];
         switch ((off - 4) % CH_STRIDE) {
-        case CH_SAD:   v = c->sad; break;
-        case CH_DAD:   v = c->dad; break;
-        case CH_TCNT:  v = c->tcnt; break;
-        case CH_WCNT:  v = c->wcnt; break;
+        case CH_SAD:   v = c->cur_sad; break;
+        case CH_DAD:   v = c->cur_dad; break;
+        case CH_TCNT:  v = c->remaining; break;
+        case CH_WCNT:  v = c->cur_wcnt; break;
         case CH_BCNT:  v = c->bcnt; break;
         case CH_FDATA: v = c->fdata; break;
         case CH_CNT:   ndma_run(s); v = c->cnt; break;
@@ -234,15 +249,17 @@ static void n3ds_ndma_write(void *opaque, hwaddr off, uint64_t val, unsigned siz
         case CH_DAD:   c->dad = v & ~3u; break;
         case CH_TCNT:  c->tcnt = v & 0x0FFFFFFF; break;
         case CH_WCNT:  c->wcnt = v & 0x00FFFFFF; break;
-        case CH_BCNT:  c->bcnt = v; break;
+        case CH_BCNT:  c->bcnt = v & BCNT_MASK; break;
         case CH_FDATA: c->fdata = v; break;
         case CH_CNT:
-            c->cnt = v;
+            c->cnt = v & CNT_IMPL_MASK;
             if (v & CNT_BUSY) {
                 trace_n3ds_ndma_start(n, v, c->sad, c->dad, c->tcnt, c->wcnt);
+                c->cnt |= CNT_BUSY;
                 c->cur_sad = c->sad;
                 c->cur_dad = c->dad;
                 c->remaining = c->tcnt;
+                c->cur_wcnt = c->wcnt;
                 ndma_run(s);
             }
             break;
@@ -266,7 +283,8 @@ static void n3ds_ndma_reset(DeviceState *dev)
 {
     N3DSNdmaState *s = N3DS_NDMA(dev);
 
-    s->global = 0;
+    /* global control as the console reports it (n3ds-probes ndma_regs) */
+    s->global = 0x80060001;
     memset(s->ch, 0, sizeof(s->ch));
     s->running = false;
 }

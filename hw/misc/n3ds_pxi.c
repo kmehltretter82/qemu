@@ -115,8 +115,12 @@ static uint64_t pxi_read(N3DSPxiState *s, int idx, hwaddr off, unsigned size)
 
     switch (off) {
     case REG_SYNC:
-        v = other->sync_out | (me->sync_out << 8) |
-            (me->sync_irqen ? SYNC_IRQEN : 0);
+        /*
+         * Only the byte received from the other side is readable; the send
+         * field reads back as zero (measured on a New 2DS XL: writing 0x5a
+         * to the send byte leaves SYNC unchanged on both CPUs).
+         */
+        v = other->sync_out | (me->sync_irqen ? SYNC_IRQEN : 0);
         break;
     case REG_CNT:
         v = me->cnt & (CNT_RW_MASK | CNT_ERROR);
@@ -278,11 +282,17 @@ static void n3ds_pxi_reset(DeviceState *dev)
         s->side[i].send_lvl = false;
         s->side[i].recv_lvl = false;
     }
-    /* console after Luma3DS: PXI9 SYNC = 0x8000000e, CNT = 0x8101 */
+    /*
+     * Console after Luma3DS: the ARM9 reads SYNC 0x8000000e (0x0e received,
+     * sync IRQ enabled), the ARM11 reads 0x80000000, and both sides read
+     * CNT 0x8101.
+     */
     if (s->luma_state) {
         s->side[1].sync_out = 0x0e;
         s->side[0].sync_irqen = true;
+        s->side[1].sync_irqen = true;
         s->side[0].cnt = CNT_ENABLE;
+        s->side[1].cnt = CNT_ENABLE;
     }
     pxi_update_irqs(s);
 }

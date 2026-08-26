@@ -73,11 +73,11 @@ OBJECT_DECLARE_SIMPLE_TYPE(N3DSTmioState, N3DS_TMIO)
 
 #define DATACTL32_32BIT     0x0002
 #define DATACTL32_RXRDY     0x0100   /* FIFO32 holds a full block (IRQ flag) */
-#define DATACTL32_TXBUSY    0x0200   /* 0 = FIFO32 empty (TX request flag) */
+#define DATACTL32_TXRQ      0x0200   /* FIFO32 wants data for a write */
 #define DATACTL32_CLEAR     0x0400
 #define DATACTL32_RX_IRQEN  0x0800
 #define DATACTL32_TX_IRQEN  0x1000
-#define DATACTL32_LIVE_MASK (DATACTL32_RXRDY | DATACTL32_TXBUSY | DATACTL32_CLEAR)
+#define DATACTL32_LIVE_MASK (DATACTL32_RXRDY | DATACTL32_TXRQ | DATACTL32_CLEAR)
 
 #define CMD_INDEX(c)    ((c) & 0x3F)
 #define CMD_RESP(c)     (((c) >> 8) & 7)
@@ -145,7 +145,7 @@ static void tmio_update_irq(N3DSTmioState *s)
     uint16_t st1 = R16(s, REG_STATUS1) & ~R16(s, REG_IRMASK1);
     uint16_t d32 = tmio_datactl32(s);
     bool rx = (d32 & DATACTL32_RXRDY) && (d32 & DATACTL32_RX_IRQEN);
-    bool tx = !(d32 & DATACTL32_TXBUSY) && (d32 & DATACTL32_TX_IRQEN);
+    bool tx = !(d32 & DATACTL32_TXRQ) && (d32 & DATACTL32_TX_IRQEN);
 
     qemu_set_irq(s->irq, (st0 | st1) != 0 || ((rx || tx) && s->data32_irq));
 }
@@ -400,13 +400,24 @@ static uint16_t tmio_datactl32(N3DSTmioState *s)
 {
     uint16_t v = R16(s, REG_DATACTL32) & ~DATACTL32_LIVE_MASK;
 
-    /* RX32RDY: a full block sits in the FIFO and nothing was read yet */
+    /*
+     * RX32RDY (bit 8): the FIFO holds a full block. TX32RQ (bit 9): drivers
+     * push a block when it is *clear* (see sdmmc.c "if (!(ctl32 & 0x200))"),
+     * so it must stay set until a write transfer is actually waiting for
+     * data - otherwise the driver writes into a transfer that has not been
+     * set up yet.
+     *
+     * Note this differs from the console at idle, where both flags read as
+     * zero (DATA32 = 0x0002, n3ds-probes io_sdmmc32/sdmmc32_bits). Matching
+     * that exactly needs the driver-visible handshake to be driven by the
+     * transfer state rather than by this register; recorded in
+     * golden/FINDINGS-round4.md as a known difference.
+     */
     if (s->xfer == XFER_READ && s->fifo_pos == 0) {
         v |= DATACTL32_RXRDY;
     }
-    /* TX32RQ (bit 9 low) only while a write transfer waits for data */
     if (s->xfer != XFER_WRITE || s->fifo_pos != 0) {
-        v |= DATACTL32_TXBUSY;
+        v |= DATACTL32_TXRQ;
     }
     return v;
 }
