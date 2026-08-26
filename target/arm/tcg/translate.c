@@ -3307,10 +3307,14 @@ static bool trans_YIELD(DisasContext *s, arg_YIELD *a)
      * the next round-robin scheduled vCPU gets a crack.  When running in
      * MTTCG we don't generate jumps to the helper as it won't affect the
      * scheduling of other vCPUs.
+     * This is a NOP hint on older architectures.
      */
-    if (!(tb_cflags(s->base.tb) & CF_PARALLEL)) {
-        gen_update_pc(s, curr_insn_len(s));
-        s->base.is_jmp = DISAS_YIELD;
+    if (arm_dc_feature(s, ARM_FEATURE_M) ||
+        arm_dc_feature(s, ARM_FEATURE_V6K)) {
+        if (!(tb_cflags(s->base.tb) & CF_PARALLEL)) {
+            gen_update_pc(s, curr_insn_len(s));
+            s->base.is_jmp = DISAS_YIELD;
+        }
     }
     return true;
 }
@@ -3318,12 +3322,15 @@ static bool trans_YIELD(DisasContext *s, arg_YIELD *a)
 static bool trans_SEV(DisasContext *s, arg_SEV *a)
 {
     /*
-     * SEV is a NOP for user-mode emulation. WFE/SEV were introduced in
-     * ARMv6K; for pre-v6K non-M-profile cores this encoding is a NOP hint.
-     * Otherwise SEV must signal the event that wakes WFE sleepers (e.g. an
-     * arm11mpcore ticket-spinlock unlock does "DSB; SEV"), so gate on V6K
-     * rather than V7 -- gating on V7 left ARMv6K (arm11mpcore) SMP guests
-     * deadlocked because WFE halts but the matching SEV was a silent NOP.
+     * SEV is a NOP for user-mode emulation. The instruction is
+     * also a NOP hint on cores that pre-date the architectural
+     * feature that adds it:
+     * - M-profile always has SEV
+     * - for A/R profile, it exists from v6K onward
+     * The v7A Arm ARM is not entirely clear about whether v6K has the
+     * Thumb SEV or not; we make the condition the same, to be
+     * conservative. (If guests try to execute the Thumb SEV insn it
+     * will be because they want SEV, not because they want a NOP.)
      */
 #ifndef CONFIG_USER_ONLY
     if (arm_dc_feature(s, ARM_FEATURE_M) ||
@@ -3349,17 +3356,30 @@ static bool trans_SEVL(DisasContext *s, arg_SEV *a)
 
 static bool trans_WFE(DisasContext *s, arg_WFE *a)
 {
-    /* For WFE, halt the vCPU until an event. */
-    gen_update_pc(s, curr_insn_len(s));
-    s->base.is_jmp = DISAS_WFE;
+    /*
+     * For WFE, halt the vCPU until an event. This is a NOP
+     * hint on older architectures, with the same conditions
+     * as SEV.
+     */
+    if (arm_dc_feature(s, ARM_FEATURE_M) ||
+        arm_dc_feature(s, ARM_FEATURE_V6K)) {
+        gen_update_pc(s, curr_insn_len(s));
+        s->base.is_jmp = DISAS_WFE;
+    }
     return true;
 }
 
 static bool trans_WFI(DisasContext *s, arg_WFI *a)
 {
-    /* For WFI, halt the vCPU until an IRQ. */
-    gen_update_pc(s, curr_insn_len(s));
-    s->base.is_jmp = DISAS_WFI;
+    /*
+     * For WFI, halt the vCPU until an IRQ. This is a NOP
+     * hint on older architectures.
+     */
+    if (arm_dc_feature(s, ARM_FEATURE_M) ||
+        arm_dc_feature(s, ARM_FEATURE_V6K)) {
+        gen_update_pc(s, curr_insn_len(s));
+        s->base.is_jmp = DISAS_WFI;
+    }
     return true;
 }
 

@@ -4216,26 +4216,20 @@ static inline abi_long do_semtimedop(int semid,
 }
 #endif
 
+#define target_time64_t         abi_ullong
+#define target_swap_time64(x)   tswap64(x)
+
 struct target_msqid_ds
 {
     struct target_ipc_perm msg_perm;
-    abi_ulong msg_stime;
-#if TARGET_ABI_BITS == 32
-    abi_ulong __unused1;
-#endif
-    abi_ulong msg_rtime;
-#if TARGET_ABI_BITS == 32
-    abi_ulong __unused2;
-#endif
-    abi_ulong msg_ctime;
-#if TARGET_ABI_BITS == 32
-    abi_ulong __unused3;
-#endif
+    target_time64_t msg_stime;
+    target_time64_t msg_rtime;
+    target_time64_t msg_ctime;
     abi_ulong __msg_cbytes;
     abi_ulong msg_qnum;
     abi_ulong msg_qbytes;
-    abi_ulong msg_lspid;
-    abi_ulong msg_lrpid;
+    abi_int msg_lspid;
+    abi_int msg_lrpid;
     abi_ulong __unused4;
     abi_ulong __unused5;
 };
@@ -4249,14 +4243,14 @@ static inline abi_long target_to_host_msqid_ds(struct msqid_ds *host_md,
         return -TARGET_EFAULT;
     if (target_to_host_ipc_perm(&(host_md->msg_perm),target_addr))
         return -TARGET_EFAULT;
-    host_md->msg_stime = tswapal(target_md->msg_stime);
-    host_md->msg_rtime = tswapal(target_md->msg_rtime);
-    host_md->msg_ctime = tswapal(target_md->msg_ctime);
+    host_md->msg_stime = target_swap_time64(target_md->msg_stime);
+    host_md->msg_rtime = target_swap_time64(target_md->msg_rtime);
+    host_md->msg_ctime = target_swap_time64(target_md->msg_ctime);
     host_md->__msg_cbytes = tswapal(target_md->__msg_cbytes);
     host_md->msg_qnum = tswapal(target_md->msg_qnum);
     host_md->msg_qbytes = tswapal(target_md->msg_qbytes);
-    host_md->msg_lspid = tswapal(target_md->msg_lspid);
-    host_md->msg_lrpid = tswapal(target_md->msg_lrpid);
+    host_md->msg_lspid = tswap32(target_md->msg_lspid);
+    host_md->msg_lrpid = tswap32(target_md->msg_lrpid);
     unlock_user_struct(target_md, target_addr, 0);
     return 0;
 }
@@ -4270,14 +4264,14 @@ static inline abi_long host_to_target_msqid_ds(abi_ulong target_addr,
         return -TARGET_EFAULT;
     if (host_to_target_ipc_perm(target_addr,&(host_md->msg_perm)))
         return -TARGET_EFAULT;
-    target_md->msg_stime = tswapal(host_md->msg_stime);
-    target_md->msg_rtime = tswapal(host_md->msg_rtime);
-    target_md->msg_ctime = tswapal(host_md->msg_ctime);
+    target_md->msg_stime = target_swap_time64(host_md->msg_stime);
+    target_md->msg_rtime = target_swap_time64(host_md->msg_rtime);
+    target_md->msg_ctime = target_swap_time64(host_md->msg_ctime);
     target_md->__msg_cbytes = tswapal(host_md->__msg_cbytes);
     target_md->msg_qnum = tswapal(host_md->msg_qnum);
     target_md->msg_qbytes = tswapal(host_md->msg_qbytes);
-    target_md->msg_lspid = tswapal(host_md->msg_lspid);
-    target_md->msg_lrpid = tswapal(host_md->msg_lrpid);
+    target_md->msg_lspid = tswap32(host_md->msg_lspid);
+    target_md->msg_lrpid = tswap32(host_md->msg_lrpid);
     unlock_user_struct(target_md, target_addr, 1);
     return 0;
 }
@@ -5088,6 +5082,9 @@ do_ioctl_usbdevfs_submiturb(const IOCTLEntry *ie, uint8_t *buf_temp,
 }
 #endif /* CONFIG_USBFS */
 
+#define DM_MAX_TARGETS                  1048576
+#define DM_MAX_TARGET_PARAMS            1024
+
 static abi_long do_ioctl_dm(const IOCTLEntry *ie, uint8_t *buf_temp, int fd,
                             int cmd, abi_long arg)
 {
@@ -5100,6 +5097,7 @@ static abi_long do_ioctl_dm(const IOCTLEntry *ie, uint8_t *buf_temp, int fd,
     abi_long ret;
     void *big_buf = NULL;
     char *host_data;
+    const size_t minimum_data_size = offsetof(struct dm_ioctl, data);
 
     arg_type++;
     target_size = thunk_type_size(arg_type, 0);
@@ -5111,9 +5109,26 @@ static abi_long do_ioctl_dm(const IOCTLEntry *ie, uint8_t *buf_temp, int fd,
     thunk_convert(buf_temp, argptr, arg_type, THUNK_HOST);
     unlock_user(argptr, arg, 0);
 
-    /* buf_temp is too small, so fetch things into a bigger buffer */
-    big_buf = g_malloc0(((struct dm_ioctl*)buf_temp)->data_size * 2);
-    memcpy(big_buf, buf_temp, target_size);
+    /* At this point this includes the size of the fixed dm_ioctl parts */
+    guest_data_size = ((struct dm_ioctl *)buf_temp)->data_size;
+
+    if (guest_data_size < minimum_data_size ||
+        guest_data_size > DM_MAX_TARGETS * DM_MAX_TARGET_PARAMS) {
+        ret = -TARGET_EINVAL;
+        goto out;
+    }
+
+    /*
+     * buf_temp is too small, so fetch things into a bigger buffer. Here
+     * we copy all of the fixed parts of struct dm_ioctl but not the
+     * data at the end (which in the struct is "char data[7]" but in
+     * reality is command-specific and might be nothing or might be
+     * much larger, as defined by data_size). We know struct dm_ioctl's
+     * size is not target specific so we don't need to distinguish between
+     * its minimum size for the host vs the target.
+     */
+    big_buf = g_malloc0(guest_data_size * 2);
+    memcpy(big_buf, buf_temp, minimum_data_size);
     buf_temp = big_buf;
     host_dm = big_buf;
 
@@ -5122,7 +5137,8 @@ static abi_long do_ioctl_dm(const IOCTLEntry *ie, uint8_t *buf_temp, int fd,
         ret = -TARGET_EINVAL;
         goto out;
     }
-    guest_data_size = host_dm->data_size - host_dm->data_start;
+    /* Adjust down to only the size of the payload */
+    guest_data_size -= host_dm->data_start;
     host_data = (char*)host_dm + host_dm->data_start;
 
     argptr = lock_user(VERIFY_READ, guest_data, guest_data_size, 1);
@@ -6884,7 +6900,8 @@ static abi_long do_map_shadow_stack(CPUArchState *env, abi_ulong addr,
                 /* Leave an extra empty frame at top-of-stack. */
                 cap_ptr -= 8;
             }
-            cap_val = (cap_ptr & TARGET_PAGE_MASK) | 1;
+            /* Note the 12 bit field is unaffected by current page size. */
+            cap_val = deposit64(cap_ptr, 0, 12, 1);
             if (put_user_u64(cap_val, cap_ptr)) {
                 /* Allocation succeeded above. */
                 g_assert_not_reached();
@@ -9718,7 +9735,7 @@ _syscall5(int, sys_move_mount, int, __from_dfd, const char *, __from_pathname,
            int, __to_dfd, const char *, __to_pathname, unsigned int, flag)
 #endif
 
-#if defined(TARGET_NR_fsopen) && defined(NR_fsopen)
+#if defined(TARGET_NR_fsopen) && defined(__NR_fsopen)
 #define __NR_sys_fsopen __NR_fsopen
 _syscall2(int, sys_fsopen, const char *, fs_name, unsigned int, flags);
 #define __NR_sys_fsconfig __NR_fsconfig
@@ -14463,7 +14480,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         return do_map_shadow_stack(cpu_env, arg1, arg2, arg3);
 #endif
 
-#if defined(TARGET_NR_fsopen) && defined(NR_fsopen)
+#if defined(TARGET_NR_fsopen) && defined(__NR_fsopen)
     case TARGET_NR_fsopen:
         {
             p = lock_user_string(arg1);
