@@ -1743,7 +1743,16 @@ static MemTxResult gic_cpu_write(GICState *s, int cpu, int offset,
                 s->abpr[cpu] = MAX(value & 0x7, GIC_MIN_ABPR);
             }
         } else {
-            int min_bpr = gic_is_vcpu(cpu) ? GIC_VIRT_MIN_BPR : GIC_MIN_BPR;
+            /*
+             * An interface with fewer than eight priority bits cannot split
+             * them below the bits it has, so writes below that minimum take
+             * the minimum - the same rule the reset value follows. The
+             * 11MPCore TRM puts it as: a value outside b011..b111 has the
+             * same effect as writing b011.
+             */
+            int min_bpr = gic_is_vcpu(cpu) ? GIC_VIRT_MIN_BPR :
+                          (s->n_prio_bits < 7 ? 7 - s->n_prio_bits :
+                                                GIC_MIN_BPR);
             s->bpr[cpu] = MAX(value & 0x7, min_bpr);
         }
         break;
