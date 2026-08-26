@@ -20,6 +20,7 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/misc/n3ds.h"
+#include "hw/sd/n3ds_sdio.h"
 #include "qom/object.h"
 #include "trace.h"
 
@@ -102,6 +103,13 @@ struct N3DSTmioState {
 
     MemoryRegion iomem;
     SDBus sdbus[N3DS_TMIO_NPORTS];
+    /*
+     * Optional SDIO function on port 0. The WiFi controller has an Atheros
+     * part soldered to it rather than a removable card, and QEMU's SD code
+     * models memory cards only, so it is wired up directly instead of
+     * through the SD bus.
+     */
+    N3DSSdioState *sdio;
     qemu_irq irq;
     qemu_irq irq_async;
 
@@ -125,6 +133,11 @@ static inline uint16_t R16(N3DSTmioState *s, unsigned off)
 static inline void W16(N3DSTmioState *s, unsigned off, uint16_t v)
 {
     s->regs[off >> 1] = v;
+}
+
+static bool tmio_have_sdio(N3DSTmioState *s)
+{
+    return s->sdio && (R16(s, REG_PORTSEL) & 3) == 0;
 }
 
 static SDBus *tmio_bus(N3DSTmioState *s)
@@ -266,11 +279,11 @@ static void tmio_send_command(N3DSTmioState *s, uint16_t cmd)
     W16(s, REG_CMD, cmd);
     tmio_set_status(s, 0, STAT1_CMD_BUSY);
 
-    if (!bus || !sdbus_get_inserted(bus)) {
+    if (!tmio_have_sdio(s) && (!bus || !sdbus_get_inserted(bus))) {
         trace_n3ds_tmio_cmd_timeout(R16(s, REG_PORTSEL) & 3, CMD_INDEX(cmd),
                                     bus ? "no card" : "bad port");
         tmio_clear_status(s, 0, STAT1_CMD_BUSY);
-        tmio_set_status(s, 0, STAT1_CMDTIMEOUT);
+        tmio_set_status(s, STAT0_CMDRESPEND, STAT1_CMDTIMEOUT);
         tmio_update_irq(s);
         return;
     }
@@ -278,10 +291,14 @@ static void tmio_send_command(N3DSTmioState *s, uint16_t cmd)
     req.cmd = CMD_INDEX(cmd);
     req.arg = R16(s, REG_ARG0) | ((uint32_t)R16(s, REG_ARG1) << 16);
     req.crc = 0;
-    rlen = sdbus_do_command(bus, &req, resp, sizeof(resp));
+    if (s->sdio && (R16(s, REG_PORTSEL) & 3) == 0) {
+        rlen = n3ds_sdio_command(s->sdio, req.cmd, req.arg, resp, sizeof(resp));
+    } else {
+        rlen = sdbus_do_command(bus, &req, resp, sizeof(resp));
+    }
 
-    trace_n3ds_tmio_cmd(R16(s, REG_PORTSEL) & 3, cmd, req.cmd, req.arg, rlen,
-                        rlen >= 4 ? ldl_be_p(resp) : 0);
+    trace_n3ds_tmio_cmd((uint32_t)s->iomem.addr, R16(s, REG_PORTSEL) & 3, cmd,
+                        req.cmd, req.arg, rlen, rlen >= 4 ? ldl_be_p(resp) : 0);
     /*
      * Response type 0 = automatic (by command index: only CMD0 has no
      * response), 3 = none. Anything else with no reply from the card is a
@@ -290,8 +307,15 @@ static void tmio_send_command(N3DSTmioState *s, uint16_t cmd)
     if (rlen == 0 && (resp_type == 0 ? req.cmd != 0 : resp_type != 3)) {
         trace_n3ds_tmio_cmd_timeout(R16(s, REG_PORTSEL) & 3, req.cmd,
                                     "no response");
+        /*
+         * A command that goes unanswered still ends the command sequence,
+         * so signal command-end alongside the timeout. Drivers rely on it:
+         * linux-3ds' ctr_sdhc records the error from the timeout bit but
+         * only completes the request from the command-end bit, so raising
+         * the timeout alone wedges its card scan.
+         */
         tmio_clear_status(s, 0, STAT1_CMD_BUSY);
-        tmio_set_status(s, 0, STAT1_CMDTIMEOUT);
+        tmio_set_status(s, STAT0_CMDRESPEND, STAT1_CMDTIMEOUT);
         tmio_update_irq(s);
         return;
     }
@@ -388,7 +412,10 @@ static uint16_t tmio_status0(N3DSTmioState *s)
     SDBus *bus = tmio_bus(s);
     uint16_t v = R16(s, REG_STATUS0) & ~STAT0_LIVE_MASK;
 
-    if (bus && sdbus_get_inserted(bus)) {
+    if (tmio_have_sdio(s)) {
+        /* the WiFi part is soldered on: always present, never write protected */
+        v |= STAT0_SIGSTATE | STAT0_WRPROTECT;
+    } else if (bus && sdbus_get_inserted(bus)) {
         v |= STAT0_SIGSTATE;
         if (!sdbus_get_readonly(bus)) {
             v |= STAT0_WRPROTECT;
@@ -460,7 +487,7 @@ static uint64_t tmio_read_inner(void *opaque, hwaddr off, unsigned size)
 static void tmio_write16(N3DSTmioState *s, hwaddr off, uint16_t v)
 {
     if (off != REG_FIFO16) {
-        trace_n3ds_tmio_reg_write(off, v);
+        trace_n3ds_tmio_reg_write((uint32_t)s->iomem.addr, off, v);
     }
     switch (off) {
     case REG_CMD:
@@ -556,7 +583,8 @@ static uint64_t tmio_read(void *opaque, hwaddr off, unsigned size)
 {
     uint64_t v = tmio_read_inner(opaque, off, size);
 
-    trace_n3ds_tmio_reg_read((uint32_t)off, (uint32_t)v, size);
+    trace_n3ds_tmio_reg_read((uint32_t)((N3DSTmioState *)opaque)->iomem.addr,
+                             (uint32_t)off, (uint32_t)v, size);
     return v;
 }
 
@@ -610,9 +638,16 @@ static void n3ds_tmio_init(Object *obj)
               "nand-bus");
 }
 
+static const Property n3ds_tmio_properties[] = {
+    DEFINE_PROP_LINK("sdio", N3DSTmioState, sdio, TYPE_N3DS_SDIO,
+                     N3DSSdioState *),
+};
+
 static void n3ds_tmio_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+
+    device_class_set_props(dc, n3ds_tmio_properties);
 
     device_class_set_legacy_reset(dc, n3ds_tmio_reset);
 }

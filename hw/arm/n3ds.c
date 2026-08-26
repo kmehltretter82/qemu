@@ -29,6 +29,7 @@
 #include "hw/cpu/arm11mpcore.h"
 #include "hw/misc/unimp.h"
 #include "hw/misc/n3ds.h"
+#include "hw/sd/n3ds_sdio.h"
 #include "hw/arm/n3ds_bootstub.h"
 #include "hw/i2c/i2c.h"
 #include "hw/sd/sd.h"
@@ -720,7 +721,14 @@ static void n3ds_init(MachineState *machine)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, dev, 0, N3DS_GPIO_BASE);
 
-    dev = qdev_new(TYPE_N3DS_TMIO);
+    {
+        DeviceState *sdio = qdev_new(TYPE_N3DS_SDIO);
+
+        qdev_realize_and_unref(sdio, NULL, &error_fatal);
+        dev = qdev_new(TYPE_N3DS_TMIO);
+        object_property_set_link(OBJECT(dev), "sdio", OBJECT(sdio),
+                                 &error_abort);
+    }
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     n3ds_map(&s->shared_io, N3DS_IO_SHARED_BASE, dev, 0, N3DS_WIFI_BASE);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, n3ds_gic_irq(s, N3DS_GIC_SDIO3));
