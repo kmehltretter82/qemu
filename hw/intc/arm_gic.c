@@ -771,9 +771,16 @@ static void gic_set_cpu_control(GICState *s, int cpu, uint32_t value,
 
 static uint8_t gic_get_running_priority(GICState *s, int cpu, MemTxAttrs attrs)
 {
-    if ((s->revision != REV_11MPCORE) && (s->running_priority[cpu] > 0xff)) {
-        /* Idle priority */
-        return 0xff;
+    if (s->running_priority[cpu] > 0xff) {
+        /*
+         * Idle priority: the largest value the priority field can hold,
+         * which is 0xff only when all eight bits are implemented. Returning
+         * the internal 0x100 truncated would read as 0x00 - the highest
+         * priority - which is what commit 71aa735b0a fixed for GICv1 and
+         * GICv2. It left the 11MPCore case alone for want of a clear
+         * specification; deriving the value covers every revision.
+         */
+        return gic_fullprio_mask(s, cpu) & 0xff;
     }
 
     if (gic_cpu_ns_access(s, cpu, attrs)) {

@@ -249,7 +249,18 @@ static inline void arm_gic_common_reset_irq_state(GICState *s, int cidx,
         s->current_pending[i] = 1023;
         s->running_priority[i] = 0x100;
         s->cpu_ctlr[i] = 0;
-        s->bpr[i] = gic_is_vcpu(i) ? GIC_VIRT_MIN_BPR : GIC_MIN_BPR;
+        /*
+         * A CPU interface that implements fewer than eight priority bits
+         * cannot split them below the bits it has, so its minimum binary
+         * point rises with each bit it lacks.
+         */
+        if (gic_is_vcpu(i)) {
+            s->bpr[i] = GIC_VIRT_MIN_BPR;
+        } else if (s->n_prio_bits < 7) {
+            s->bpr[i] = 7 - s->n_prio_bits;
+        } else {
+            s->bpr[i] = GIC_MIN_BPR;
+        }
         s->abpr[i] = gic_is_vcpu(i) ? GIC_VIRT_MIN_ABPR : GIC_MIN_ABPR;
 
         if (!gic_is_vcpu(i)) {
