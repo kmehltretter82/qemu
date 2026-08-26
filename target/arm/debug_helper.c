@@ -60,6 +60,16 @@ static CPAccessResult access_tdra(CPUARMState *env, const ARMCPRegInfo *ri,
  * Check for traps to general debug registers, which are controlled
  * by MDCR_EL2.TDA for EL2 and MDCR_EL3.TDA for EL3.
  */
+/*
+ * RESTARTED reads as one whenever the core is not in debug state, which for
+ * us is always - halting debug is not modelled. An ARM11 reports 0x2 here
+ * from reset (measured on a New 2DS XL, n3ds-probes cp14_dbg).
+ */
+static uint64_t dbgdscrint_read(CPUARMState *env, const ARMCPRegInfo *ri)
+{
+    return env->cp15.mdscr_el1 | 2;
+}
+
 static CPAccessResult access_tda(CPUARMState *env, const ARMCPRegInfo *ri,
                                   bool isread)
 {
@@ -250,8 +260,9 @@ static const ARMCPRegInfo debug_cp_reginfo[] = {
      */
     { .name = "DBGDSCRint", .state = ARM_CP_STATE_AA32,
       .cp = 14, .opc1 = 0, .crn = 0, .crm = 1, .opc2 = 0,
-      .type = ARM_CP_ALIAS,
+      .type = ARM_CP_ALIAS | ARM_CP_NO_RAW | ARM_CP_OVERRIDE,
       .access = PL1_R, .accessfn = access_tda,
+      .readfn = dbgdscrint_read,
       .fieldoffset = offsetof(CPUARMState, cp15.mdscr_el1), },
     { .name = "OSLAR_EL1", .state = ARM_CP_STATE_BOTH,
       .cp = 14, .opc0 = 2, .opc1 = 0, .crn = 1, .crm = 0, .opc2 = 4,
@@ -521,4 +532,23 @@ void define_debug_regs(ARMCPU *cpu)
         g_free(dbgwvr_el1_name);
         g_free(dbgwcr_el1_name);
     }
+}
+
+/*
+ * In the v6 debug architecture DBGDSCR is writable at this encoding - v7
+ * made it read-only and moved the writable view to DBGDSCRext. Linux uses
+ * the v6 form to turn monitor mode on, so a v6 core needs it.
+ */
+static const ARMCPRegInfo debug_v6_cp_reginfo[] = {
+    { .name = "DBGDSCR", .state = ARM_CP_STATE_AA32,
+      .cp = 14, .opc1 = 0, .crn = 0, .crm = 1, .opc2 = 0,
+      .type = ARM_CP_ALIAS | ARM_CP_NO_RAW,
+      .access = PL1_RW, .accessfn = access_tda,
+      .readfn = dbgdscrint_read,
+      .fieldoffset = offsetof(CPUARMState, cp15.mdscr_el1), },
+};
+
+void define_debug_v6_regs(ARMCPU *cpu)
+{
+    define_arm_cp_regs(cpu, debug_v6_cp_reginfo);
 }

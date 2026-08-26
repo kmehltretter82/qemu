@@ -525,28 +525,30 @@ static const ARMCPRegInfo not_v7_cp_reginfo[] = {
      * implemented in 926, 946, 1026, 1136, 1176 and 11MPCore. StrongARM and
      * OMAPCP will override this space.
      */
-    { .name = "DLOCKDOWN", .cp = 15, .crn = 9, .crm = 0, .opc1 = 0, .opc2 = 0,
-      .access = PL1_RW, .fieldoffset = offsetof(CPUARMState, cp15.c9_data),
-      .resetvalue = 0 },
-    { .name = "ILOCKDOWN", .cp = 15, .crn = 9, .crm = 0, .opc1 = 0, .opc2 = 1,
-      .access = PL1_RW, .fieldoffset = offsetof(CPUARMState, cp15.c9_insn),
-      .resetvalue = 0 },
     /* v6 doesn't have the cache ID registers but Linux reads them anyway */
     { .name = "DUMMY", .cp = 15, .crn = 0, .crm = 0, .opc1 = 1, .opc2 = CP_ANY,
       .access = PL1_R, .type = ARM_CP_CONST | ARM_CP_NO_RAW,
       .resetvalue = 0 },
-    /*
-     * We don't implement pre-v7 debug but most CPUs had at least a DBGDIDR;
-     * implementing it as RAZ means the "debug architecture version" bits
-     * will read as a reserved value, which should cause Linux to not try
-     * to use the debug hardware.
-     */
-    { .name = "DBGDIDR", .cp = 14, .crn = 0, .crm = 0, .opc1 = 0, .opc2 = 0,
-      .access = PL0_R, .type = ARM_CP_CONST, .resetvalue = 0 },
     { .name = "PRRR", .cp = 15, .crn = 10, .crm = 2,
       .opc1 = 0, .opc2 = 0, .access = PL1_RW, .type = ARM_CP_NOP },
     { .name = "NMRR", .cp = 15, .crn = 10, .crm = 2,
       .opc1 = 0, .opc2 = 1, .access = PL1_RW, .type = ARM_CP_NOP },
+};
+
+/*
+ * For a pre-v7 core that does not describe its debug hardware, RAZ leaves
+ * the debug architecture version reading as a reserved value, which stops
+ * Linux from trying to use debug hardware that is not modelled.
+ */
+static const ARMCPRegInfo ilockdown_cp_reginfo[] = {
+    { .name = "ILOCKDOWN", .cp = 15, .crn = 9, .crm = 0, .opc1 = 0, .opc2 = 1,
+      .access = PL1_RW, .fieldoffset = offsetof(CPUARMState, cp15.c9_insn),
+      .resetvalue = 0 },
+};
+
+static const ARMCPRegInfo not_v7_dbgdidr_cp_reginfo[] = {
+    { .name = "DBGDIDR", .cp = 14, .crn = 0, .crm = 0, .opc1 = 0, .opc2 = 0,
+      .access = PL0_R, .type = ARM_CP_CONST, .resetvalue = 0 },
 };
 
 static void cpacr_write(CPUARMState *env, const ARMCPRegInfo *ri,
@@ -6708,7 +6710,30 @@ void register_cp_regs_for_features(ARMCPU *cpu)
         arm_register_cpreg_mig_tolerance(cpu, dbgtr_el0_kvmidx,
                                          0, 0, ToleranceNotOnBothEnds);
     } else {
+        ARMCPRegInfo dlockdown = {
+            .name = "DLOCKDOWN", .cp = 15, .crn = 9, .crm = 0,
+            .opc1 = 0, .opc2 = 0, .access = PL1_RW,
+            .fieldoffset = offsetof(CPUARMState, cp15.c9_data),
+            .resetvalue = cpu->reset_dlockdown,
+        };
+
         define_arm_cp_regs(cpu, not_v7_cp_reginfo);
+        define_one_arm_cp_reg(cpu, &dlockdown);
+        if (!cpu->no_ilockdown) {
+            define_arm_cp_regs(cpu, ilockdown_cp_reginfo);
+        }
+        /*
+         * ARM11 has the v6 debug architecture, and the kernel reaches its
+         * breakpoint and watchpoint registers at the same CP14 encodings
+         * define_debug_regs() sets up. A core that has it says so in
+         * DBGDIDR, which is zero on every other pre-v7 core we model.
+         */
+        if (cpu->isar.dbgdidr != 0) {
+            define_debug_regs(cpu);
+            define_debug_v6_regs(cpu);
+        } else {
+            define_arm_cp_regs(cpu, not_v7_dbgdidr_cp_reginfo);
+        }
     }
     if (arm_feature(env, ARM_FEATURE_V8)) {
         /*

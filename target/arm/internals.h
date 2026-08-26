@@ -1871,6 +1871,7 @@ static inline uint64_t pauth_ptr_mask(ARMVAParameters param)
 
 /* Add the cpreg definitions for debug related system registers */
 void define_debug_regs(ARMCPU *cpu);
+void define_debug_v6_regs(ARMCPU *cpu);
 
 /* Add the cpreg definitions for TLBI instructions */
 void define_tlb_insn_regs(ARMCPU *cpu);

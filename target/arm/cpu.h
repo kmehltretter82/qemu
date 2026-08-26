@@ -1130,6 +1130,13 @@ struct ArchCPU {
     uint32_t tcmtr;
     uint32_t tlbtr;
     bool tcmtr_reads_midr;
+    /*
+     * Pre-v7 L1 cache lockdown, which is implementation defined. A core
+     * that has no instruction-side lockdown register takes an undefined
+     * instruction on it rather than reading zero.
+     */
+    uint32_t reset_dlockdown;
+    bool no_ilockdown;
     bool no_ifar;
     /* ARM11-style performance monitors at cp15 c15, crm 12 */
     bool has_arm11_pmu;

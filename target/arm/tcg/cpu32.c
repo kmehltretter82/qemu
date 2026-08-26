@@ -235,6 +235,11 @@ static void arm11mpcore_initfn(Object *obj)
     cpu->ctr = 0x1d152152;
     cpu->tcmtr_reads_midr = true;
     cpu->tlbtr = 0x00000800;
+    /* v6 debug architecture: 6 breakpoints, 2 watchpoints, 2 context ids */
+    cpu->isar.dbgdidr = 0x15110005;
+    /* D-cache lockdown reads all ways unlocked; there is no I-side one */
+    cpu->reset_dlockdown = 0xfffffff0;
+    cpu->no_ilockdown = true;
     cpu->no_ifar = true;
     cpu->has_arm11_pmu = true;
     SET_IDREG(isar, ID_PFR0, 0x111);
