@@ -542,6 +542,8 @@ static void n3ds_init(MachineState *machine)
 
             object_property_set_uint(gic, "priority-reset", 0x80,
                                      &error_abort);
+            /* and every shared interrupt pointed at core 0 */
+            object_property_set_uint(gic, "target-reset", 0x01, &error_abort);
         }
         object_property_set_uint(scu, "config", 0x5003, &error_abort);
         object_property_set_uint(scu, "cpu-status-reset", 0xf0, &error_abort);

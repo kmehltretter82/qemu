@@ -340,6 +340,16 @@ static void arm_gic_common_reset_hold(Object *obj, ResetType type)
         /* For uniprocessor GICs all interrupts always target the sole CPU */
         if (s->num_cpu == 1) {
             s->irq_target[i] = 1;
+        } else if (i >= GIC_INTERNAL) {
+            /*
+             * The reset value for a shared interrupt is implementation
+             * defined, so a board may say what its firmware leaves - a New
+             * 2DS XL hands over with every shared interrupt pointed at core
+             * 0. Banked interrupts are excluded deliberately: their targets
+             * are implicit and ITARGETSR is read-only for them, so writing
+             * this there stops private interrupts being delivered at all.
+             */
+            s->irq_target[i] = s->target_reset;
         } else {
             s->irq_target[i] = 0;
         }
@@ -397,6 +407,7 @@ static const Property arm_gic_common_properties[] = {
     DEFINE_PROP_BOOL("has-virtualization-extensions", GICState, virt_extn, 0),
     DEFINE_PROP_UINT32("num-priority-bits", GICState, n_prio_bits, 8),
     DEFINE_PROP_UINT8("priority-reset", GICState, priority_reset, 0),
+    DEFINE_PROP_UINT8("target-reset", GICState, target_reset, 0),
 };
 
 static void arm_gic_common_class_init(ObjectClass *klass, const void *data)
