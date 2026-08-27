@@ -544,6 +544,14 @@ static void n3ds_init(MachineState *machine)
                                      &error_abort);
             /* and every shared interrupt pointed at core 0 */
             object_property_set_uint(gic, "target-reset", 0x01, &error_abort);
+            /*
+             * The display controllers, the PXI sync line and the MCU's I2C
+             * bus have all pulsed by the time we take over, and nothing has
+             * acknowledged them: ids 40-43, 80 and 85 read pending, the same
+             * on seven consecutive boots (n3ds-probes gic_enable_state).
+             */
+            object_property_set_uint(gic, "pending-reset",
+                                     0x0021000000000f00ULL, &error_abort);
         }
         object_property_set_uint(scu, "config", 0x5003, &error_abort);
         object_property_set_uint(scu, "cpu-status-reset", 0xf0, &error_abort);

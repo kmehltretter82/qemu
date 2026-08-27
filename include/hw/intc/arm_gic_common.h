@@ -102,6 +102,7 @@ struct GICState {
     uint32_t n_prio_bits;
     uint8_t priority_reset;   /* what a board's firmware leaves behind */
     uint8_t target_reset;
+    uint64_t pending_reset;   /* shared interrupts left asserted at hand-off */
 
     /* If we present the GICv2 without security extensions to a guest,
      * the guest can configure the GICC_CTLR to configure group 1 binary point

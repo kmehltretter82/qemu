@@ -360,6 +360,19 @@ static void arm_gic_common_reset_hold(Object *obj, ResetType type)
         }
     }
 
+    /*
+     * Shared interrupts a board's firmware leaves asserted. Every SPI on the
+     * 11MPCore is edge-triggered, so a line that pulsed before hand-off stays
+     * pending until something acknowledges it - and nothing does, when none
+     * of them are enabled. Bit n of the mask is interrupt GIC_INTERNAL + n.
+     */
+    for (i = 0; s->pending_reset && i < 64; i++) {
+        if (s->pending_reset & (1ULL << i)) {
+            GIC_DIST_SET_PENDING(GIC_INTERNAL + i,
+                                 s->irq_target[GIC_INTERNAL + i]);
+        }
+    }
+
     if (s->virt_extn) {
         for (i = 0; i < s->num_lrs; i++) {
             for (j = 0; j < s->num_cpu; j++) {
@@ -408,6 +421,7 @@ static const Property arm_gic_common_properties[] = {
     DEFINE_PROP_UINT32("num-priority-bits", GICState, n_prio_bits, 8),
     DEFINE_PROP_UINT8("priority-reset", GICState, priority_reset, 0),
     DEFINE_PROP_UINT8("target-reset", GICState, target_reset, 0),
+    DEFINE_PROP_UINT64("pending-reset", GICState, pending_reset, 0),
 };
 
 static void arm_gic_common_class_init(ObjectClass *klass, const void *data)
