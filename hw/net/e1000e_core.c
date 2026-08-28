@@ -71,6 +71,12 @@ e1000e_set_interrupt_cause(E1000ECore *core, uint32_t val);
 
 static void e1000e_reset(E1000ECore *core, bool sw);
 
+static bool e1000e_has_manageability(E1000ECore *core)
+{
+    return PCI_DEVICE_GET_CLASS(core->owner)->device_id ==
+           E1000_DEV_ID_82573E_IAMT;
+}
+
 static inline void
 e1000e_process_ts_option(E1000ECore *core, struct e1000_tx_desc *dp)
 {
@@ -2910,6 +2916,40 @@ static void e1000e_set_timadjh(E1000ECore *core, int index, uint32_t val)
     core->timadj += core->mac[TIMADJL] | ((int64_t)core->mac[TIMADJH] << 32);
 }
 
+static uint32_t e1000e_get_host_if(E1000ECore *core, int index)
+{
+    return e1000e_has_manageability(core) ? core->mac[index] : 0;
+}
+
+static void e1000e_set_host_if(E1000ECore *core, int index, uint32_t val)
+{
+    if (e1000e_has_manageability(core)) {
+        core->mac[index] = val;
+    }
+}
+
+static uint32_t e1000e_get_hicr(E1000ECore *core, int index)
+{
+    return e1000e_has_manageability(core) ? core->mac[HICR] : 0;
+}
+
+static void e1000e_set_hicr(E1000ECore *core, int index, uint32_t val)
+{
+    if (!e1000e_has_manageability(core)) {
+        return;
+    }
+
+    /*
+     * EN and SV are firmware-owned.  Consume commands synchronously: there
+     * is no management processor behind this model, but clearing C lets the
+     * guest submit another command without timing out.
+     */
+    core->mac[HICR] &= E1000_HICR_EN | E1000_HICR_SV;
+    if (val & E1000_HICR_C) {
+        core->mac[HICR] &= ~E1000_HICR_C;
+    }
+}
+
 #define e1000e_getreg(x)    [x] = e1000e_mac_readreg
 typedef uint32_t (*readops)(E1000ECore *, int);
 static const readops e1000e_macreg_readops[] = {
@@ -2995,6 +3035,7 @@ static const readops e1000e_macreg_readops[] = {
     e1000e_getreg(RXCFGL),
     e1000e_getreg(MFUTP01),
     e1000e_getreg(FACTPS),
+    e1000e_getreg(FWSM),
     e1000e_getreg(GSCL_1),
     e1000e_getreg(GSCN_0),
     e1000e_getreg(GCR2),
@@ -3112,6 +3153,8 @@ static const readops e1000e_macreg_readops[] = {
     [RETA ... RETA + 31]   = e1000e_mac_readreg,
     [RSSRK ... RSSRK + 31] = e1000e_mac_readreg,
     [MAVTV0 ... MAVTV3]    = e1000e_mac_readreg,
+    [HOST_IF ... HICR - 1] = e1000e_get_host_if,
+    [HICR]                  = e1000e_get_hicr,
     [EITR...EITR + E1000E_MSIX_VEC_NUM - 1] = e1000e_mac_eitr_read
 };
 enum { E1000E_NREADOPS = ARRAY_SIZE(e1000e_macreg_readops) };
@@ -3265,6 +3308,8 @@ static const writeops e1000e_macreg_writeops[] = {
     [RETA ... RETA + 31]     = e1000e_mac_writereg,
     [RSSRK ... RSSRK + 31]   = e1000e_mac_writereg,
     [MAVTV0 ... MAVTV3]      = e1000e_mac_writereg,
+    [HOST_IF ... HICR - 1]   = e1000e_set_host_if,
+    [HICR]                    = e1000e_set_hicr,
     [EITR...EITR + E1000E_MSIX_VEC_NUM - 1] = e1000e_set_eitr
 };
 enum { E1000E_NWRITEOPS = ARRAY_SIZE(e1000e_macreg_writeops) };
@@ -3494,6 +3539,10 @@ static void e1000e_reset(E1000ECore *core, bool sw)
     memset(core->phy, 0, sizeof core->phy);
     memcpy(core->phy, e1000e_phy_reg_init, sizeof e1000e_phy_reg_init);
 
+    if (e1000e_has_manageability(core)) {
+        core->phy[0][MII_PHYID2] = E1000_PHY_ID2_82573x;
+    }
+
     for (i = 0; i < E1000E_MAC_SIZE; i++) {
         if (sw && (i == PBA || i == PBS || i == FLA)) {
             continue;
@@ -3501,6 +3550,11 @@ static void e1000e_reset(E1000ECore *core, bool sw)
 
         core->mac[i] = i < ARRAY_SIZE(e1000e_mac_reg_init) ?
                        e1000e_mac_reg_init[i] : 0;
+    }
+
+    if (e1000e_has_manageability(core)) {
+        core->mac[FWSM] = E1000_FWSM_MODE_IAMT;
+        core->mac[HICR] = E1000_HICR_EN;
     }
 
     core->rxbuf_min_shift = 1 + E1000_RING_DESC_LEN_SHIFT;

@@ -35,6 +35,7 @@
 #include "libqos/libqos-malloc.h"
 #include "libqos/e1000e.h"
 #include "hw/net/e1000_regs.h"
+#include "hw/pci/pci_regs.h"
 
 static const struct eth_header packet = {
     .h_dest = E1000E_ADDRESS,
@@ -135,6 +136,143 @@ static void test_e1000e_init(void *obj, void *data, QGuestAllocator * alloc)
     /* init does nothing */
 }
 
+static uint16_t e1000e_eeprom_read(QE1000E *d, uint8_t address)
+{
+    uint32_t val;
+
+    e1000e_macreg_write(d, E1000_EERD,
+                        E1000_EERW_START |
+                        (address << E1000_EERW_ADDR_SHIFT));
+    val = e1000e_macreg_read(d, E1000_EERD);
+    g_assert_cmphex(val & E1000_EERW_DONE, ==, E1000_EERW_DONE);
+
+    return val >> E1000_EERW_DATA_SHIFT;
+}
+
+static void e1000e_qtest_quit(void *opaque)
+{
+    qtest_quit(opaque);
+}
+
+static void test_e1000e_manageability_disabled(void *obj, void *data,
+                                                QGuestAllocator *alloc)
+{
+    QE1000E_PCI *e1000e = obj;
+    QE1000E *d = &e1000e->e1000e;
+
+    g_assert_cmphex(qpci_config_readw(&e1000e->pci_dev, PCI_DEVICE_ID), ==,
+                    E1000_DEV_ID_82574L);
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_FWSM), ==, 0);
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_HICR), ==, 0);
+
+    e1000e_macreg_write(d, E1000_HOST_IF, 0x12345678);
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_HOST_IF), ==, 0);
+}
+
+static void test_e1000e_manageability(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QE1000E_PCI *e1000e = obj;
+    QE1000E *d = &e1000e->e1000e;
+    uint16_t checksum = 0;
+    uint32_t ctrl;
+    int i;
+
+    g_assert_cmphex(qpci_config_readw(&e1000e->pci_dev, PCI_DEVICE_ID), ==,
+                    E1000_DEV_ID_82573E_IAMT);
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_FWSM) &
+                    E1000_FWSM_MODE_MASK, ==, E1000_FWSM_MODE_IAMT);
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_HICR), ==, E1000_HICR_EN);
+
+    for (i = 0; i <= EEPROM_CHECKSUM_REG; i++) {
+        checksum += e1000e_eeprom_read(d, i);
+    }
+    g_assert_cmphex(checksum, ==, EEPROM_SUM);
+    g_assert_cmphex(e1000e_eeprom_read(d, 11), ==,
+                    E1000_DEV_ID_82573E_IAMT);
+    g_assert_cmphex(e1000e_eeprom_read(d, 13), ==,
+                    E1000_DEV_ID_82573E_IAMT);
+
+    e1000e_macreg_write(d, E1000_HOST_IF, 0x01234567);
+    e1000e_macreg_write(d, E1000_HOST_IF + 0x6f0, 0x89abcdef);
+    e1000e_macreg_write(d, E1000_HICR - sizeof(uint32_t), 0x76543210);
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_HOST_IF), ==, 0x01234567);
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_HOST_IF + 0x6f0), ==,
+                    0x89abcdef);
+    g_assert_cmphex(e1000e_macreg_read(d,
+                                      E1000_HICR - sizeof(uint32_t)), ==,
+                    0x76543210);
+
+    /* EN and SV are read-only; firmware consumes C synchronously. */
+    e1000e_macreg_write(d, E1000_HICR, 0);
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_HICR), ==, E1000_HICR_EN);
+    e1000e_macreg_write(d, E1000_HICR,
+                        E1000_HICR_EN | E1000_HICR_C | E1000_HICR_SV);
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_HICR), ==, E1000_HICR_EN);
+
+    ctrl = e1000e_macreg_read(d, E1000_CTRL);
+    e1000e_macreg_write(d, E1000_CTRL, ctrl | E1000_CTRL_RST);
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_HOST_IF), ==, 0);
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_HICR), ==, E1000_HICR_EN);
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_FWSM) &
+                    E1000_FWSM_MODE_MASK, ==, E1000_FWSM_MODE_IAMT);
+}
+
+static void test_e1000e_manageability_migrate(void *obj, void *data,
+                                              QGuestAllocator *alloc)
+{
+    g_autofree gchar *tmpdir = NULL;
+    g_autofree gchar *mig_path = NULL;
+    g_autofree gchar *uri = NULL;
+    g_autoptr(GError) err = NULL;
+    g_autoptr(GString) dest_cmdline = NULL;
+    QE1000E_PCI *e1000e = obj;
+    QE1000E *d = &e1000e->e1000e;
+    QGuestAllocator *dest_alloc;
+    QTestState *to;
+    QDict *rsp;
+
+    tmpdir = g_dir_make_tmp("e1000e-test-XXXXXX", &err);
+    g_assert_no_error(err);
+    g_assert_nonnull(tmpdir);
+    mig_path = g_build_filename(tmpdir, "migration.sock", NULL);
+    uri = g_strdup_printf("unix:%s", mig_path);
+
+    e1000e_macreg_write(d, E1000_HOST_IF, 0x01234567);
+    e1000e_macreg_write(d, E1000_HOST_IF + 0x6f0, 0x89abcdef);
+    e1000e_macreg_write(d, E1000_HICR - sizeof(uint32_t), 0x76543210);
+
+    dest_cmdline = g_string_new(qos_get_current_command_line());
+    g_string_append_printf(dest_cmdline,
+                           " -netdev hubport,hubid=0,id=hs0 -incoming %s", uri);
+    to = qtest_init(dest_cmdline->str);
+
+    /* The qgraph objects must be destroyed before their QEMU process. */
+    g_test_queue_destroy(e1000e_qtest_quit, to);
+    e1000e = qos_allocate_objects(to, &dest_alloc);
+    d = &e1000e->e1000e;
+
+    rsp = qmp("{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    g_assert(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    qmp_eventwait("STOP");
+    migrate_allocator(alloc, dest_alloc);
+    qtest_qmp_eventwait(to, "RESUME");
+
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_HOST_IF), ==, 0x01234567);
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_HOST_IF + 0x6f0), ==,
+                    0x89abcdef);
+    g_assert_cmphex(e1000e_macreg_read(d,
+                                      E1000_HICR - sizeof(uint32_t)), ==,
+                    0x76543210);
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_HICR), ==, E1000_HICR_EN);
+    g_assert_cmphex(e1000e_macreg_read(d, E1000_FWSM) &
+                    E1000_FWSM_MODE_MASK, ==, E1000_FWSM_MODE_IAMT);
+
+    g_unlink(mig_path);
+    g_rmdir(tmpdir);
+}
+
 static void test_e1000e_tx(void *obj, void *data, QGuestAllocator * alloc)
 {
     QE1000E_PCI *e1000e = obj;
@@ -232,6 +370,12 @@ static void register_e1000e_test(void)
     };
 
     qos_add_test("init", "e1000e", test_e1000e_init, &opts);
+    qos_add_test("manageability/disabled", "e1000e",
+                 test_e1000e_manageability_disabled, &opts);
+    qos_add_test("manageability/host-interface", "e1000e-82573",
+                 test_e1000e_manageability, &opts);
+    qos_add_test("manageability/migrate", "e1000e-82573",
+                 test_e1000e_manageability_migrate, &opts);
     qos_add_test("tx", "e1000e", test_e1000e_tx, &opts);
     qos_add_test("rx", "e1000e", test_e1000e_rx, &opts);
     qos_add_test("multiple_transfers", "e1000e",

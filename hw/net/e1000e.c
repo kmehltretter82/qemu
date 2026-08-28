@@ -57,6 +57,7 @@
 #include "qom/object.h"
 
 #define TYPE_E1000E "e1000e"
+#define TYPE_E1000E_82573 "e1000e-82573"
 OBJECT_DECLARE_SIMPLE_TYPE(E1000EState, E1000E)
 
 struct E1000EState {
@@ -727,9 +728,25 @@ static const TypeInfo e1000e_info = {
     },
 };
 
+static void e1000e_82573_class_init(ObjectClass *class, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(class);
+    PCIDeviceClass *c = PCI_DEVICE_CLASS(class);
+
+    c->device_id = E1000_DEV_ID_82573E_IAMT;
+    dc->desc = "Intel 82573E GbE Controller (IAMT)";
+}
+
+static const TypeInfo e1000e_82573_info = {
+    .name = TYPE_E1000E_82573,
+    .parent = TYPE_E1000E,
+    .class_init = e1000e_82573_class_init,
+};
+
 static void e1000e_register_types(void)
 {
     type_register_static(&e1000e_info);
+    type_register_static(&e1000e_82573_info);
 }
 
 type_init(e1000e_register_types)

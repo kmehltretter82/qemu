@@ -203,11 +203,11 @@ static void *e1000e_pci_create(void *pci_bus, QGuestAllocator *alloc,
     return &d->obj;
 }
 
-static void e1000e_register_nodes(void)
+static void e1000e_register_node(const char *name, uint16_t device_id)
 {
     QPCIAddress addr = {
         .vendor_id = PCI_VENDOR_ID_INTEL,
-        .device_id = E1000_DEV_ID_82574L,
+        .device_id = device_id,
     };
 
     /*
@@ -219,8 +219,14 @@ static void e1000e_register_nodes(void)
     };
     add_qpci_address(&opts, &addr);
 
-    qos_node_create_driver("e1000e", e1000e_pci_create);
-    qos_node_consumes("e1000e", "pci-bus", &opts);
+    qos_node_create_driver(name, e1000e_pci_create);
+    qos_node_consumes(name, "pci-bus", &opts);
+}
+
+static void e1000e_register_nodes(void)
+{
+    e1000e_register_node("e1000e", E1000_DEV_ID_82574L);
+    e1000e_register_node("e1000e-82573", E1000_DEV_ID_82573E_IAMT);
 }
 
 libqos_init(e1000e_register_nodes);
