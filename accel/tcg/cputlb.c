@@ -1089,6 +1089,15 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
                 write_flags |= TLB_NOTDIRTY;
             }
         }
+        /* qemu-exact: pages a device has touched are observed on every access */
+        if (unlikely(cpu->cc->tcg_ops->dma_track_page) &&
+            cpu->cc->tcg_ops->dma_track_page(cpu, full,
+                                             iotlb & TARGET_PAGE_MASK)) {
+            read_flags |= TLB_EXACT_TRACK;
+            write_flags |= TLB_EXACT_TRACK;
+        }
+        if (is_ram) {
+        }
     } else {
         /* I/O or ROMD */
         iotlb = xlat;
@@ -1406,7 +1415,8 @@ static int probe_access_internal(CPUState *cpu, vaddr addr,
     flags |= full->slow_flags[access_type];
 
     /* Fold all "mmio-like" bits into TLB_MMIO.  This is not RAM.  */
-    if (unlikely(flags & ~(TLB_WATCHPOINT | TLB_NOTDIRTY | TLB_CHECK_ALIGNED))
+    if (unlikely(flags & ~(TLB_WATCHPOINT | TLB_NOTDIRTY | TLB_CHECK_ALIGNED |
+                           TLB_EXACT_TRACK))
         || (access_type != MMU_INST_FETCH && force_mmio)) {
         *phost = NULL;
         return TLB_MMIO;
@@ -1501,6 +1511,13 @@ void *probe_access(CPUArchState *env, vaddr addr, int size,
         return NULL;
     }
 
+    if (unlikely(flags & TLB_EXACT_TRACK)) {
+        env_cpu(env)->cc->tcg_ops->dma_track_access(env_cpu(env), full,
+                                                    addr + full->xlat_offset,
+                                                    size,
+                                                    access_type == MMU_DATA_STORE);
+        flags &= ~TLB_EXACT_TRACK;
+    }
     if (unlikely(flags & (TLB_NOTDIRTY | TLB_WATCHPOINT))) {
         /* Handle watchpoints.  */
         if (flags & TLB_WATCHPOINT) {
@@ -1717,6 +1734,12 @@ static void mmu_watch_or_dirty(CPUState *cpu, MMULookupPageData *data,
         notdirty_write(cpu, addr, size, full, ra);
         flags &= ~TLB_NOTDIRTY;
     }
+    if (flags & TLB_EXACT_TRACK) {
+        cpu->cc->tcg_ops->dma_track_access(cpu, full, addr + full->xlat_offset,
+                                           size,
+                                           access_type == MMU_DATA_STORE);
+        flags &= ~TLB_EXACT_TRACK;
+    }
     data->flags = flags;
 }
 
@@ -1756,7 +1779,7 @@ static bool mmu_lookup(CPUState *cpu, vaddr addr, MemOpIdx oi,
     crosspage = (addr ^ last) & TARGET_PAGE_MASK;
     if (likely(!crosspage)) {
         flags = l->page[0].flags;
-        if (unlikely(flags & (TLB_WATCHPOINT | TLB_NOTDIRTY))) {
+        if (unlikely(flags & (TLB_WATCHPOINT | TLB_NOTDIRTY | TLB_EXACT_TRACK))) {
             mmu_watch_or_dirty(cpu, &l->page[0], type, ra);
         }
         if (unlikely(flags & TLB_BSWAP)) {
@@ -1782,7 +1805,7 @@ static bool mmu_lookup(CPUState *cpu, vaddr addr, MemOpIdx oi,
         }
 
         flags = l->page[0].flags | l->page[1].flags;
-        if (unlikely(flags & (TLB_WATCHPOINT | TLB_NOTDIRTY))) {
+        if (unlikely(flags & (TLB_WATCHPOINT | TLB_NOTDIRTY | TLB_EXACT_TRACK))) {
             mmu_watch_or_dirty(cpu, &l->page[0], type, ra);
             mmu_watch_or_dirty(cpu, &l->page[1], type, ra);
         }
@@ -1887,6 +1910,10 @@ static void *atomic_mmu_lookup(CPUState *cpu, vaddr addr, MemOpIdx oi,
 
     if (unlikely(tlb_addr & TLB_NOTDIRTY)) {
         notdirty_write(cpu, addr, size, full, retaddr);
+    }
+    if (unlikely(tlb_addr & TLB_EXACT_TRACK)) {
+        cpu->cc->tcg_ops->dma_track_access(cpu, full, addr + full->xlat_offset,
+                                           size, true);
     }
 
     if (unlikely(tlb_addr & TLB_WATCHPOINT)) {

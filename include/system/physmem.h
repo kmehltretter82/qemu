@@ -89,6 +89,15 @@ uint64_t physical_memory_set_dirty_lebitmap(unsigned long *bitmap,
 
 void physical_memory_dirty_bits_cleared(ram_addr_t start, ram_addr_t length);
 
+/*
+ * qemu-exact: observe device DMA to RAM. When set, every device read or write
+ * of RAM that goes through address_space_rw/map is reported with the ram_addr
+ * range, direction and the name of the requesting address space. Accesses
+ * carrying attrs.debug (gdb, monitor) are not devices and are not reported.
+ */
+/* declared in system/memory.h, next to the inline fast path it disables */
+extern __thread const char *physmem_dma_as_name;
+
 uint64_t physical_memory_test_and_clear_dirty(ram_addr_t start,
                                               ram_addr_t length,
                                               unsigned client,

@@ -3475,11 +3475,20 @@ static void exact_cachemaint_write(CPUARMState *env, const ARMCPRegInfo *ri,
     hwaddr offset;
     void *host;
 
-    if (!arm_exact_icache_enabled) {
+    if (!arm_exact_icache_enabled && !arm_exact_dcache_enabled) {
         return;
     }
     if (ri->crn == 7 && (ri->crm == 1 || ri->crm == 5) && ri->opc2 == 0) {
-        arm_exact_icache_maint(env_cpu(env), 0, true, false, true); /* IALLU */
+        if (arm_exact_icache_enabled) {
+            arm_exact_icache_maint(env_cpu(env), 0, true, false, true);
+        }
+        return;                                         /* IC IALLU(IS) */
+    }
+    if (ri->crn == 7 && ri->opc2 == 2) {                /* DC xSW: by set/way */
+        if (arm_exact_dcache_enabled) {
+            arm_exact_dcache_maint(env_cpu(env), 0, true,
+                                   ri->crm == 6 ? 'i' : ri->crm == 10 ? 'c' : 'b');
+        }
         return;
     }
     /*
@@ -3500,9 +3509,28 @@ static void exact_cachemaint_write(CPUARMState *env, const ARMCPRegInfo *ri,
     if (!mr || !memory_region_is_ram(mr)) {
         return;
     }
-    arm_exact_icache_maint(env_cpu(env),
-                           memory_region_get_ram_addr(mr) + offset, false,
-                           clean, inval);
+    if (arm_exact_icache_enabled) {
+        arm_exact_icache_maint(env_cpu(env),
+                               memory_region_get_ram_addr(mr) + offset, false,
+                               clean, inval);
+    }
+    if (arm_exact_dcache_enabled && ri->crn == 7) {
+        char kind = 0;
+
+        switch (ri->crm) {
+        case 6:  kind = 'i'; break;                     /* DC IVAC  */
+        case 10: kind = 'c'; break;                     /* DC CVAC  */
+        case 12:                                        /* DC CVAP  */
+        case 13: kind = 'c'; break;                     /* DC CVADP */
+        case 14: kind = 'b'; break;                     /* DC CIVAC */
+        default: break;                                 /* CVAU, IC: D-side unaffected */
+        }
+        if (kind) {
+            arm_exact_dcache_maint(env_cpu(env),
+                                   memory_region_get_ram_addr(mr) + offset,
+                                   false, kind);
+        }
+    }
 }
 
 #ifdef CONFIG_USER_ONLY
@@ -3608,11 +3636,12 @@ static const ARMCPRegInfo v8_cp_reginfo[] = {
       .opc0 = 1, .opc1 = 0, .crn = 7, .crm = 6, .opc2 = 1,
       .access = PL1_W, .accessfn = aa64_cacheop_poc_access,
       .fgt = FGT_DCIVAC,
-      .type = ARM_CP_NOP },
+      .type = ARM_CP_NO_RAW, .writefn = exact_cachemaint_write },
     { .name = "DC_ISW", .state = ARM_CP_STATE_AA64,
       .opc0 = 1, .opc1 = 0, .crn = 7, .crm = 6, .opc2 = 2,
       .fgt = FGT_DCISW,
-      .access = PL1_W, .accessfn = access_tsw, .type = ARM_CP_NOP },
+      .access = PL1_W, .accessfn = access_tsw, .type = ARM_CP_NO_RAW,
+      .writefn = exact_cachemaint_write },
     { .name = "DC_CVAC", .state = ARM_CP_STATE_AA64,
       .opc0 = 1, .opc1 = 3, .crn = 7, .crm = 10, .opc2 = 1,
       .access = PL0_W, .type = ARM_CP_NO_RAW,
@@ -3622,7 +3651,8 @@ static const ARMCPRegInfo v8_cp_reginfo[] = {
     { .name = "DC_CSW", .state = ARM_CP_STATE_AA64,
       .opc0 = 1, .opc1 = 0, .crn = 7, .crm = 10, .opc2 = 2,
       .fgt = FGT_DCCSW,
-      .access = PL1_W, .accessfn = access_tsw, .type = ARM_CP_NOP },
+      .access = PL1_W, .accessfn = access_tsw, .type = ARM_CP_NO_RAW,
+      .writefn = exact_cachemaint_write },
     { .name = "DC_CVAU", .state = ARM_CP_STATE_AA64,
       .opc0 = 1, .opc1 = 3, .crn = 7, .crm = 11, .opc2 = 1,
       .access = PL0_W, .type = ARM_CP_NO_RAW,
@@ -3638,7 +3668,8 @@ static const ARMCPRegInfo v8_cp_reginfo[] = {
     { .name = "DC_CISW", .state = ARM_CP_STATE_AA64,
       .opc0 = 1, .opc1 = 0, .crn = 7, .crm = 14, .opc2 = 2,
       .fgt = FGT_DCCISW,
-      .access = PL1_W, .accessfn = access_tsw, .type = ARM_CP_NOP },
+      .access = PL1_W, .accessfn = access_tsw, .type = ARM_CP_NO_RAW,
+      .writefn = exact_cachemaint_write },
     { .name = "PAR_EL1", .state = ARM_CP_STATE_AA64,
       .type = ARM_CP_ALIAS,
       .opc0 = 3, .opc1 = 0, .crn = 7, .crm = 4, .opc2 = 0,

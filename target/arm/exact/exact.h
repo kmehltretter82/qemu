@@ -38,4 +38,23 @@ void arm_exact_icache_maint(CPUState *cs, uint64_t ram_addr, bool all,
                             bool clean, bool invalidate);
 void arm_exact_icache_dump(void);
 
+/* dcache.c */
+extern bool arm_exact_dcache_enabled;
+void arm_exact_dcache_init(void);
+void arm_exact_dcache_dma(uint64_t ram_addr, uint64_t len, bool is_write,
+                          const char *as_name);
+void arm_exact_dcache_cpu(CPUState *cs, uint64_t ram_addr, unsigned size,
+                          bool is_store);
+void arm_exact_dcache_maint(CPUState *cs, uint64_t ram_addr, bool all,
+                            char kind);
+bool arm_exact_dcache_page_tracked(uint64_t ram_addr);
+bool arm_exact_dcache_track_page(CPUState *cs, CPUTLBEntryFull *full,
+                                 uint64_t ram_addr);
+void arm_exact_dcache_track_access(CPUState *cs, CPUTLBEntryFull *full,
+                                   uint64_t ram_addr, unsigned size,
+                                   bool is_store);
+void arm_exact_dcache_page_joined(uint64_t ram_addr);
+void arm_exact_dcache_nc_skipped(void);
+void arm_exact_dcache_dump(void);
+
 #endif

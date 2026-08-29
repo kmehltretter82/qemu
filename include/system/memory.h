@@ -2709,6 +2709,8 @@ static inline bool memory_access_is_direct(const MemoryRegion *mr,
     return true;
 }
 
+extern void (*physmem_dma_observer)(uint64_t, uint64_t, bool, const char *);
+
 /**
  * address_space_read: read from an address space.
  *
@@ -2739,7 +2741,8 @@ MemTxResult address_space_read(const AddressSpace *as, hwaddr addr,
             fv = address_space_to_flatview(as);
             l = len;
             mr = flatview_translate(fv, addr, &addr1, &l, false, attrs);
-            if (len == l && memory_access_is_direct(mr, false, attrs)) {
+            if (len == l && memory_access_is_direct(mr, false, attrs) &&
+                !physmem_dma_observer) {
                 ptr = qemu_map_ram_ptr(mr->ram_block, addr1);
                 memcpy(buf, ptr, len);
             } else {

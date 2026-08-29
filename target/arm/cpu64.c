@@ -709,6 +709,7 @@ static const Property arm_cpu_exact_properties[] = {
     DEFINE_PROP_BOOL("x-exact-tlb", ARMCPU, prop_exact_tlb, false),
     DEFINE_PROP_BOOL("x-exact-icache", ARMCPU, prop_exact_icache, false),
     DEFINE_PROP_BOOL("x-exact-icache-full", ARMCPU, prop_exact_icache_full, false),
+    DEFINE_PROP_BOOL("x-exact-dcache", ARMCPU, prop_exact_dcache, false),
 };
 
 /* qemu-exact knobs are meaningful on any AArch64 CPU model, not only max */
@@ -727,6 +728,10 @@ void aarch64_cpu_exact_finalize(ARMCPU *cpu, Error **errp)
     if (cpu->prop_exact_tlb) {
         arm_exact_tlb_enabled = true;
         arm_exact_tlb_init();
+    }
+    if (cpu->prop_exact_dcache) {
+        arm_exact_dcache_enabled = true;
+        arm_exact_dcache_init();
     }
     if (cpu->prop_exact_icache || cpu->prop_exact_icache_full) {
         arm_exact_icache_enabled = true;
