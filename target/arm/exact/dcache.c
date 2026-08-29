@@ -50,7 +50,12 @@
 
 bool arm_exact_dcache_enabled;
 
-#define DC_LINE 64
+#define DC_LINE_MAX 128
+/* Modelled cache line, in bytes: 64 by default, 128 with x-exact-dcache-line=128
+ * (which is what CTR_EL0.CWG=5 tells the guest, and what ARCH_DMA_MINALIGN
+ * assumes on arm64). A wider line makes more structures share one. */
+unsigned arm_exact_dcache_line = 64;
+#define DC_LINE arm_exact_dcache_line
 #define DC_LINES_PER_PAGE_MAX 1024      /* 64K pages */
 
 enum { DC_DIRTY_DEFAULT = 0, DC_CLEAN, DC_DIRTY, DC_DMA_WRITTEN };
@@ -61,6 +66,11 @@ typedef struct DcLine {
     uint8_t state;
     bool reported;
     bool ever_stored;   /* the CPU has stored into this line at some point */
+    bool ever_devwr;    /* a device has written this line at some point */
+    bool ever_devrd;
+    uint8_t inflight;   /* device-writable buffers mapped over this line right
+                         * now (address_space_map .. address_space_unmap) */
+    bool inflight_reported;
 } DcLine;
 
 typedef struct DcPage {
@@ -75,7 +85,30 @@ static uint64_t dc_stat_clean, dc_stat_inval, dc_stat_joins, dc_stat_reports;
 static uint64_t dc_stat_nc_skipped;
 /* State of the line just before each device access, for diagnosing misses. */
 static uint64_t dc_stat_dev_wr_state[4], dc_stat_dev_rd_state[4];
-static uint64_t dc_stat_dev_wr_stored;
+static uint64_t dc_stat_dev_wr_stored, dc_stat_exposed_reports;
+
+/*
+ * Why did nothing fire? A ring of the last events on lines that both a device
+ * and the CPU touch, so the interleaving can be read off instead of guessed.
+ * 'W'/'R' device write/read, 's'/'l' CPU store/load, 'c'/'i'/'b' clean,
+ * invalidate, clean+invalidate.
+ */
+typedef struct DcEvent {
+    ram_addr_t a;
+    uint64_t pc;
+    char op;
+    uint8_t state;
+} DcEvent;
+#define DC_RING 512
+static DcEvent dc_ring[DC_RING];
+static unsigned dc_ring_i;
+static ram_addr_t dc_last_shared;   /* last device write to a CPU-stored line */
+
+static void dc_note(ram_addr_t a, char op, uint64_t pc, uint8_t state)
+{
+    dc_ring[dc_ring_i % DC_RING] = (DcEvent){ a, pc, op, state };
+    dc_ring_i++;
+}
 
 static bool dc_site_seen(int cls, uint64_t a, uint64_t b)
 {
@@ -215,6 +248,13 @@ void arm_exact_dcache_dma(uint64_t ram_addr, uint64_t len, bool is_write,
             dc_stat_dma_wr++;
             dc_stat_dev_wr_state[l->state & 3]++;
             dc_stat_dev_wr_stored += l->ever_stored;
+            if (l->ever_stored) {
+                dc_last_shared = a;
+            }
+            if (l->ever_stored || l->ever_devwr) {
+                dc_note(a, 'W', 0, l->state);
+            }
+            l->ever_devwr = true;
             if (l->state == DC_DIRTY_DEFAULT && !l->reported) {
                 /*
                  * The page joined the watched set at this very access, so we
@@ -256,6 +296,10 @@ void arm_exact_dcache_dma(uint64_t ram_addr, uint64_t len, bool is_write,
         } else {
             dc_stat_dma_rd++;
             dc_stat_dev_rd_state[l->state & 3]++;
+            if (l->ever_stored || l->ever_devwr) {
+                dc_note(a, 'R', 0, l->state);
+            }
+            l->ever_devrd = true;
             if ((l->state == DC_DIRTY || l->state == DC_DIRTY_DEFAULT) &&
                 !l->reported) {
                 l->reported = true;
@@ -311,6 +355,25 @@ void arm_exact_dcache_cpu(CPUState *cs, uint64_t ram_addr, unsigned size,
                         "device wrote and nobody invalidated: the write "
                         "allocate brings the stale line into the cache, so "
                         "the device's other bytes in it are lost\n"
+                        "exact-dcache:   line ram 0x%" PRIx64 " cpu=%d pc=0x%"
+                        PRIx64 " (called from 0x%" PRIx64 ")\n",
+                        (uint64_t)a, cs->cpu_index, (uint64_t)env->pc,
+                        (uint64_t)env->xregs[30]);
+                }
+            }
+            if (l->ever_devwr) {
+                dc_note(a, 's', env->pc, l->state);
+            }
+            if (l->inflight && !l->inflight_reported) {
+                l->inflight_reported = true;
+                dc_stat_exposed_reports++;
+                if (!dc_site_seen(6, env->pc, 0)) {
+                    qemu_log_mask(LOG_EXACT,
+                        "exact-dcache: VIOLATION CPU store into a line that a "
+                        "device is writing right now: the buffer is mapped by "
+                        "the device (in flight) and shares this cache line "
+                        "with what the CPU just stored, so one of the two "
+                        "writes will be lost\n"
                         "exact-dcache:   line ram 0x%" PRIx64 " cpu=%d pc=0x%"
                         PRIx64 " (called from 0x%" PRIx64 ")\n",
                         (uint64_t)a, cs->cpu_index, (uint64_t)env->pc,
@@ -386,6 +449,9 @@ void arm_exact_dcache_maint(CPUState *cs, uint64_t ram_addr, bool all,
         return;
     }
     l = dc_line(p, ram_addr);
+    if (l->ever_devwr || l->ever_stored) {
+        dc_note(ram_addr & ~(ram_addr_t)(DC_LINE - 1), kind, env->pc, l->state);
+    }
     if (kind == 'i') {
         dc_stat_inval++;
         if (l->state == DC_DIRTY) {
@@ -430,6 +496,44 @@ void arm_exact_dcache_init(void)
     dc_sites = g_hash_table_new(NULL, NULL);
     qemu_add_exit_notifier(&dc_exit_notifier);
     physmem_dma_observer = arm_exact_dcache_dma;
+    physmem_dma_inflight_observer = arm_exact_dcache_inflight;
+}
+
+/*
+ * A device holds a direct pointer to guest RAM between address_space_map() and
+ * address_space_unmap(). Count how many device-writable buffers cover each
+ * line: a CPU store while that count is non-zero is the cache-line sharing bug
+ * itself, whatever the maintenance around it looks like.
+ */
+void arm_exact_dcache_inflight(uint64_t ram_addr, uint64_t len, bool is_write,
+                               bool inflight)
+{
+    ram_addr_t a, end = ram_addr + len;
+
+    if (!arm_exact_dcache_enabled || !dc_pages || !is_write || !len) {
+        return;
+    }
+    qemu_mutex_lock(&dc_lock);
+    for (a = ram_addr & ~(ram_addr_t)(DC_LINE - 1); a < end; a += DC_LINE) {
+        DcPage *p = dc_page(a, inflight);
+        DcLine *l;
+
+        if (!p) {
+            continue;
+        }
+        l = dc_line(p, a);
+        if (inflight) {
+            if (l->inflight < UINT8_MAX) {
+                l->inflight++;
+            }
+        } else if (l->inflight) {
+            l->inflight--;
+            if (!l->inflight) {
+                l->inflight_reported = false;
+            }
+        }
+    }
+    qemu_mutex_unlock(&dc_lock);
 }
 
 void arm_exact_dcache_dump(void)
@@ -462,7 +566,29 @@ void arm_exact_dcache_dump(void)
                   dc_stat_dev_rd_state[DC_DMA_WRITTEN]);
     qemu_log_mask(LOG_EXACT,
                   "exact-dcache: %" PRIu64 " device writes landed in a line the"
-                  " CPU had stored into at some point\n", dc_stat_dev_wr_stored);
+                  " CPU had stored into at some point; %" PRIu64 " CPU stores "
+                  "into a line a device was writing at that moment\n",
+                  dc_stat_dev_wr_stored, dc_stat_exposed_reports);
+    if (dc_last_shared) {
+        unsigned n = dc_ring_i < DC_RING ? dc_ring_i : DC_RING;
+        unsigned shown = 0;
+
+        qemu_log_mask(LOG_EXACT, "exact-dcache: history of line 0x%" PRIx64
+                      " (device wrote it, CPU stores into it), oldest first:\n",
+                      (uint64_t)dc_last_shared);
+        for (unsigned k = 0; k < n && shown < 40; k++) {
+            unsigned idx = (dc_ring_i - n + k) % DC_RING;
+            DcEvent *e = &dc_ring[idx];
+
+            if (e->a != dc_last_shared) {
+                continue;
+            }
+            shown++;
+            qemu_log_mask(LOG_EXACT, "exact-dcache:   %c state-before=%s%s%"
+                          PRIx64 "\n", e->op, dc_state_name(e->state),
+                          e->pc ? " pc=0x" : "", e->pc);
+        }
+    }
 }
 
 void arm_exact_dcache_nc_skipped(void)

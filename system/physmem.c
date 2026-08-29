@@ -3119,6 +3119,13 @@ MemoryRegion *get_system_io(void)
 
 void (*physmem_dma_observer)(uint64_t ram_addr, uint64_t len, bool is_write,
                              const char *as_name);
+/*
+ * A device holds a direct pointer into guest RAM between address_space_map()
+ * and address_space_unmap(): inflight=true at the map, false at the unmap.
+ * That is the exact window in which the guest must not touch the buffer.
+ */
+void (*physmem_dma_inflight_observer)(uint64_t ram_addr, uint64_t len,
+                                      bool is_write, bool inflight);
 __thread const char *physmem_dma_as_name;
 
 static void invalidate_and_set_dirty(MemoryRegion *mr, hwaddr addr,
@@ -3824,6 +3831,10 @@ void *address_space_map(AddressSpace *as,
         physmem_dma_observer(memory_region_get_ram_addr(mr) + xlat, *plen,
                              false, as->name);
     }
+    if (unlikely(physmem_dma_inflight_observer) && !attrs.debug) {
+        physmem_dma_inflight_observer(memory_region_get_ram_addr(mr) + xlat,
+                                      *plen, is_write, true);
+    }
     return qemu_ram_ptr_length(mr->ram_block, xlat, plen, true, is_write);
 }
 
@@ -3845,6 +3856,10 @@ void address_space_unmap(AddressSpace *as, void *buffer, hwaddr len,
                                      access_len, true, as->name);
             }
             invalidate_and_set_dirty(mr, addr1, access_len);
+        }
+        if (unlikely(physmem_dma_inflight_observer)) {
+            physmem_dma_inflight_observer(memory_region_get_ram_addr(mr) + addr1,
+                                          len, is_write, false);
         }
         if (xen_map_cache_enabled()) {
             xen_invalidate_map_cache_entry(buffer);
