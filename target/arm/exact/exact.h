@@ -40,7 +40,10 @@ void arm_exact_icache_dump(void);
 
 /* dcache.c */
 extern bool arm_exact_dcache_enabled;
+extern unsigned arm_exact_dcache_line;
 void arm_exact_dcache_init(void);
+void arm_exact_dcache_inflight(uint64_t ram_addr, uint64_t len, bool is_write,
+                               bool inflight);
 void arm_exact_dcache_dma(uint64_t ram_addr, uint64_t len, bool is_write,
                           const char *as_name);
 void arm_exact_dcache_cpu(CPUState *cs, uint64_t ram_addr, unsigned size,

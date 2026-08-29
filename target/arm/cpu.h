@@ -1138,6 +1138,7 @@ struct ArchCPU {
     bool prop_exact_icache;
     bool prop_exact_icache_full;
     bool prop_exact_dcache;
+    uint8_t prop_dcache_line;   /* modelled cache line in bytes: 64 or 128 */
 
     /* GM blocksize, in log_2(words), ie low 4 bits of GMID_EL0 */
     uint8_t gm_blocksize;

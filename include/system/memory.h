@@ -2710,6 +2710,7 @@ static inline bool memory_access_is_direct(const MemoryRegion *mr,
 }
 
 extern void (*physmem_dma_observer)(uint64_t, uint64_t, bool, const char *);
+extern void (*physmem_dma_inflight_observer)(uint64_t, uint64_t, bool, bool);
 
 /**
  * address_space_read: read from an address space.
