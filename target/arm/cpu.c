@@ -1553,8 +1553,11 @@ static void arm_cpu_post_init(Object *obj)
 {
     ARMCPU *cpu = ARM_CPU(obj);
 
-    /* cpu64.c is built for every arm target, so no guard is needed here */
-    if (arm_feature(&cpu->env, ARM_FEATURE_AARCH64)) {
+    /*
+     * cpu64.c is built for every arm target, so no guard is needed here, and
+     * the knobs are as meaningful on a 32-bit CPU model as on a 64-bit one.
+     */
+    {
         aarch64_add_exact_properties(obj);
     }
 
@@ -1788,11 +1791,21 @@ void arm_cpu_finalize_features(ARMCPU *cpu, Error **errp)
             return;
         }
 
-        aarch64_cpu_exact_finalize(cpu, &local_err);
-        if (local_err != NULL) {
-            error_propagate(errp, local_err);
-            return;
-        }
+    }
+
+    /*
+     * The qemu-exact models are not an AArch64 feature: a 32-bit kernel running
+     * at AArch32 EL1 (-cpu max,aarch64=off) has the same TLB, cache and DMA
+     * obligations, and its page tables are the same long descriptors when it
+     * uses LPAE. Finalize them outside the block above, which 'aarch64=off'
+     * has already excluded by clearing ARM_FEATURE_AARCH64 - leaving them there
+     * made every x-exact-* knob a silent no-op for exactly the guest we most
+     * want to point them at.
+     */
+    aarch64_cpu_exact_finalize(cpu, &local_err);
+    if (local_err != NULL) {
+        error_propagate(errp, local_err);
+        return;
     }
 
     if (kvm_enabled()) {

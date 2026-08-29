@@ -1223,6 +1223,15 @@ void HELPER(set_cp_reg)(CPUARMState *env, const void *rip, uint32_t value)
 {
     const ARMCPRegInfo *ri = rip;
 
+    /*
+     * qemu-exact: the AArch32 TLB maintenance operations are MCR p15, x, Rt,
+     * c8, ... - a different encoding from the AArch64 ones, and the only ones a
+     * 32-bit kernel issues.
+     */
+    if (unlikely(arm_exact_tlb_enabled) && ri->cp == 15 && ri->crn == 8) {
+        arm_exact_tlb_tlbi32(env, ri, value);
+    }
+
     if (ri->type & ARM_CP_IO) {
         bql_lock();
         ri->writefn(env, ri, value);

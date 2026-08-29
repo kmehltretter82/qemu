@@ -933,14 +933,14 @@ static int ex_ttl_level(uint64_t value)
  * aliases). Decoding here rather than in each of the forty writefns keeps
  * the change to upstream code to a single line.
  */
+static void ex_tlbi_apply(CPUARMState *env, ExInval *inv, bool broadcast);
+
 void arm_exact_tlb_tlbi(CPUARMState *env, const struct ARMCPRegInfo *ri,
                         uint64_t value)
 {
     ExInval inv = { .ttl_level = -1 };
     unsigned el = regime_el(arm_mmu_idx(env));
-    unsigned self = env_cpu(env)->cpu_index;
     bool broadcast;
-    unsigned i;
 
     if (!arm_exact_tlb_enabled || !ex_ncpus) {
         return;
@@ -1128,10 +1128,19 @@ void arm_exact_tlb_tlbi(CPUARMState *env, const struct ARMCPRegInfo *ri,
         break;
     }
 
-    ex_tlbi_by_kind[inv.all ? EX_K_ALL :
-                    inv.match_range ? EX_K_RANGE :
-                    inv.match_va ? EX_K_VA :
-                    inv.match_asid ? EX_K_ASID : EX_K_REGIME]++;
+    ex_tlbi_apply(env, &inv, broadcast);
+}
+
+/* Remove what @inv describes, from this PE or from all of them. */
+static void ex_tlbi_apply(CPUARMState *env, ExInval *inv, bool broadcast)
+{
+    unsigned self = env_cpu(env)->cpu_index;
+    unsigned i;
+
+    ex_tlbi_by_kind[inv->all ? EX_K_ALL :
+                    inv->match_range ? EX_K_RANGE :
+                    inv->match_va ? EX_K_VA :
+                    inv->match_asid ? EX_K_ASID : EX_K_REGIME]++;
 
     qemu_mutex_lock(&ex_lock);
     ex_resolve_locked(env_cpu(env));
@@ -1140,16 +1149,85 @@ void arm_exact_tlb_tlbi(CPUARMState *env, const struct ARMCPRegInfo *ri,
         for (i = 0; i < ex_ncpus; i++) {
             if (ex_tab_cpu[i]) {
                 ex_stat_removed += g_hash_table_foreach_remove(ex_tab_cpu[i],
-                                                        ex_inval_cb, &inv);
+                                                        ex_inval_cb, inv);
             }
         }
         ex_stat_broadcast++;
     } else if (ex_tab_cpu[self]) {
         ex_stat_removed += g_hash_table_foreach_remove(ex_tab_cpu[self],
-                                                      ex_inval_cb, &inv);
+                                                      ex_inval_cb, inv);
         ex_stat_local++;
     }
     qemu_mutex_unlock(&ex_lock);
+}
+
+/*
+ * The AArch32 CP15 TLB maintenance operations (MCR p15, 0, Rt, c8, ...).
+ * They are a different encoding of the same intent, and they are what a 32-bit
+ * guest - or an AArch64 CPU running a 32-bit kernel at EL1 - issues. Leaving
+ * them undecoded does not make the model conservative, it makes it wrong: every
+ * invalidation the guest performs would go unseen and the next legitimate reuse
+ * of a descriptor would be reported as a violation.
+ *
+ *   crm 3   inner shareable (broadcast)     crm 5  instruction TLB, local
+ *   crm 7   unified, local                  crm 6  data TLB, local
+ *   opc2 0  ALL      1 MVA (VA + ASID)      2 ASID    3 MVAA (VA, any ASID)
+ *        5  MVAL (last level only)          7 MVAAL (last level, any ASID)
+ *
+ * The operand carries the VA in bits 31:12 and, for the ASID-matching forms,
+ * an 8-bit ASID in bits 7:0.
+ */
+void arm_exact_tlb_tlbi32(CPUARMState *env, const struct ARMCPRegInfo *ri,
+                          uint64_t value)
+{
+    ExInval inv = { .ttl_level = -1 };
+    bool broadcast;
+
+    if (!arm_exact_tlb_enabled || !ex_ncpus) {
+        return;
+    }
+
+    /* Hyp-mode operations (opc1 == 4) act on the EL2 regime. */
+    inv.regime = ri->opc1 == 4 ? 2 : 1;
+
+    switch (ri->opc2) {
+    case 0:                             /* TLBIALL: this regime, every ASID */
+        inv.all = true;
+        break;
+    case 2:                             /* TLBIASID */
+        inv.match_asid = true;
+        inv.asid = extract64(value, 0, 8);
+        break;
+    case 1:                             /* TLBIMVA  */
+    case 5:                             /* TLBIMVAL */
+        inv.match_va = true;
+        inv.match_asid = true;
+        inv.asid = extract64(value, 0, 8);
+        inv.va = value & ~(uint64_t)0xfff;
+        inv.last_level_only = ri->opc2 == 5;
+        break;
+    case 3:                             /* TLBIMVAA  */
+    case 7:                             /* TLBIMVAAL */
+        inv.match_va = true;
+        inv.match_globals = true;       /* any ASID, including global entries */
+        inv.va = value & ~(uint64_t)0xfff;
+        inv.last_level_only = ri->opc2 == 7;
+        break;
+    default:
+        /* Anything we do not recognise must not leave stale entries behind. */
+        inv.all = true;
+        break;
+    }
+
+    /* A VA-matched operation also removes global (nG == 0) entries. */
+    if (inv.match_va) {
+        inv.match_globals = true;
+    }
+
+    broadcast = ri->crm == 3 || ri->crm == 1 ||
+                (ri->opc1 == 0 && (arm_hcr_el2_eff(env) & HCR_FB));
+
+    ex_tlbi_apply(env, &inv, broadcast);
 }
 
 void arm_exact_tlb_dump(void)
