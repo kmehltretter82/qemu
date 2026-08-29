@@ -138,13 +138,29 @@ void arm_exact_dcache_track_access(CPUState *cs, CPUTLBEntryFull *full,
     arm_exact_dcache_cpu(cs, ram_addr, size, is_store);
 }
 
-/* a page joined the set: existing TLB entries for it lack the flag */
+static void dc_flush_work(CPUState *cs, run_on_cpu_data data)
+{
+    tlb_flush(cs);
+}
+
+/*
+ * A page joined the set, so TLB entries other vCPUs already hold for it
+ * lack the tracking flag. tlb_flush() is synchronous and must run on the
+ * owning vCPU: calling it for another CPU from here races with that CPU's
+ * fast path (it reads an entry the memset is turning into -1 and loads
+ * through an addend of -1), so queue it as work instead. The window until
+ * that runs can only lose accesses, never invent reports.
+ */
 void arm_exact_dcache_page_joined(uint64_t ram_addr)
 {
     CPUState *cs;
 
     CPU_FOREACH(cs) {
-        tlb_flush(cs);
+        if (qemu_cpu_is_self(cs)) {
+            tlb_flush(cs);
+        } else {
+            async_run_on_cpu(cs, dc_flush_work, RUN_ON_CPU_NULL);
+        }
     }
 }
 
