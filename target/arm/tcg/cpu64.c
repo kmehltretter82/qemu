@@ -209,6 +209,7 @@ static const Property arm_cpu_exact_properties[] = {
     DEFINE_PROP_UINT8("x-asid-bits", ARMCPU, prop_asid_bits, 0xff),
     DEFINE_PROP_UINT8("x-bbm-level", ARMCPU, prop_bbm_level, 0xff),
     DEFINE_PROP_BOOL("x-exact-tlb", ARMCPU, prop_exact_tlb, false),
+    DEFINE_PROP_BOOL("x-exact-icache", ARMCPU, prop_exact_icache, false),
 };
 
 static void aarch64_a55_initfn(Object *obj)

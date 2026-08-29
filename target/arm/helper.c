@@ -11,6 +11,7 @@
 #include "trace.h"
 #include "cpu.h"
 #include "internals.h"
+#include "exact/exact.h"
 #include "cpu-features.h"
 #include "exec/page-protection.h"
 #include "exec/mmap-lock.h"
@@ -3458,6 +3459,42 @@ static CPAccessResult access_exlock_el3(CPUARMState *env,
     return CP_ACCESS_OK;
 }
 
+/*
+ * qemu-exact: cache maintenance by virtual address. Translate the operand to
+ * a ram_addr and hand it to the instruction cache model. These are NOPs in
+ * stock system emulation because there are no caches to maintain; with the
+ * model on, the guest's maintenance is exactly what we need to observe.
+ */
+static void exact_cachemaint_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                                   uint64_t value)
+{
+    bool clean = ri->crm == 10 || ri->crm == 11 || ri->crm == 14;
+    bool inval = ri->crn == 7 && ri->crm == 5;      /* IC IVAU */
+    MemoryRegion *mr;
+    hwaddr offset;
+    void *host;
+
+    if (!arm_exact_icache_enabled) {
+        return;
+    }
+    if (ri->crn == 7 && (ri->crm == 1 || ri->crm == 5) && ri->opc2 == 0) {
+        arm_exact_icache_maint(env_cpu(env), 0, true, false, true); /* IALLU */
+        return;
+    }
+    host = probe_read(env, value & ~(uint64_t)63, 64, arm_env_mmu_index(env),
+                      GETPC());
+    if (!host) {
+        return;
+    }
+    mr = memory_region_from_host(host, &offset);
+    if (!mr || !memory_region_is_ram(mr)) {
+        return;
+    }
+    arm_exact_icache_maint(env_cpu(env),
+                           memory_region_get_ram_addr(mr) + offset, false,
+                           clean, inval);
+}
+
 #ifdef CONFIG_USER_ONLY
 /*
  * `IC IVAU` is handled to improve compatibility with JITs that dual-map their
@@ -3533,12 +3570,14 @@ static const ARMCPRegInfo v8_cp_reginfo[] = {
      */
     { .name = "IC_IALLUIS", .state = ARM_CP_STATE_AA64,
       .opc0 = 1, .opc1 = 0, .crn = 7, .crm = 1, .opc2 = 0,
-      .access = PL1_W, .type = ARM_CP_NOP,
+      .access = PL1_W, .type = ARM_CP_NO_RAW,
+      .writefn = exact_cachemaint_write,
       .fgt = FGT_ICIALLUIS,
       .accessfn = access_ticab },
     { .name = "IC_IALLU", .state = ARM_CP_STATE_AA64,
       .opc0 = 1, .opc1 = 0, .crn = 7, .crm = 5, .opc2 = 0,
-      .access = PL1_W, .type = ARM_CP_NOP,
+      .access = PL1_W, .type = ARM_CP_NO_RAW,
+      .writefn = exact_cachemaint_write,
       .fgt = FGT_ICIALLU,
       .accessfn = access_tocu },
     { .name = "IC_IVAU", .state = ARM_CP_STATE_AA64,
@@ -3550,7 +3589,8 @@ static const ARMCPRegInfo v8_cp_reginfo[] = {
       .type = ARM_CP_NO_RAW,
       .writefn = ic_ivau_write
 #else
-      .type = ARM_CP_NOP
+      .type = ARM_CP_NO_RAW,
+      .writefn = exact_cachemaint_write
 #endif
     },
     /* Cache ops: all NOPs since we don't emulate caches */
@@ -3565,7 +3605,8 @@ static const ARMCPRegInfo v8_cp_reginfo[] = {
       .access = PL1_W, .accessfn = access_tsw, .type = ARM_CP_NOP },
     { .name = "DC_CVAC", .state = ARM_CP_STATE_AA64,
       .opc0 = 1, .opc1 = 3, .crn = 7, .crm = 10, .opc2 = 1,
-      .access = PL0_W, .type = ARM_CP_NOP,
+      .access = PL0_W, .type = ARM_CP_NO_RAW,
+      .writefn = exact_cachemaint_write,
       .fgt = FGT_DCCVAC,
       .accessfn = aa64_cacheop_poc_access },
     { .name = "DC_CSW", .state = ARM_CP_STATE_AA64,
@@ -3574,12 +3615,14 @@ static const ARMCPRegInfo v8_cp_reginfo[] = {
       .access = PL1_W, .accessfn = access_tsw, .type = ARM_CP_NOP },
     { .name = "DC_CVAU", .state = ARM_CP_STATE_AA64,
       .opc0 = 1, .opc1 = 3, .crn = 7, .crm = 11, .opc2 = 1,
-      .access = PL0_W, .type = ARM_CP_NOP,
+      .access = PL0_W, .type = ARM_CP_NO_RAW,
+      .writefn = exact_cachemaint_write,
       .fgt = FGT_DCCVAU,
       .accessfn = access_tocu },
     { .name = "DC_CIVAC", .state = ARM_CP_STATE_AA64,
       .opc0 = 1, .opc1 = 3, .crn = 7, .crm = 14, .opc2 = 1,
-      .access = PL0_W, .type = ARM_CP_NOP,
+      .access = PL0_W, .type = ARM_CP_NO_RAW,
+      .writefn = exact_cachemaint_write,
       .fgt = FGT_DCCIVAC,
       .accessfn = aa64_cacheop_poc_access },
     { .name = "DC_CISW", .state = ARM_CP_STATE_AA64,

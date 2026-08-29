@@ -2619,6 +2619,7 @@ static const TCGCPUOps arm_tcg_ops = {
     .cpu_exec_halt = arm_cpu_exec_halt,
     .cpu_exec_reset = cpu_reset,
     .do_interrupt = arm_cpu_do_interrupt,
+    .icache_fetch = arm_exact_icache_fetch,
     .ptwatch_write = arm_exact_ptwatch_write,
     .do_transaction_failed = arm_cpu_do_transaction_failed,
     .do_unaligned_access = arm_cpu_do_unaligned_access,
