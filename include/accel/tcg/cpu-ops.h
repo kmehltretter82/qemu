@@ -234,6 +234,14 @@ struct TCGCPUOps {
      */
     vaddr (*pointer_wrap)(CPUState *cpu, int mmu_idx, vaddr result, vaddr base);
     /**
+     * @icache_fetch: notify the target that code is being translated
+     *
+     * Called when a translation block is created, with the guest physical
+     * address and size of the bytes it was built from. qemu-exact uses it to
+     * model an instruction cache that is not coherent with data writes.
+     */
+    void (*icache_fetch)(CPUState *cpu, uint64_t ram_addr, unsigned size);
+    /**
      * @ptwatch_write: notify the target of a store to a watched page
      *
      * Called from the store slow path, before the store happens, for pages

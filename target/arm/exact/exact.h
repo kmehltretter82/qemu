@@ -28,4 +28,13 @@ void arm_exact_tlb_tlbi(CPUARMState *env, const struct ARMCPRegInfo *ri,
                         uint64_t value);
 void arm_exact_tlb_dump(void);
 
+/* icache.c */
+extern bool arm_exact_icache_enabled;
+void arm_exact_icache_init(void);
+void arm_exact_icache_fetch(CPUState *cs, uint64_t ram_addr, unsigned size);
+void arm_exact_icache_store(CPUState *cs, uint64_t ram_addr, unsigned size);
+void arm_exact_icache_maint(CPUState *cs, uint64_t ram_addr, bool all,
+                            bool clean, bool invalidate);
+void arm_exact_icache_dump(void);
+
 #endif

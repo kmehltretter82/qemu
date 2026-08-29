@@ -707,6 +707,22 @@ void aarch64_cpu_exact_finalize(ARMCPU *cpu, Error **errp)
         arm_exact_tlb_enabled = true;
         arm_exact_tlb_init();
     }
+    if (cpu->prop_exact_icache) {
+        arm_exact_icache_enabled = true;
+        arm_exact_icache_init();
+        /*
+         * The model is pointless unless the guest believes it has maintenance
+         * to do. Default DIC and IDC to 0 here, and give CLIDR a level of
+         * unification, because Linux's read_cpuid_effective_cachetype()
+         * forces IDC back to 1 when CLIDR says there is none.
+         */
+        if (cpu->prop_ctr_dic == 0xff) {
+            cpu->prop_ctr_dic = 0;
+        }
+        if (cpu->prop_ctr_idc == 0xff) {
+            cpu->prop_ctr_idc = 0;
+        }
+    }
 
     if (cpu->prop_ctr_dic != 0xff) {
         cpu->ctr = FIELD_DP64(cpu->ctr, CTR_EL0, DIC, cpu->prop_ctr_dic & 1);

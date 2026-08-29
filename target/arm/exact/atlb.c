@@ -50,6 +50,13 @@
 bool arm_exact_tlb_enabled;
 
 #define EX_ASID_GLOBAL 0x10000u
+/*
+ * Stage 2 entries live in the same tables as stage 1 ones, keyed by a regime
+ * number that cannot collide with an exception level. Their "address" is an
+ * IPA and they carry no ASID, only a VMID.
+ */
+#define EX_REGIME_S2   8
+#define EX_REGIME_S2_S 9
 #define EX_MAX_ENTRIES (1u << 20)
 #define EX_MAX_REPORTS 32
 #define EX_MAX_CPUS 256
@@ -128,11 +135,43 @@ static QemuMutex ex_lock;
  */
 static GHashTable *ex_tab_cpu[EX_MAX_CPUS];     /* ExKey -> ExEntry */
 static unsigned ex_ncpus;
-static unsigned ex_reports;
 static uint64_t ex_stat_fills, ex_stat_hits, ex_stat_benign, ex_stat_violations;
 static uint64_t ex_tlbi_seq, ex_stat_removed, ex_stat_contig_checked;
 static uint64_t ex_stat_broadcast, ex_stat_local, ex_stat_table_fills;
 static bool ex_capped;
+static GHashTable *ex_sites;        /* distinct report sites, with counts */
+
+static const char *ex_regime_name(uint8_t r)
+{
+    switch (r) {
+    case EX_REGIME_S2:   return "stage2";
+    case EX_REGIME_S2_S: return "stage2-secure";
+    case 1:              return "EL1&0";
+    case 2:              return "EL2&0";
+    case 3:              return "EL3";
+    default:             return "?";
+    }
+}
+
+/*
+ * A violation repeats once per descriptor, which for a contiguous block means
+ * sixteen times per operation and drowns everything else. Report each distinct
+ * site once and count the rest, so a second call site cannot hide behind the
+ * volume of the first.
+ */
+static bool ex_site_seen(int cls, uint64_t a, uint64_t b)
+{
+    uint64_t key = (a * 31) ^ (b * 131) ^ ((uint64_t)cls << 60);
+    gpointer k = (gpointer)(uintptr_t)key;
+    uintptr_t n;
+
+    if (!ex_sites) {
+        ex_sites = g_hash_table_new(NULL, NULL);
+    }
+    n = (uintptr_t)g_hash_table_lookup(ex_sites, k);
+    g_hash_table_insert(ex_sites, k, (gpointer)(n + 1));
+    return n != 0;
+}
 
 
 static guint ex_hash(gconstpointer p)
@@ -200,6 +239,9 @@ static uint32_t ex_asid_of(CPUARMState *env, ARMMMUIdx mmu_idx, uint64_t desc)
     uint64_t tcr, ttbr;
     unsigned bits;
 
+    if (regime_is_stage2(mmu_idx)) {
+        return EX_ASID_GLOBAL;      /* stage 2 has no ASID, only a VMID */
+    }
     if (!(desc & (1ULL << 11))) {
         return EX_ASID_GLOBAL;          /* nG == 0 */
     }
@@ -217,7 +259,11 @@ static uint32_t ex_asid_of(CPUARMState *env, ARMMMUIdx mmu_idx, uint64_t desc)
 
 static uint16_t ex_vmid_of(CPUARMState *env, ARMMMUIdx mmu_idx)
 {
-    if (regime_el(mmu_idx) != 1 || !arm_feature(env, ARM_FEATURE_EL2)) {
+    if (mmu_idx == ARMMMUIdx_Stage2_S) {
+        return extract64(env->cp15.vsttbr_el2, 48, 16);
+    }
+    if (!regime_is_stage2(mmu_idx) &&
+        (regime_el(mmu_idx) != 1 || !arm_feature(env, ARM_FEATURE_EL2))) {
         return 0;
     }
     return extract64(env->cp15.vttbr_el2, 48, 16);
@@ -225,13 +271,25 @@ static uint16_t ex_vmid_of(CPUARMState *env, ARMMMUIdx mmu_idx)
 
 static bool ex_tracked(ARMMMUIdx mmu_idx)
 {
+    if (regime_is_stage2(mmu_idx)) {
+        return true;
+    }
     switch (regime_el(mmu_idx)) {
     case 1:
     case 2:
-        return !regime_is_stage2(mmu_idx);
+        return true;
     default:
         return false;
     }
+}
+
+/* the regime number an entry is filed under */
+static uint8_t ex_regime_of(ARMMMUIdx mmu_idx)
+{
+    if (regime_is_stage2(mmu_idx)) {
+        return mmu_idx == ARMMMUIdx_Stage2_S ? EX_REGIME_S2_S : EX_REGIME_S2;
+    }
+    return regime_el(mmu_idx);
 }
 
 /* --------------------------------------------------------------- report */
@@ -242,14 +300,11 @@ static void ex_report(CPUARMState *env, const char *cls, const ExEntry *old,
     CPUState *cs = env_cpu(env);
     uint64_t diff = old->desc_val ^ new_desc;
 
-    if (ex_reports++ >= EX_MAX_REPORTS) {
-        if (ex_reports == EX_MAX_REPORTS + 1) {
-            qemu_log_mask(LOG_EXACT, "exact-tlb: further reports suppressed\n");
-        }
+    if (ex_site_seen(0, (uint64_t)env->pc, old->key.va)) {
         return;
     }
     qemu_log_mask(LOG_EXACT,
-             "exact-tlb: VIOLATION %s cpu=%d pc=0x%" PRIx64 " el=%d regime=EL%u "
+             "exact-tlb: VIOLATION %s cpu=%d pc=0x%" PRIx64 " el=%d regime=%s "
              "asid=%s0x%x vmid=0x%x va=0x%" PRIx64 " level=%d\n"
              "exact-tlb:   descriptor at PA 0x%" PRIx64
              " changed 0x%016" PRIx64 " -> 0x%016" PRIx64 " (diff 0x%" PRIx64 ")\n"
@@ -257,7 +312,7 @@ static void ex_report(CPUARMState *env, const char *cls, const ExEntry *old,
              ", filled by cpu=%u, %" PRIu64 " TLBI ops executed since (none "
              "of them covered this entry)\n",
              cls, cs->cpu_index, (uint64_t)env->pc, arm_current_el(env),
-             (unsigned)old->key.regime,
+             ex_regime_name(old->key.regime),
              old->key.asid == EX_ASID_GLOBAL ? "global " : "",
              (unsigned)(old->key.asid == EX_ASID_GLOBAL ? 0 : old->key.asid),
              (unsigned)old->key.vmid, old->key.va, (int)old->level,
@@ -360,7 +415,7 @@ static void ex_resolve_locked(CPUState *cs)
                  ((d->broke_val | newv) & (1ULL << 52)))) {
                 ex_stat_bbm++;
                 ex_stat_violations++;
-                if (ex_reports++ < EX_MAX_REPORTS) {
+                if (!ex_site_seen(1, d->broke_pc, p->pc)) {
                     qemu_log_mask(LOG_EXACT,
                         "exact-tlb: VIOLATION break-before-make without the "
                         "invalidation: descriptor at ram 0x%" PRIx64
@@ -382,19 +437,19 @@ static void ex_resolve_locked(CPUState *cs)
 }
 
 /* remember a descriptor we have walked, and make stores to its page trap */
-static void ex_desc_note(void *host, uint64_t val, const ExKey *key,
-                         uint64_t desc_pa)
+static ram_addr_t ex_desc_note(void *host, uint64_t val, const ExKey *key,
+                               uint64_t desc_pa)
 {
     MemoryRegion *mr;
     ram_addr_t offset, ra;
     ExDesc *d;
 
     if (!host) {
-        return;                 /* descriptor is not in RAM */
+        return 0;               /* descriptor is not in RAM */
     }
     mr = memory_region_from_host(host, &offset);
     if (!mr || !memory_region_is_ram(mr)) {
-        return;
+        return 0;
     }
     ra = memory_region_get_ram_addr(mr) + offset;
 
@@ -404,7 +459,7 @@ static void ex_desc_note(void *host, uint64_t val, const ExKey *key,
         d->key = *key;
         d->desc_pa = desc_pa;
         d->have_key = true;
-        return;
+        return ra;
     }
     d = g_new0(ExDesc, 1);
     d->host = host;
@@ -426,12 +481,21 @@ static void ex_desc_note(void *host, uint64_t val, const ExKey *key,
          */
         tlb_protect_code(ra & TARGET_PAGE_MASK);
     }
+    return ra;
 }
 
 void arm_exact_ptwatch_write(CPUState *cs, uint64_t ram_addr, unsigned size,
                              uintptr_t retaddr)
 {
     CPUARMState *env = cpu_env(cs);
+
+    /*
+     * The same callback serves the instruction cache model: pages holding
+     * translated code already take this slow path, which is how QEMU keeps
+     * translations coherent, and that is exactly the coherence real hardware
+     * does not provide.
+     */
+    arm_exact_icache_store(cs, ram_addr, size);
 
     if (!arm_exact_tlb_enabled || !ex_desc) {
         return;
@@ -502,14 +566,14 @@ static void ex_check_contig(CPUARMState *env, const ExKey *key, uint64_t desc_pa
             why = "output addresses not consecutive";
         }
         if (why) {
-            if (ex_reports++ < EX_MAX_REPORTS) {
+            if (!ex_site_seen(2, (uint64_t)env->pc, key->va)) {
                 qemu_log_mask(LOG_EXACT,
                     "exact-tlb: VIOLATION contiguous block inconsistent (%s) "
-                    "cpu=%d pc=0x%" PRIx64 " va=0x%" PRIx64 " regime=EL%u\n"
+                    "cpu=%d pc=0x%" PRIx64 " va=0x%" PRIx64 " regime=%s\n"
                     "exact-tlb:   block at PA 0x%" PRIx64 ", entry %d of %d is "
                     "0x%016" PRIx64 ", entry 0 is 0x%016" PRIx64 "\n",
                     why, env_cpu(env)->cpu_index, (uint64_t)env->pc,
-                    key->va, (unsigned)key->regime, base_pa, i,
+                    key->va, ex_regime_name(key->regime), base_pa, i,
                     EX_CONTIG_ENTRIES, d[i], d[0]);
             }
             ex_stat_violations++;
@@ -533,6 +597,7 @@ void arm_exact_tlb_table(CPUARMState *env, ARMMMUIdx mmu_idx,
     ExKey key;
     ExEntry *e;
     GHashTable *tab;
+    ram_addr_t ra_desc = 0;
 
     if (!arm_exact_tlb_enabled || !ex_ncpus || !ex_tracked(mmu_idx)) {
         return;
@@ -548,13 +613,13 @@ void arm_exact_tlb_table(CPUARMState *env, ARMMMUIdx mmu_idx,
     key.asid = (regime_has_2_ranges(mmu_idx) && !((int64_t)va < 0))
                ? ex_asid_of(env, mmu_idx, 1ULL << 11) : EX_ASID_GLOBAL;
     key.vmid = ex_vmid_of(env, mmu_idx);
-    key.regime = regime_el(mmu_idx);
+    key.regime = ex_regime_of(mmu_idx);
     key.space = space;
     key.level = level;
 
     qemu_mutex_lock(&ex_lock);
     ex_resolve_locked(env_cpu(env));
-    ex_desc_note(host, desc_val, &key, desc_pa);
+    ra_desc = ex_desc_note(host, desc_val, &key, desc_pa);
     tab = ex_tab_of(env_cpu(env)->cpu_index);
     if (!tab) {
         qemu_mutex_unlock(&ex_lock);
@@ -571,20 +636,24 @@ void arm_exact_tlb_table(CPUARMState *env, ARMMMUIdx mmu_idx,
              */
             if ((e->desc_val ^ desc_val) & MAKE_64BIT_MASK(12, 36)) {
                 ex_stat_violations++;
-                if (ex_reports++ < EX_MAX_REPORTS) {
+                ExDesc *sd = g_hash_table_lookup(ex_desc,
+                                                 GUINT_TO_POINTER(ra_desc));
+                if (!ex_site_seen(3, (uint64_t)env->pc, key.va)) {
                     qemu_log_mask(LOG_EXACT,
                         "exact-tlb: VIOLATION cached table descriptor changed "
                         "without a non-last-level invalidation cpu=%d "
-                        "pc=0x%" PRIx64 " regime=EL%u va=0x%" PRIx64
+                        "pc=0x%" PRIx64 " regime=%s va=0x%" PRIx64
                         " level=%d\n"
                         "exact-tlb:   descriptor at PA 0x%" PRIx64
                         " changed 0x%016" PRIx64 " -> 0x%016" PRIx64
-                        ", next level table 0x%" PRIx64 " -> 0x%" PRIx64 "\n",
+                        ", next level table 0x%" PRIx64 " -> 0x%" PRIx64
+                        ", last store to it from pc=0x%" PRIx64 "\n",
                         env_cpu(env)->cpu_index, (uint64_t)env->pc,
-                        (unsigned)key.regime, key.va, level, desc_pa,
+                        ex_regime_name(key.regime), key.va, level, desc_pa,
                         e->desc_val, desc_val,
                         (uint64_t)(e->desc_val & MAKE_64BIT_MASK(12, 36)),
-                        (uint64_t)(desc_val & MAKE_64BIT_MASK(12, 36)));
+                        (uint64_t)(desc_val & MAKE_64BIT_MASK(12, 36)),
+                        sd ? sd->broke_pc : 0);
                 }
             } else {
                 ex_stat_benign++;
@@ -628,7 +697,7 @@ void arm_exact_tlb_leaf(CPUARMState *env, ARMMMUIdx mmu_idx,
     key.va = va & ~((1ULL << lg_page_size) - 1);
     key.asid = ex_asid_of(env, mmu_idx, desc_val);
     key.vmid = ex_vmid_of(env, mmu_idx);
-    key.regime = regime_el(mmu_idx);
+    key.regime = ex_regime_of(mmu_idx);
     key.space = space;
     key.level = level;
 
@@ -711,6 +780,7 @@ typedef struct ExInval {
     bool match_globals;     /* a VA-matched op also hits global entries */
     bool match_va;
     bool match_range;
+    bool regime_pair;       /* EL1&0 stage 1 and stage 2 together */
     uint32_t asid;
     uint64_t va;
     uint64_t base, length;  /* for the TLBI R* range operations */
@@ -743,7 +813,13 @@ static gboolean ex_inval_cb(gpointer key, gpointer val, gpointer opaque)
     if (inv->ttl_level >= 0 && e->key.level != inv->ttl_level) {
         return FALSE;
     }
-    if (e->key.regime != inv->regime) {
+    if (inv->regime_pair) {
+        /* ALLE1 and VMALLS12E1 reach EL1&0 stage 1 and stage 2 alike */
+        if (e->key.regime != 1 && e->key.regime != EX_REGIME_S2 &&
+            e->key.regime != EX_REGIME_S2_S) {
+            return FALSE;
+        }
+    } else if (e->key.regime != inv->regime) {
         return FALSE;
     }
     if (inv->match_vmid && e->key.vmid != inv->vmid) {
@@ -785,6 +861,35 @@ static gboolean ex_inval_cb(gpointer key, gpointer val, gpointer opaque)
  * Only the 4K granule is recognised here; with any other the hint is dropped,
  * which can only cost detections.
  */
+/*
+ * The TLBI R* operand: BaseADDR[36:0], TTL[38:37], NUM[43:39], SCALE[45:44],
+ * TG[47:46]. Used by the EL1 range forms and, with the base being an IPA
+ * rather than a VA, by the stage 2 range forms. Returns false for a reserved
+ * granule encoding, where the caller should fall back to dropping everything.
+ */
+static bool ex_decode_range(CPUARMState *env, uint64_t value, bool stage2,
+                            uint64_t *base, uint64_t *length, int *ttl)
+{
+    unsigned tg = extract64(value, 46, 2);
+    unsigned shift = tg == 1 ? 12 : tg == 2 ? 14 : tg == 3 ? 16 : 0;
+    unsigned num = extract64(value, 39, 5);
+    unsigned scale = extract64(value, 44, 2);
+    unsigned rttl = extract64(value, 37, 2);
+    uint64_t tcr = stage2 ? env->cp15.vtcr_el2 : regime_tcr(env, arm_mmu_idx(env));
+    bool ds = extract64(tcr, 59, 1);
+    int64_t b;
+
+    if (!shift) {
+        return false;
+    }
+    b = (!stage2 && extract64(value, 36, 1)) ? sextract64(value, 0, 37)
+                                             : (int64_t)extract64(value, 0, 37);
+    *base = (uint64_t)b << (ds ? 16 : shift);
+    *length = (uint64_t)(num + 1) << (5 * scale + 1 + shift);
+    *ttl = rttl ? (int)rttl : -1;
+    return true;
+}
+
 static int ex_ttl_level(uint64_t value)
 {
     unsigned level = extract64(value, 44, 2);
@@ -814,7 +919,14 @@ void arm_exact_tlb_tlbi(CPUARMState *env, const struct ARMCPRegInfo *ri,
     switch (ri->opc1) {
     case 0:                             /* EL1 operations */
         inv.regime = el == 2 ? 2 : 1;   /* E2H&TGE redirects EL1 ops to EL2&0 */
-        inv.match_vmid = true;
+        /*
+         * Only the EL1&0 regime is VMID tagged. When a VHE host at EL2 issues
+         * these for its own mappings they are not, and scoping them by
+         * whatever VMID the hypervisor happens to have loaded makes the
+         * invalidation miss every host entry: they are filed under VMID 0,
+         * while VTTBR_EL2 holds a guest's VMID whenever one is resident.
+         */
+        inv.match_vmid = inv.regime == 1;
         inv.vmid = extract64(env->cp15.vttbr_el2, 48, 16);
         switch (ri->crm) {
         case 2:                         /* range, inner shareable */
@@ -827,25 +939,12 @@ void arm_exact_tlb_tlbi(CPUARMState *env, const struct ARMCPRegInfo *ri,
              * base is always shifted by 16 so it can address 52 VA bits.
              */
             {
-                unsigned tg = extract64(value, 46, 2);
-                unsigned rttl = extract64(value, 37, 2);
-                unsigned shift = tg == 1 ? 12 : tg == 2 ? 14 : tg == 3 ? 16 : 0;
-                unsigned num = extract64(value, 39, 5);
-                unsigned scale = extract64(value, 44, 2);
-                uint64_t tcr = regime_tcr(env, arm_mmu_idx(env));
-                bool ds = extract64(tcr, 59, 1);
-                int64_t base = extract64(value, 36, 1)
-                               ? sextract64(value, 0, 37)
-                               : extract64(value, 0, 37);
-
-                if (!shift) {
+                if (!ex_decode_range(env, value, false, &inv.base,
+                                     &inv.length, &inv.ttl_level)) {
                     inv.all = true;     /* reserved granule encoding */
                     break;
                 }
                 inv.match_range = true;
-                inv.base = (uint64_t)base << (ds ? 16 : shift);
-                inv.length = (uint64_t)(num + 1) << (5 * scale + 1 + shift);
-                inv.ttl_level = rttl ? rttl : -1;
                 switch (ri->opc2) {
                 case 3:                 /* RVALE1: last level only */
                 case 7:                 /* RVAALE1 */
@@ -908,7 +1007,72 @@ void arm_exact_tlb_tlbi(CPUARMState *env, const struct ARMCPRegInfo *ri,
             break;
         }
         break;
-    case 4:                             /* EL2, including ALLE1 / VMALLS12E1 */
+    case 4:                             /* EL2 operations */
+        switch (ri->crm) {
+        case 0:                         /* IPAS2*, inner shareable */
+        case 4:                         /* IPAS2*, local */
+            /*
+             * TLBI IPAS2E1 invalidates stage 2 entries for one IPA of the
+             * current VMID and leaves the combined stage 1 and 2 entries
+             * alone: that is what the following VMALLE1IS is for. A kernel
+             * that issues only the first is exactly the bug this catches.
+             *
+             * opc2 1 and 5 take a bare IPA, 2 and 6 are the range forms and
+             * take the R* operand layout. They share this crm, so decoding
+             * one as the other silently misses every invalidation KVM makes
+             * through __kvm_tlb_flush_vmid_range().
+             */
+            inv.regime = EX_REGIME_S2;
+            inv.match_vmid = true;
+            inv.vmid = extract64(env->cp15.vttbr_el2, 48, 16);
+            inv.last_level_only = ri->opc2 == 5 || ri->opc2 == 6;
+            if (ri->opc2 == 2 || ri->opc2 == 6) {
+                if (!ex_decode_range(env, value, true, &inv.base,
+                                     &inv.length, &inv.ttl_level)) {
+                    inv.all = true;
+                    break;
+                }
+                inv.match_range = true;
+            } else if (ri->opc2 == 1 || ri->opc2 == 5) {
+                inv.match_va = true;
+                inv.va = extract64(value, 0, 36) << 12;         /* IPA */
+            } else {
+                inv.all = true;
+            }
+            break;
+        case 3:                         /* inner shareable */
+        case 7:                         /* local */
+        case 1:                         /* outer shareable */
+            switch (ri->opc2) {
+            case 4:                     /* ALLE1: every VMID, both stages */
+            case 6:                     /* VMALLS12E1: this VMID, both stages */
+                inv.regime_pair = true; /* EL1&0 stage 1 plus stage 2 */
+                if (ri->opc2 == 6) {
+                    inv.match_vmid = true;
+                    inv.vmid = extract64(env->cp15.vttbr_el2, 48, 16);
+                }
+                break;
+            case 0:                     /* ALLE2  */
+            case 1:                     /* VAE2   */
+            case 5:                     /* VALE2  */
+                inv.regime = 2;
+                if (ri->opc2 != 0) {
+                    inv.match_va = true;
+                    inv.va = sextract64(value << 12, 0, 56);
+                    inv.last_level_only = ri->opc2 == 5;
+                    inv.ttl_level = ex_ttl_level(value);
+                }
+                break;
+            default:
+                inv.all = true;
+                break;
+            }
+            break;
+        default:
+            inv.all = true;
+            break;
+        }
+        break;
     case 6:                             /* EL3 */
     default:
         inv.all = true;

@@ -525,6 +525,18 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
      * No explicit memory barrier is required -- tb_link_page() makes the
      * TB visible in a consistent state.
      */
+    if (unlikely(cpu->cc->tcg_ops->icache_fetch) && tb->page_addr[0] != -1) {
+        const TCGCPUOps *ops = cpu->cc->tcg_ops;
+        tb_page_addr_t p0 = tb->page_addr[0], p1 = tb->page_addr[1];
+        unsigned s0 = p1 == -1 ? tb->size
+                     : TARGET_PAGE_SIZE - (p0 & ~TARGET_PAGE_MASK);
+
+        ops->icache_fetch(cpu, p0, s0);
+        if (p1 != -1) {
+            ops->icache_fetch(cpu, p1, tb->size - s0);
+        }
+    }
+
     existing_tb = tb_link_page(tb);
     assert_no_pages_locked();
 
