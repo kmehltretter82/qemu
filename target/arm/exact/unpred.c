@@ -8,6 +8,12 @@
  * a line naming the PC and the exception level, which is enough to find the
  * guest code responsible.
  *
+ * Note on enabling it: the translate-time checks (the MOPS and GCS encodings,
+ * and the exclusive-size bookkeeping) are compiled into a translation block
+ * only if the log mask is already on when that block is translated. Pass
+ * -d unpred on the command line. Turning it on later from the monitor leaves
+ * every block translated so far silent, which reads like "nothing to report".
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "qemu/osdep.h"
