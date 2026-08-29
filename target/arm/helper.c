@@ -3606,6 +3606,56 @@ static void ic_ivau_write(CPUARMState *env, const ARMCPRegInfo *ri,
 }
 #endif
 
+/*
+ * qemu-exact: the AArch32 cache-maintenance operations, moved out of
+ * v8_cp_reginfo so that they are also defined on an ARMv7 CPU model.
+ *
+ * cp_reginfo[] NOPs the whole crn=7, opc1=0 space with ARM_CP_OVERRIDE ("some
+ * of this space may be overridden later"), and until now only the ARMv8 path
+ * overrode it. On a cortex-a15 every DCCMVAU and ICIMVAU the guest executed
+ * was therefore a silent NOP as far as the models were concerned: an
+ * x-exact-icache run reported 0 cleans, 0 invalidates and 4328 violations
+ * against a kernel that was in fact doing its maintenance correctly.
+ */
+static const ARMCPRegInfo exact_cachemaint_cp_reginfo[] = {
+    { .name = "ICIALLUIS", .cp = 15, .opc1 = 0, .crn = 7, .crm = 1, .opc2 = 0,
+      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = access_ticab,
+      .writefn = exact_cachemaint_write },
+    { .name = "BPIALLUIS", .cp = 15, .opc1 = 0, .crn = 7, .crm = 1, .opc2 = 6,
+      .type = ARM_CP_NOP, .access = PL1_W },
+    { .name = "ICIALLU", .cp = 15, .opc1 = 0, .crn = 7, .crm = 5, .opc2 = 0,
+      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = access_tocu,
+      .writefn = exact_cachemaint_write },
+    { .name = "ICIMVAU", .cp = 15, .opc1 = 0, .crn = 7, .crm = 5, .opc2 = 1,
+      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = access_tocu,
+      .writefn = exact_cachemaint_write },
+    { .name = "BPIALL", .cp = 15, .opc1 = 0, .crn = 7, .crm = 5, .opc2 = 6,
+      .type = ARM_CP_NOP, .access = PL1_W },
+    { .name = "BPIMVA", .cp = 15, .opc1 = 0, .crn = 7, .crm = 5, .opc2 = 7,
+      .type = ARM_CP_NOP, .access = PL1_W },
+    { .name = "DCIMVAC", .cp = 15, .opc1 = 0, .crn = 7, .crm = 6, .opc2 = 1,
+      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = aa64_cacheop_poc_access,
+      .writefn = exact_cachemaint_write },
+    { .name = "DCISW", .cp = 15, .opc1 = 0, .crn = 7, .crm = 6, .opc2 = 2,
+      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = access_tsw,
+      .writefn = exact_cachemaint_write },
+    { .name = "DCCMVAC", .cp = 15, .opc1 = 0, .crn = 7, .crm = 10, .opc2 = 1,
+      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = aa64_cacheop_poc_access,
+      .writefn = exact_cachemaint_write },
+    { .name = "DCCSW", .cp = 15, .opc1 = 0, .crn = 7, .crm = 10, .opc2 = 2,
+      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = access_tsw,
+      .writefn = exact_cachemaint_write },
+    { .name = "DCCMVAU", .cp = 15, .opc1 = 0, .crn = 7, .crm = 11, .opc2 = 1,
+      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = access_tocu,
+      .writefn = exact_cachemaint_write },
+    { .name = "DCCIMVAC", .cp = 15, .opc1 = 0, .crn = 7, .crm = 14, .opc2 = 1,
+      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = aa64_cacheop_poc_access,
+      .writefn = exact_cachemaint_write },
+    { .name = "DCCISW", .cp = 15, .opc1 = 0, .crn = 7, .crm = 14, .opc2 = 2,
+      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = access_tsw,
+      .writefn = exact_cachemaint_write },
+};
+
 static const ARMCPRegInfo v8_cp_reginfo[] = {
     /*
      * Minimal set of EL0-visible registers. This will need to be expanded
@@ -3720,43 +3770,6 @@ static const ARMCPRegInfo v8_cp_reginfo[] = {
       .fgt = FGT_PAR_EL1,
       .fieldoffset = offsetof(CPUARMState, cp15.par_el[1]),
       .writefn = par_write },
-    /* 32 bit cache operations */
-    { .name = "ICIALLUIS", .cp = 15, .opc1 = 0, .crn = 7, .crm = 1, .opc2 = 0,
-      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = access_ticab,
-      .writefn = exact_cachemaint_write },
-    { .name = "BPIALLUIS", .cp = 15, .opc1 = 0, .crn = 7, .crm = 1, .opc2 = 6,
-      .type = ARM_CP_NOP, .access = PL1_W },
-    { .name = "ICIALLU", .cp = 15, .opc1 = 0, .crn = 7, .crm = 5, .opc2 = 0,
-      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = access_tocu,
-      .writefn = exact_cachemaint_write },
-    { .name = "ICIMVAU", .cp = 15, .opc1 = 0, .crn = 7, .crm = 5, .opc2 = 1,
-      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = access_tocu,
-      .writefn = exact_cachemaint_write },
-    { .name = "BPIALL", .cp = 15, .opc1 = 0, .crn = 7, .crm = 5, .opc2 = 6,
-      .type = ARM_CP_NOP, .access = PL1_W },
-    { .name = "BPIMVA", .cp = 15, .opc1 = 0, .crn = 7, .crm = 5, .opc2 = 7,
-      .type = ARM_CP_NOP, .access = PL1_W },
-    { .name = "DCIMVAC", .cp = 15, .opc1 = 0, .crn = 7, .crm = 6, .opc2 = 1,
-      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = aa64_cacheop_poc_access,
-      .writefn = exact_cachemaint_write },
-    { .name = "DCISW", .cp = 15, .opc1 = 0, .crn = 7, .crm = 6, .opc2 = 2,
-      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = access_tsw,
-      .writefn = exact_cachemaint_write },
-    { .name = "DCCMVAC", .cp = 15, .opc1 = 0, .crn = 7, .crm = 10, .opc2 = 1,
-      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = aa64_cacheop_poc_access,
-      .writefn = exact_cachemaint_write },
-    { .name = "DCCSW", .cp = 15, .opc1 = 0, .crn = 7, .crm = 10, .opc2 = 2,
-      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = access_tsw,
-      .writefn = exact_cachemaint_write },
-    { .name = "DCCMVAU", .cp = 15, .opc1 = 0, .crn = 7, .crm = 11, .opc2 = 1,
-      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = access_tocu,
-      .writefn = exact_cachemaint_write },
-    { .name = "DCCIMVAC", .cp = 15, .opc1 = 0, .crn = 7, .crm = 14, .opc2 = 1,
-      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = aa64_cacheop_poc_access,
-      .writefn = exact_cachemaint_write },
-    { .name = "DCCISW", .cp = 15, .opc1 = 0, .crn = 7, .crm = 14, .opc2 = 2,
-      .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = access_tsw,
-      .writefn = exact_cachemaint_write },
     /* MMU Domain access control / MPU write buffer control */
     { .name = "DACR", .cp = 15, .opc1 = 0, .crn = 3, .crm = 0, .opc2 = 0,
       .access = PL1_RW, .accessfn = access_tvm_trvm, .resetvalue = 0,
@@ -6634,6 +6647,8 @@ void register_cp_regs_for_features(ARMCPU *cpu)
 
         define_one_arm_cp_reg(cpu, &clidr);
         define_arm_cp_regs(cpu, v7_cp_reginfo);
+        /* see the comment on the table: v8 implies v7, so this covers both */
+        define_arm_cp_regs(cpu, exact_cachemaint_cp_reginfo);
         define_debug_regs(cpu);
         /*
          * We used to incorrectly expose a non-existent AArch32 "DBGDTRTX"
