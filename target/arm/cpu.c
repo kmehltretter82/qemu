@@ -33,6 +33,7 @@
 #include "accel/tcg/cpu-ops.h"
 #endif /* CONFIG_TCG */
 #include "internals.h"
+#include "exact/exact.h"
 #include "cpu-features.h"
 #include "exec/target_page.h"
 #include "hw/core/qdev-properties.h"
@@ -1236,6 +1237,11 @@ static void arm_cpu_initfn(Object *obj)
 {
     ARMCPU *cpu = ARM_CPU(obj);
 
+    /* qemu-exact knobs default to "unchanged" on every CPU model */
+    cpu->prop_ctr_dic = cpu->prop_ctr_idc = 0xff;
+    cpu->prop_ctr_cwg = cpu->prop_ctr_erg = 0xff;
+    cpu->prop_asid_bits = cpu->prop_bbm_level = 0xff;
+
     cpu->cp_regs = g_hash_table_new_full(g_direct_hash, g_direct_equal,
                                          NULL, g_free);
 
@@ -1772,6 +1778,12 @@ void arm_cpu_finalize_features(ARMCPU *cpu, Error **errp)
         }
 
         aarch64_cpu_lpa2_finalize(cpu, &local_err);
+        if (local_err != NULL) {
+            error_propagate(errp, local_err);
+            return;
+        }
+
+        aarch64_cpu_exact_finalize(cpu, &local_err);
         if (local_err != NULL) {
             error_propagate(errp, local_err);
             return;
@@ -2607,6 +2619,7 @@ static const TCGCPUOps arm_tcg_ops = {
     .cpu_exec_halt = arm_cpu_exec_halt,
     .cpu_exec_reset = cpu_reset,
     .do_interrupt = arm_cpu_do_interrupt,
+    .ptwatch_write = arm_exact_ptwatch_write,
     .do_transaction_failed = arm_cpu_do_transaction_failed,
     .do_unaligned_access = arm_cpu_do_unaligned_access,
     .adjust_watchpoint_address = arm_adjust_watchpoint_address,

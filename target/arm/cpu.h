@@ -1127,6 +1127,14 @@ struct ArchCPU {
     bool prop_pauth_qarma3;
     bool prop_pauth_qarma5;
     bool prop_lpa2;
+    /* qemu-exact: adversarial knobs (0xff = leave the CPU model's value) */
+    uint8_t prop_ctr_dic;
+    uint8_t prop_ctr_idc;
+    uint8_t prop_ctr_cwg;
+    uint8_t prop_ctr_erg;
+    uint8_t prop_asid_bits;
+    uint8_t prop_bbm_level;
+    bool prop_exact_tlb;
 
     /* GM blocksize, in log_2(words), ie low 4 bits of GMID_EL0 */
     uint8_t gm_blocksize;
@@ -2732,5 +2740,10 @@ extern const uint64_t pred_esz_masks[5];
 /* We associate one allocation tag per 16 bytes, the minimum.  */
 #define LOG2_TAG_GRANULE 4
 #define TAG_GRANULE      (1 << LOG2_TAG_GRANULE)
+
+/* qemu-exact: reset-state poisoning (target/arm/exact/poison.c) */
+extern bool arm_exact_poison_regs;
+extern uint64_t arm_exact_poison_seed;
+void arm_exact_poison_cpu(ARMCPU *cpu, bool primary);
 
 #endif

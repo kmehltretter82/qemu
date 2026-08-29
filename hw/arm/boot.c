@@ -725,6 +725,7 @@ static void do_cpu_reset(void *opaque)
                 AddressSpace *as = arm_boot_address_space(cpu, info);
 
                 cpu_set_pc(cs, info->loader_start);
+                arm_exact_poison_cpu(cpu, true);
 
                 if (!have_dtb(info)) {
                     set_kernel_args(info, as);

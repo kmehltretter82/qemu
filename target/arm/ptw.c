@@ -19,6 +19,7 @@
 #endif
 #include "cpu.h"
 #include "internals.h"
+#include "exact/exact.h"
 #include "cpu-features.h"
 
 typedef struct S1Translate {
@@ -1950,6 +1951,8 @@ static bool get_phys_addr_lpae(CPUARMState *env, S1Translate *ptw,
     ARMVAParameters param;
     uint64_t ttbr;
     hwaddr descaddr, indexmask, indexmask_grainsize;
+    hwaddr exact_desc_pa = 0;
+    void *exact_desc_host = NULL;
     uint32_t tableattrs;
     uint64_t page_size;
     uint64_t attrs;
@@ -2176,6 +2179,9 @@ static bool get_phys_addr_lpae(CPUARMState *env, S1Translate *ptw,
         goto do_fault;
     }
     new_descriptor = descriptor;
+    /* qemu-exact: remember where this descriptor lives, for the TLB shadow */
+    exact_desc_pa = ptw->out_phys;
+    exact_desc_host = ptw->out_host;
 
  restart_atomic_update:
     if (!(descriptor & 1) ||
@@ -2211,6 +2217,15 @@ static bool get_phys_addr_lpae(CPUARMState *env, S1Translate *ptw,
          * which are all arranged so that 0 means "no effect", so
          * we can gather them up by ORing in the bits at each level).
          */
+        /*
+         * qemu-exact: hardware may cache this intermediate descriptor in a
+         * walk cache, which only a non-last-level invalidation removes.
+         */
+        if (unlikely(arm_exact_tlb_enabled) && !ptw->in_debug) {
+            arm_exact_tlb_table(env, ptw->in_mmu_idx, ptw->in_space, address,
+                                exact_desc_pa, descriptor, level,
+                                stride * (4 - level) + 3, exact_desc_host);
+        }
         tableattrs |= extract64(descriptor, 59, 5);
         level++;
         indexmask = indexmask_grainsize;
@@ -2524,6 +2539,16 @@ static bool get_phys_addr_lpae(CPUARMState *env, S1Translate *ptw,
 
     result->f.phys_addr = descaddr;
     result->f.lg_page_size = ctz64(page_size);
+
+    /*
+     * qemu-exact: record this leaf in the architectural TLB shadow, which
+     * only forgets an entry when the guest issues the matching TLBI.
+     */
+    if (unlikely(arm_exact_tlb_enabled) && !ptw->in_debug) {
+        arm_exact_tlb_leaf(env, ptw->in_mmu_idx, ptw->in_space, address,
+                           exact_desc_pa, new_descriptor, descaddr, level,
+                           ctz64(page_size), exact_desc_host);
+    }
     return true;
 
  do_translation_fault:

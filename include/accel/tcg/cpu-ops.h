@@ -234,6 +234,16 @@ struct TCGCPUOps {
      */
     vaddr (*pointer_wrap)(CPUState *cpu, int mmu_idx, vaddr result, vaddr base);
     /**
+     * @ptwatch_write: notify the target of a store to a watched page
+     *
+     * Called from the store slow path, before the store happens, for pages
+     * the target has asked to watch (qemu-exact uses it to observe guest
+     * page table updates). @ram_addr is the address of the first byte
+     * written.
+     */
+    void (*ptwatch_write)(CPUState *cpu, uint64_t ram_addr, unsigned size,
+                          uintptr_t retaddr);
+    /**
      * @do_transaction_failed: Callback for handling failed memory transactions
      * (ie bus faults or external aborts; not MMU faults)
      */
