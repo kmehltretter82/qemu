@@ -533,6 +533,8 @@ const QEMULogItem qemu_log_items[] = {
       "log invalid memory accesses" },
     { LOG_EXACT, "exact",
       "log qemu-exact adversarial-model detector reports" },
+    { LOG_UNPRED, "unpred",
+      "log CONSTRAINED UNPREDICTABLE and reserved encodings the guest executes" },
     { 0, NULL, NULL },
 };
 
