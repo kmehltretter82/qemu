@@ -38,12 +38,33 @@
 #include "system/system.h"
 #include "system/memory.h"
 #include "system/ram_addr.h"
+#include "system/ramlist.h"
+#include "system/ramblock.h"
+#include "qemu/bitmap.h"
+#include "system/physmem.h"
 #include "cpu.h"
 #include "internals.h"
 #include "cpregs.h"
 #include "exact.h"
 
 bool arm_exact_icache_enabled;
+bool arm_exact_icache_full;
+
+/*
+ * One bit per line of RAM: written since it was last cleaned to the PoU.
+ * This is what catches code that is executed from memory that never held
+ * code before, such as a kernel image an EFI stub has just relocated: the
+ * per line records below only exist for lines the instruction side has
+ * fetched, so a store into fresh memory would otherwise be invisible.
+ *
+ * In normal mode only stores to pages holding translations take the slow
+ * path, so the bitmap covers just those. With x-exact-icache-full=on every
+ * page of RAM is protected at machine init and every store is seen, at a
+ * cost of a few times the runtime; that is the mode for calibrations of
+ * this class.
+ */
+static unsigned long *ic_dirty;
+static uint64_t ic_dirty_lines;
 
 #define IC_LINE 64
 
@@ -109,7 +130,7 @@ static GHashTable *ic_lines;        /* line number -> IcLine */
 static GHashTable *ic_sites;
 static uint64_t ic_stat_fetch, ic_stat_store, ic_stat_clean, ic_stat_inval;
 static uint64_t ic_stat_reports, ic_stat_maint_miss, ic_stat_data_only;
-static uint64_t ic_stat_cmodx;
+static uint64_t ic_stat_cmodx, ic_stat_fresh;
 
 static void ic_exit_notify(Notifier *n, void *opaque)
 {
@@ -118,12 +139,47 @@ static void ic_exit_notify(Notifier *n, void *opaque)
 
 static Notifier ic_exit_notifier = { .notify = ic_exit_notify };
 
+static int ic_ram_block_cb(RAMBlock *rb, void *opaque)
+{
+    ram_addr_t end = qemu_ram_get_offset(rb) + qemu_ram_get_used_length(rb);
+
+    if (end > ic_dirty_lines * IC_LINE) {
+        ic_dirty_lines = DIV_ROUND_UP(end, IC_LINE);
+    }
+    if (arm_exact_icache_full) {
+        /*
+         * Mark the whole block clean for the code client, which arms
+         * TLB_NOTDIRTY on every existing TLB entry and on every future fill
+         * for these pages. Nothing ever marks them dirty again, because the
+         * unprotect path only runs for pages that had translations, so all
+         * stores keep taking the slow path from here on.
+         */
+        physical_memory_test_and_clear_dirty(qemu_ram_get_offset(rb),
+                                             qemu_ram_get_used_length(rb),
+                                             DIRTY_MEMORY_CODE, NULL);
+    }
+    return 0;
+}
+
+static void ic_machine_done(Notifier *n, void *opaque)
+{
+    qemu_ram_foreach_block(ic_ram_block_cb, NULL);
+    ic_dirty = bitmap_new(ic_dirty_lines);
+    if (arm_exact_icache_full) {
+        qemu_log_mask(LOG_EXACT, "exact-icache: full store tracking, %" PRIu64
+                      " lines of RAM watched\n", ic_dirty_lines);
+    }
+}
+
+static Notifier ic_machine_done_notifier = { .notify = ic_machine_done };
+
 void arm_exact_icache_init(void)
 {
     if (ic_lines) {
         return;
     }
     qemu_add_exit_notifier(&ic_exit_notifier);
+    qemu_add_machine_init_done_notifier(&ic_machine_done_notifier);
     qemu_mutex_init(&ic_lock);
     ic_lines = g_hash_table_new_full(NULL, NULL, NULL, g_free);
     ic_sites = g_hash_table_new(NULL, NULL);
@@ -219,12 +275,44 @@ void arm_exact_icache_fetch(CPUState *cs, uint64_t ram_addr, unsigned size)
     }
     qemu_mutex_lock(&ic_lock);
     IC_FOREACH_LINE(ram_addr, size, a, off, len) {
-        IcLine *l = ic_line(a, true);
+        IcLine *l = ic_line(a, false);
         uint64_t m = ic_mask(off, len);
         const char *why = NULL;
+        uint64_t ln = a / IC_LINE;
 
         ic_stat_fetch++;
-        ic_event(a / IC_LINE, EV_FETCH, cs, m);
+        ic_event(ln, EV_FETCH, cs, m);
+
+        if (!l) {
+            l = ic_line(a, true);
+            if (ic_dirty && ln < ic_dirty_lines && test_bit(ln, ic_dirty)) {
+                /*
+                 * Never fetched before, but written since it was last
+                 * cleaned: code executed from memory the data side filled
+                 * and nobody cleaned to the point of unification.
+                 */
+                ic_stat_fresh++;
+                ic_stat_reports++;
+                if (!ic_site_seen(0, (uint64_t)env->pc)) {
+                    const uint8_t *cur = qemu_map_ram_ptr(NULL, a);
+                    uint32_t w0 = ldl_le_p(cur + (off & ~3u));
+
+                    qemu_log_mask(LOG_EXACT,
+                        "exact-icache: VIOLATION executing freshly written "
+                        "code that was never cleaned to the point of "
+                        "unification\n"
+                        "exact-icache:   fetch cpu=%d pc=0x%" PRIx64
+                        " of line ram 0x%" PRIx64 " bytes 0x%016" PRIx64
+                        ", first instruction 0x%08x\n"
+                        "exact-icache:   the line had never been executed "
+                        "before, so the writer was not recorded; the last "
+                        "store to it was after its last dc cvau\n",
+                        cs->cpu_index, (uint64_t)env->pc, (uint64_t)a, m, w0);
+                }
+            }
+            l->present = true;
+            continue;
+        }
 
         uint64_t stale = m & (l->dirty | (l->present ? l->changed : 0));
         uint32_t oldw = 0, neww = 0;
@@ -311,19 +399,13 @@ void arm_exact_icache_store(CPUState *cs, uint64_t ram_addr, unsigned size)
     IC_FOREACH_LINE(ram_addr, size, a, off, len) {
         IcLine *l = ic_line(a, false);
         uint64_t m = ic_mask(off, len);
+        uint64_t ln = a / IC_LINE;
 
-        /*
-         * Only lines the instruction side has ever fetched are tracked: a
-         * store to any other line cannot make a later fetch stale, because
-         * that fetch will have to walk to memory anyway... except that the
-         * data may still be in the D-cache above the PoU. That case is
-         * covered too: the line is created on the first fetch, and the
-         * first fetch is what would read the stale data, so we track from
-         * the store on for lines that exist, and accept the miss for lines
-         * never fetched before their first store.
-         */
+        if (ic_dirty && ln < ic_dirty_lines) {
+            set_bit(ln, ic_dirty);      /* dirty in the D-cache until cleaned */
+        }
         if (!l) {
-            continue;
+            continue;                   /* never fetched: the bit is enough */
         }
         ic_stat_store++;
         ic_event(a / IC_LINE, EV_STORE, cs, m);
@@ -367,6 +449,9 @@ void arm_exact_icache_maint(CPUState *cs, uint64_t ram_addr, bool all,
     }
     qemu_mutex_lock(&ic_lock);
     if (all) {
+        if (clean && ic_dirty) {
+            bitmap_zero(ic_dirty, ic_dirty_lines);
+        }
         g_hash_table_iter_init(&it, ic_lines);
         while (g_hash_table_iter_next(&it, &k, &v)) {
             l = v;
@@ -383,6 +468,9 @@ void arm_exact_icache_maint(CPUState *cs, uint64_t ram_addr, bool all,
         ic_stat_clean += clean;
         qemu_mutex_unlock(&ic_lock);
         return;
+    }
+    if (clean && ic_dirty && ram_addr / IC_LINE < ic_dirty_lines) {
+        clear_bit(ram_addr / IC_LINE, ic_dirty);
     }
     l = ic_line(ram_addr, false);
     if (!l) {
@@ -417,8 +505,10 @@ void arm_exact_icache_dump(void)
                   PRIu64 " invalidates, %" PRIu64 " violations, %" PRIu64
                   " fetches of lines whose only changes were data, %" PRIu64
                   " fetches of concurrently modified CMODX-safe instructions, %"
-                  PRIu64 " maintenance ops on untracked lines\n",
+                  PRIu64 " fetches of never-cleaned fresh code, %" PRIu64
+                  " maintenance ops on untracked lines\n",
                   g_hash_table_size(ic_lines), ic_stat_fetch, ic_stat_store,
                   ic_stat_clean, ic_stat_inval, ic_stat_reports,
-                  ic_stat_data_only, ic_stat_cmodx, ic_stat_maint_miss);
+                  ic_stat_data_only, ic_stat_cmodx, ic_stat_fresh,
+                  ic_stat_maint_miss);
 }

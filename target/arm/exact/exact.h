@@ -30,6 +30,7 @@ void arm_exact_tlb_dump(void);
 
 /* icache.c */
 extern bool arm_exact_icache_enabled;
+extern bool arm_exact_icache_full;
 void arm_exact_icache_init(void);
 void arm_exact_icache_fetch(CPUState *cs, uint64_t ram_addr, unsigned size);
 void arm_exact_icache_store(CPUState *cs, uint64_t ram_addr, unsigned size);

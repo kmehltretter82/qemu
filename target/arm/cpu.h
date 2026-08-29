@@ -1136,6 +1136,7 @@ struct ArchCPU {
     uint8_t prop_bbm_level;
     bool prop_exact_tlb;
     bool prop_exact_icache;
+    bool prop_exact_icache_full;
 
     /* GM blocksize, in log_2(words), ie low 4 bits of GMID_EL0 */
     uint8_t gm_blocksize;
