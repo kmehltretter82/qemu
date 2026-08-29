@@ -526,21 +526,49 @@ void arm_exact_ptwatch_write(CPUState *cs, uint64_t ram_addr, unsigned size,
  * transient state in the middle of contpte_convert(), where entries are
  * cleared one at a time before the invalidation.
  */
-#define EX_CONTIG_ENTRIES 16        /* 4K granule, levels 2 and 3 */
+#define EX_CONTIG_MAX     128       /* the largest block: 16K granule, level 3 */
 #define EX_CONTIG_SAMPLE  64        /* re-walks between block re-checks */
 
+/*
+ * How many descriptors a contiguous block covers (DDI0487 D8.6). It depends on
+ * the translation granule, which the walk does not hand us directly - but the
+ * leaf's page size does: at level 3 it *is* the granule, and a level-2 block is
+ * granule + (granule - 3) address bits wide, so lg = 2g - 3.
+ *
+ *   granule   level 3   level 2
+ *      4K       16        16
+ *     16K      128        32
+ *     64K       32        32
+ */
+static unsigned ex_contig_entries(int level, int lg_page_size)
+{
+    int g = level == 3 ? lg_page_size : (lg_page_size + 3) / 2;
+
+    switch (g) {
+    case 12: return 16;
+    case 14: return level == 3 ? 128 : 32;
+    case 16: return 32;
+    default: return 0;          /* not a granule we know: do not guess */
+    }
+}
+
 static void ex_check_contig(CPUARMState *env, const ExKey *key, uint64_t desc_pa,
-                            uint64_t desc_val, int lg_page_size)
+                            uint64_t desc_val, int level, int lg_page_size)
 {
     uint64_t oa_mask = MAKE_64BIT_MASK(lg_page_size, 48 - lg_page_size);
     uint64_t attr_mask = ~(oa_mask | (1ULL << 10) | (1ULL << 51) | (3ULL << 6));
-    uint64_t base_pa = desc_pa & ~(uint64_t)((EX_CONTIG_ENTRIES * 8) - 1);
-    uint64_t d[EX_CONTIG_ENTRIES], base_oa;
-    int i;
+    unsigned entries = ex_contig_entries(level, lg_page_size);
+    uint64_t base_pa, d[EX_CONTIG_MAX], base_oa;
+    unsigned i;
+
+    if (!entries) {
+        return;
+    }
+    base_pa = desc_pa & ~(uint64_t)((entries * 8) - 1);
 
     ex_stat_contig_checked++;
 
-    for (i = 0; i < EX_CONTIG_ENTRIES; i++) {
+    for (i = 0; i < entries; i++) {
         MemTxResult res;
 
         d[i] = address_space_ldq(&address_space_memory, base_pa + i * 8,
@@ -554,7 +582,7 @@ static void ex_check_contig(CPUARMState *env, const ExKey *key, uint64_t desc_pa
     }
 
     base_oa = d[0] & oa_mask;
-    for (i = 0; i < EX_CONTIG_ENTRIES; i++) {
+    for (i = 0; i < entries; i++) {
         const char *why = NULL;
 
         if (!(d[i] & (1ULL << 52))) {
@@ -570,11 +598,11 @@ static void ex_check_contig(CPUARMState *env, const ExKey *key, uint64_t desc_pa
                 qemu_log_mask(LOG_EXACT,
                     "exact-tlb: VIOLATION contiguous block inconsistent (%s) "
                     "cpu=%d pc=0x%" PRIx64 " va=0x%" PRIx64 " regime=%s\n"
-                    "exact-tlb:   block at PA 0x%" PRIx64 ", entry %d of %d is "
+                    "exact-tlb:   block at PA 0x%" PRIx64 ", entry %u of %u is "
                     "0x%016" PRIx64 ", entry 0 is 0x%016" PRIx64 "\n",
                     why, env_cpu(env)->cpu_index, (uint64_t)env->pc,
                     key->va, ex_regime_name(key->regime), base_pa, i,
-                    EX_CONTIG_ENTRIES, d[i], d[0]);
+                    entries, d[i], d[0]);
             }
             ex_stat_violations++;
             return;
@@ -734,7 +762,7 @@ void arm_exact_tlb_leaf(CPUARMState *env, ARMMMUIdx mmu_idx,
         if ((desc_val & (1ULL << 52)) && lg_page_size == 12 &&
             key.space == ARMSS_NonSecure && e->contig_countdown-- == 0) {
             e->contig_countdown = EX_CONTIG_SAMPLE;
-            ex_check_contig(env, &key, desc_pa, desc_val, lg_page_size);
+            ex_check_contig(env, &key, desc_pa, desc_val, level, lg_page_size);
         }
         e->desc_pa = desc_pa;
         e->desc_val = desc_val;
@@ -758,7 +786,7 @@ void arm_exact_tlb_leaf(CPUARMState *env, ARMMMUIdx mmu_idx,
         ex_stat_fills++;
         if ((desc_val & (1ULL << 52)) && lg_page_size == 12 &&
             key.space == ARMSS_NonSecure) {
-            ex_check_contig(env, &key, desc_pa, desc_val, lg_page_size);
+            ex_check_contig(env, &key, desc_pa, desc_val, level, lg_page_size);
         }
     } else if (!ex_capped) {
         ex_capped = true;
