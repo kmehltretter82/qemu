@@ -234,6 +234,20 @@ struct TCGCPUOps {
      */
     vaddr (*pointer_wrap)(CPUState *cpu, int mmu_idx, vaddr result, vaddr base);
     /**
+     * @dma_track_page: should accesses to this RAM page be observed?
+     *
+     * Called when a TLB entry is filled for RAM. Returning true sets
+     * TLB_EXACT_TRACK on it, so every load and store through it reaches
+     * @dma_track_access. qemu-exact uses it for pages a device has DMA'd.
+     */
+    bool (*dma_track_page)(CPUState *cpu, CPUTLBEntryFull *full,
+                           uint64_t ram_addr);
+    /**
+     * @dma_track_access: an access to a page marked by @dma_track_page
+     */
+    void (*dma_track_access)(CPUState *cpu, CPUTLBEntryFull *full,
+                             uint64_t ram_addr, unsigned size, bool is_store);
+    /**
      * @icache_fetch: notify the target that code is being translated
      *
      * Called when a translation block is created, with the guest physical

@@ -3117,6 +3117,10 @@ MemoryRegion *get_system_io(void)
     return system_io;
 }
 
+void (*physmem_dma_observer)(uint64_t ram_addr, uint64_t len, bool is_write,
+                             const char *as_name);
+__thread const char *physmem_dma_as_name;
+
 static void invalidate_and_set_dirty(MemoryRegion *mr, hwaddr addr,
                                      hwaddr length)
 {
@@ -3312,6 +3316,10 @@ static MemTxResult flatview_write_continue_step(MemTxAttrs attrs,
         uint8_t *ram_ptr = qemu_ram_ptr_length(mr->ram_block, mr_addr, l,
                                                false, true);
 
+        if (unlikely(physmem_dma_observer) && !attrs.debug) {
+            physmem_dma_observer(memory_region_get_ram_addr(mr) + mr_addr, *l,
+                                 true, physmem_dma_as_name);
+        }
         qemu_ram_move(ram_ptr, buf, *l);
         invalidate_and_set_dirty(mr, mr_addr, *l);
 
@@ -3405,6 +3413,10 @@ static MemTxResult flatview_read_continue_step(MemTxAttrs attrs, uint8_t *buf,
         uint8_t *ram_ptr = qemu_ram_ptr_length(mr->ram_block, mr_addr, l,
                                                false, false);
 
+        if (unlikely(physmem_dma_observer) && !attrs.debug) {
+            physmem_dma_observer(memory_region_get_ram_addr(mr) + mr_addr, *l,
+                                 false, physmem_dma_as_name);
+        }
         qemu_ram_move(buf, ram_ptr, *l);
 
         return MEMTX_OK;
@@ -3459,6 +3471,7 @@ static MemTxResult flatview_read(FlatView *fv, hwaddr addr,
 MemTxResult address_space_read_full(const AddressSpace *as, hwaddr addr,
                                     MemTxAttrs attrs, void *buf, hwaddr len)
 {
+    physmem_dma_as_name = as->name;
     MemTxResult result = MEMTX_OK;
     FlatView *fv;
 
@@ -3475,6 +3488,7 @@ MemTxResult address_space_write(const AddressSpace *as, hwaddr addr,
                                 MemTxAttrs attrs,
                                 const void *buf, hwaddr len)
 {
+    physmem_dma_as_name = as->name;
     MemTxResult result = MEMTX_OK;
     FlatView *fv;
 
@@ -3491,6 +3505,7 @@ MemTxResult address_space_rw(const AddressSpace *as, hwaddr addr,
                              MemTxAttrs attrs, void *buf,
                              hwaddr len, bool is_write)
 {
+    physmem_dma_as_name = as->name;
     if (is_write) {
         return address_space_write(as, addr, attrs, buf, len);
     } else {
@@ -3805,6 +3820,10 @@ void *address_space_map(AddressSpace *as,
     *plen = flatview_extend_translation(fv, addr, len, mr, xlat,
                                         l, is_write, attrs);
     fuzz_dma_read_cb(addr, *plen, mr);
+    if (unlikely(physmem_dma_observer) && !attrs.debug && !is_write) {
+        physmem_dma_observer(memory_region_get_ram_addr(mr) + xlat, *plen,
+                             false, as->name);
+    }
     return qemu_ram_ptr_length(mr->ram_block, xlat, plen, true, is_write);
 }
 
@@ -3821,6 +3840,10 @@ void address_space_unmap(AddressSpace *as, void *buffer, hwaddr len,
     mr = memory_region_from_host(buffer, &addr1);
     if (mr != NULL) {
         if (is_write) {
+            if (unlikely(physmem_dma_observer)) {
+                physmem_dma_observer(memory_region_get_ram_addr(mr) + addr1,
+                                     access_len, true, as->name);
+            }
             invalidate_and_set_dirty(mr, addr1, access_len);
         }
         if (xen_map_cache_enabled()) {
