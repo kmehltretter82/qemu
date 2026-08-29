@@ -1129,3 +1129,6 @@ DEF_HELPER_FLAGS_4(gvec_luti2_b, TCG_CALL_NO_RWG, void, ptr, ptr, ptr, i32)
 DEF_HELPER_FLAGS_4(gvec_luti2_h, TCG_CALL_NO_RWG, void, ptr, ptr, ptr, i32)
 DEF_HELPER_FLAGS_4(gvec_luti4_b, TCG_CALL_NO_RWG, void, ptr, ptr, ptr, i32)
 DEF_HELPER_FLAGS_4(gvec_luti4_h, TCG_CALL_NO_RWG, void, ptr, ptr, ptr, i32)
+
+/* qemu-exact: adversarial exclusive monitor (target/arm/exact/exclusive.c) */
+DEF_HELPER_FLAGS_2(exact_stxr_fail, TCG_CALL_NO_WG, i32, env, i64)

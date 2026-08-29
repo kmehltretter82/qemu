@@ -29,6 +29,7 @@
 #include "qemu/log.h"
 #include "semihosting/semihost.h"
 #include "cpregs.h"
+#include "exact/exact.h"
 
 static TCGv_i64 cpu_X[32];
 static TCGv_i64 cpu_gcspr[4];
@@ -3381,6 +3382,11 @@ static void gen_load_exclusive(DisasContext *s, int rt, int rt2, int rn,
     MemOp memop = check_atomic_align(s, rn, size + is_pair);
 
     s->is_ldex = true;
+    if (unlikely(qemu_loglevel_mask(LOG_EXACT))) {
+        s->ldex_active = true;
+        s->ldex_pc = s->pc_curr;
+        s->ldex_bad_what = NULL;
+    }
     if (unlikely(qemu_loglevel_mask(LOG_UNPRED))) {
         TCGv_i64 sz = tcg_constant_i64((1 << size) << is_pair);
         tcg_gen_st_i64(sz, tcg_env, offsetof(CPUARMState, exclusive_size));
@@ -3442,6 +3448,12 @@ static void gen_store_exclusive(DisasContext *s, int rd, int rt, int rt2,
     TCGv_i64 tmp, clean_addr;
     MemOp memop;
 
+    if (unlikely(s->ldex_active)) {
+        s->ldex_active = false;
+        arm_exact_llsc_pair(s->ldex_pc, s->pc_curr, s->ldex_bad_pc,
+                            s->ldex_bad_what);
+    }
+
     /*
      * FIXME: We are out of spec here.  We have recorded only the address
      * from load_exclusive, not the entire range, and we assume that the
@@ -3457,6 +3469,19 @@ static void gen_store_exclusive(DisasContext *s, int rd, int rt, int rt2,
 
     /* See AArch64.ExclusiveMonitorsPass() and AArch64.IsExclusiveVA(). */
     clean_addr = clean_data_tbi(s, cpu_reg_sp(s, rn));
+
+    /*
+     * qemu-exact: a legal monitor may have gone to Open state for no reason at
+     * all since the LDXR, so fail before the address and value checks. The
+     * knob is fixed at realize, long before the first block is translated.
+     */
+    if (unlikely(arm_exact_exclusive_enabled)) {
+        TCGv_i32 spurious = tcg_temp_new_i32();
+
+        gen_helper_exact_stxr_fail(spurious, tcg_env, clean_addr);
+        tcg_gen_brcondi_i32(TCG_COND_NE, spurious, 0, fail_label);
+    }
+
     tcg_gen_brcond_i64(TCG_COND_NE, clean_addr, cpu_exclusive_addr, fail_label);
 
     /*
@@ -11019,6 +11044,7 @@ static void aarch64_tr_init_disas_context(DisasContextBase *dcbase,
 
     dc->isar = &arm_cpu->isar;
     dc->condjmp = 0;
+    dc->ldex_active = false;   /* qemu-exact LL/SC check */
     dc->pc_save = dc->base.pc_first;
     dc->aarch64 = true;
     dc->thumb = false;
@@ -11225,6 +11251,17 @@ static void aarch64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
         !disas_sme(s, insn) &&
         !disas_sve(s, insn)) {
         unallocated_encoding(s);
+    }
+
+    /*
+     * Classify *after* the decode, so the LDXR that opened the pair and the
+     * STXR that closed it are both already accounted for and neither reports
+     * itself.
+     */
+    if (unlikely(s->ldex_active) && s->pc_curr != s->ldex_pc &&
+        !s->ldex_bad_what) {
+        s->ldex_bad_what = arm_exact_llsc_forbidden_a64(insn);
+        s->ldex_bad_pc = s->pc_curr;
     }
 
     /*

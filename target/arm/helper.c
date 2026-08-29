@@ -9761,6 +9761,15 @@ void arm_cpu_do_interrupt(CPUState *cs)
     arm_call_pre_el_change_hook(cpu);
 
     assert(!excp_is_internal(cs->exception_index));
+
+    /*
+     * qemu-exact: real cores drop the local exclusive reservation here, which
+     * is why AArch64 needs no CLREX on the exception return path. QEMU keeps
+     * it, so a guest can hold a reservation across an interrupt and never find
+     * out. The model is a no-op unless x-exact-exclusive is on.
+     */
+    arm_exact_exclusive_exception(env);
+
     if (arm_el_is_aa64(env, new_el)) {
         arm_cpu_do_interrupt_aarch64(cs);
     } else {
