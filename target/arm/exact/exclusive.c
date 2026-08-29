@@ -262,10 +262,80 @@ void arm_exact_llsc_pair(uint64_t ldex_pc, uint64_t stex_pc, uint64_t bad_pc,
     if (!what) {
         return;
     }
+
     ex_stat_llsc_unsafe++;
-    qemu_log_mask(LOG_EXACT,
-                  "exact-llsc: no forward-progress guarantee: ldxr at 0x%"
-                  PRIx64 " and stxr at 0x%" PRIx64 " have %s at 0x%" PRIx64
-                  " between them (DDI0487 B2.12.5)\n",
-                  ldex_pc, stex_pc, what, bad_pc);
+    if (stex_pc) {
+        qemu_log_mask(LOG_EXACT,
+                      "exact-llsc: no forward-progress guarantee: ldxr at 0x%"
+                      PRIx64 " and stxr at 0x%" PRIx64 " have %s at 0x%" PRIx64
+                      " between them (DDI0487 B2.12.5)\n",
+                      ldex_pc, stex_pc, what, bad_pc);
+    } else {
+        qemu_log_mask(LOG_EXACT,
+                      "exact-llsc: no forward-progress guarantee: ldxr at 0x%"
+                      PRIx64 " is followed by %s at 0x%" PRIx64
+                      " (DDI0487 B2.12.5)\n", ldex_pc, what, bad_pc);
+    }
+}
+
+/*
+ * The A32 half. Deliberately conservative: every encoding below is one whose
+ * meaning is unambiguous from these bits alone, and anything doubtful is left
+ * out. A check that misses a hazard costs a report; a check that invents one
+ * costs the reader's trust in every other report the run produced.
+ *
+ * Thumb-2 is not covered at all (the caller declines to open a pair in Thumb
+ * state): the 16/32-bit instruction boundary is not recoverable from the
+ * encoding word the translator hands us here.
+ */
+const char *arm_exact_llsc_forbidden_a32(uint32_t insn)
+{
+    /* ISB lives in the unconditional space and has a fixed encoding. */
+    if ((insn & 0xfffffff0) == 0xf57ff060) {
+        return "an ISB";
+    }
+    if ((insn & 0x0f000000) == 0x0f000000) {    /* SVC */
+        return "an exception-generating instruction";
+    }
+    /*
+     * LDR/STR/LDRB/STRB, and PLD, which is in the same space and is a software
+     * prefetch - also forbidden. The exclusion is the media instructions
+     * (REV, UBFX, SXTB, ...), which share these bits and differ only by having
+     * both bit 25 and bit 4 set; without it every byte-swap between the pair
+     * would be reported as a memory access.
+     */
+    if ((insn & 0x0c000000) == 0x04000000 &&
+        (insn & 0x02000010) != 0x02000010) {
+        return "a memory access";
+    }
+    if ((insn & 0x0e000000) == 0x08000000) {    /* LDM/STM */
+        return "a memory access";
+    }
+    if ((insn & 0x0e000000) == 0x0c000000) {    /* LDC/STC, VLDR/VSTR */
+        return "a memory access";
+    }
+    /*
+     * Extra load/store: LDRH/STRH/LDRD/STRD/LDRSB/LDRSH. The same bits also
+     * cover the multiplies, which are harmless here; bits[6:5] separate them
+     * (multiply has 00, every load/store form has something else).
+     */
+    if ((insn & 0x0e000090) == 0x00000090 && (insn & 0x60) != 0) {
+        return "a memory access";
+    }
+    if ((insn & 0x0f000010) == 0x0e000010) {    /* MCR/MRC, i.e. CP15 */
+        return "a coprocessor register transfer";
+    }
+    if ((insn & 0x0f000000) == 0x0b000000) {    /* BL */
+        return "a branch with link";
+    }
+    if ((insn & 0x0ff000f0) == 0x01200030) {    /* BLX (register) */
+        return "a branch with link";
+    }
+    if ((insn & 0xfe000000) == 0xfa000000) {    /* BLX (immediate) */
+        return "a branch with link";
+    }
+    if ((insn & 0x0ff000f0) == 0x01200010) {    /* BX */
+        return "an indirect branch";
+    }
+    return NULL;
 }
