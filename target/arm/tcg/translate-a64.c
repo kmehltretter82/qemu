@@ -3381,6 +3381,10 @@ static void gen_load_exclusive(DisasContext *s, int rt, int rt2, int rn,
     MemOp memop = check_atomic_align(s, rn, size + is_pair);
 
     s->is_ldex = true;
+    if (unlikely(qemu_loglevel_mask(LOG_UNPRED))) {
+        TCGv_i64 sz = tcg_constant_i64((1 << size) << is_pair);
+        tcg_gen_st_i64(sz, tcg_env, offsetof(CPUARMState, exclusive_size));
+    }
     dirty_addr = cpu_reg_sp(s, rn);
     clean_addr = gen_mte_check1(s, dirty_addr, false, rn != 31, memop);
 
@@ -3445,6 +3449,11 @@ static void gen_store_exclusive(DisasContext *s, int rd, int rt, int rt2,
      * store to be smaller than the load, so long as the stored bytes are
      * within the range recorded by the load.
      */
+
+    if (unlikely(qemu_loglevel_mask(LOG_UNPRED))) {
+        gen_helper_exact_stxr_size(tcg_env, tcg_constant_i64(s->pc_curr),
+                                   tcg_constant_i64((1 << size) << is_pair));
+    }
 
     /* See AArch64.ExclusiveMonitorsPass() and AArch64.IsExclusiveVA(). */
     clean_addr = clean_data_tbi(s, cpu_reg_sp(s, rn));

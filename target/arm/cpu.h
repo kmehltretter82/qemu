@@ -705,6 +705,12 @@ typedef struct CPUArchState {
     uint64_t exclusive_addr;
     uint64_t exclusive_val;
     /*
+     * qemu-exact: the access size of the LDXR that armed the monitor, so a
+     * store-exclusive of a different size can be reported (-d unpred). QEMU
+     * itself compares only the address, which is out of spec both ways.
+     */
+    uint64_t exclusive_size;
+    /*
      * Contains the 'val' for the second 64-bit register of LDXP, which comes
      * from the higher address, not the high part of a complete 128-bit value.
      * In some ways it might be more convenient to record the exclusive value

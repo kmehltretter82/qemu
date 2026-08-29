@@ -1770,3 +1770,8 @@ void HELPER(guarded_page_br)(CPUARMState *env, vaddr pc)
      */
     env->btype = is_guarded_page(env, pc, GETPC()) ? 3 : 1;
 }
+
+void HELPER(exact_stxr_size)(CPUARMState *env, uint64_t pc, uint64_t size)
+{
+    arm_log_unpred_stxr(env, pc, arm_current_el(env), size);
+}

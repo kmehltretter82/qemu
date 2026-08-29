@@ -96,3 +96,23 @@ void arm_check_res0(const void *rip, uint64_t value, uint64_t pc, int el)
         }
     }
 }
+
+/*
+ * A store-exclusive whose access size differs from the load-exclusive that
+ * armed the monitor. The architecture allows the store to be *smaller* and
+ * contained in the load's range; anything else is CONSTRAINED UNPREDICTABLE,
+ * and QEMU passes it regardless because it compares only the address.
+ */
+void arm_log_unpred_stxr(void *envp, uint64_t pc, int el, uint64_t store_size)
+{
+    CPUARMState *env = envp;
+    uint64_t load_size = env->exclusive_size;
+
+    if (!load_size || load_size == store_size) {
+        return;
+    }
+    arm_log_unpred(el, pc, "exclusive size mismatch",
+                   "STXR of %" PRIu64 " bytes against an LDXR of %" PRIu64
+                   " bytes: we let it succeed, hardware may not",
+                   store_size, load_size);
+}
