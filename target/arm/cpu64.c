@@ -698,6 +698,27 @@ void aarch64_cpu_lpa2_finalize(ARMCPU *cpu, Error **errp)
  *   x-bbm-level           : ID_AA64MMFR2.BBM 0..2 (0 = Linux must always do
  *                           break-before-make)
  */
+/* qemu-exact knobs, see aarch64_cpu_exact_finalize() */
+static const Property arm_cpu_exact_properties[] = {
+    DEFINE_PROP_UINT8("x-ctr-dic", ARMCPU, prop_ctr_dic, 0xff),
+    DEFINE_PROP_UINT8("x-ctr-idc", ARMCPU, prop_ctr_idc, 0xff),
+    DEFINE_PROP_UINT8("x-ctr-cwg", ARMCPU, prop_ctr_cwg, 0xff),
+    DEFINE_PROP_UINT8("x-ctr-erg", ARMCPU, prop_ctr_erg, 0xff),
+    DEFINE_PROP_UINT8("x-asid-bits", ARMCPU, prop_asid_bits, 0xff),
+    DEFINE_PROP_UINT8("x-bbm-level", ARMCPU, prop_bbm_level, 0xff),
+    DEFINE_PROP_BOOL("x-exact-tlb", ARMCPU, prop_exact_tlb, false),
+    DEFINE_PROP_BOOL("x-exact-icache", ARMCPU, prop_exact_icache, false),
+    DEFINE_PROP_BOOL("x-exact-icache-full", ARMCPU, prop_exact_icache_full, false),
+};
+
+/* qemu-exact knobs are meaningful on any AArch64 CPU model, not only max */
+void aarch64_add_exact_properties(Object *obj)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(arm_cpu_exact_properties); i++) {
+        qdev_property_add_static(DEVICE(obj), &arm_cpu_exact_properties[i]);
+    }
+}
+
 void aarch64_cpu_exact_finalize(ARMCPU *cpu, Error **errp)
 {
     ARMISARegisters *isar = &cpu->isar;
@@ -707,8 +728,9 @@ void aarch64_cpu_exact_finalize(ARMCPU *cpu, Error **errp)
         arm_exact_tlb_enabled = true;
         arm_exact_tlb_init();
     }
-    if (cpu->prop_exact_icache) {
+    if (cpu->prop_exact_icache || cpu->prop_exact_icache_full) {
         arm_exact_icache_enabled = true;
+        arm_exact_icache_full = cpu->prop_exact_icache_full;
         arm_exact_icache_init();
         /*
          * The model is pointless unless the guest believes it has maintenance

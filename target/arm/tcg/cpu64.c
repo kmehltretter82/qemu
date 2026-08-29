@@ -200,17 +200,6 @@ static void cpu_max_get_l0gptsz(Object *obj, Visitor *v, const char *name,
 static const Property arm_cpu_lpa2_property =
     DEFINE_PROP_BOOL("lpa2", ARMCPU, prop_lpa2, true);
 
-/* qemu-exact knobs, see aarch64_cpu_exact_finalize() */
-static const Property arm_cpu_exact_properties[] = {
-    DEFINE_PROP_UINT8("x-ctr-dic", ARMCPU, prop_ctr_dic, 0xff),
-    DEFINE_PROP_UINT8("x-ctr-idc", ARMCPU, prop_ctr_idc, 0xff),
-    DEFINE_PROP_UINT8("x-ctr-cwg", ARMCPU, prop_ctr_cwg, 0xff),
-    DEFINE_PROP_UINT8("x-ctr-erg", ARMCPU, prop_ctr_erg, 0xff),
-    DEFINE_PROP_UINT8("x-asid-bits", ARMCPU, prop_asid_bits, 0xff),
-    DEFINE_PROP_UINT8("x-bbm-level", ARMCPU, prop_bbm_level, 0xff),
-    DEFINE_PROP_BOOL("x-exact-tlb", ARMCPU, prop_exact_tlb, false),
-    DEFINE_PROP_BOOL("x-exact-icache", ARMCPU, prop_exact_icache, false),
-};
 
 static void aarch64_a55_initfn(Object *obj)
 {
@@ -1455,9 +1444,6 @@ void aarch64_max_tcg_initfn(Object *obj)
     object_property_add(obj, "x-l0gptsz", "uint32", cpu_max_get_l0gptsz,
                         cpu_max_set_l0gptsz, NULL, NULL);
     qdev_property_add_static(DEVICE(obj), &arm_cpu_lpa2_property);
-    for (size_t i = 0; i < ARRAY_SIZE(arm_cpu_exact_properties); i++) {
-        qdev_property_add_static(DEVICE(obj), &arm_cpu_exact_properties[i]);
-    }
 }
 
 static const ARMCPUInfo aarch64_cpus[] = {

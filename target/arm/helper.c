@@ -12,6 +12,7 @@
 #include "cpu.h"
 #include "internals.h"
 #include "exact/exact.h"
+#include "exec/tlb-flags.h"
 #include "cpu-features.h"
 #include "exec/page-protection.h"
 #include "exec/mmap-lock.h"
@@ -3481,10 +3482,19 @@ static void exact_cachemaint_write(CPUARMState *env, const ARMCPRegInfo *ri,
         arm_exact_icache_maint(env_cpu(env), 0, true, false, true); /* IALLU */
         return;
     }
-    host = probe_read(env, value & ~(uint64_t)63, 64, arm_env_mmu_index(env),
-                      GETPC());
-    if (!host) {
+    /*
+     * Non-faulting: this runs inside a sysreg helper, so GETPC() is not a
+     * translation block address and a fault raised from here could not be
+     * unwound. The operation itself would fault on an unmapped address; the
+     * model simply has nothing to do in that case.
+     */
+    if (probe_access_flags(env, value & ~(uint64_t)63, 64, MMU_DATA_LOAD,
+                           arm_env_mmu_index(env), true, &host, 0)
+        & TLB_INVALID_MASK) {
         return;
+    }
+    if (!host) {
+        return;                 /* MMIO or otherwise not directly addressable */
     }
     mr = memory_region_from_host(host, &offset);
     if (!mr || !memory_region_is_ram(mr)) {

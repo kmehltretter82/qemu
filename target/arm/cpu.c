@@ -1553,6 +1553,11 @@ static void arm_cpu_post_init(Object *obj)
 {
     ARMCPU *cpu = ARM_CPU(obj);
 
+    /* cpu64.c is built for every arm target, so no guard is needed here */
+    if (arm_feature(&cpu->env, ARM_FEATURE_AARCH64)) {
+        aarch64_add_exact_properties(obj);
+    }
+
     /*
      * Some features imply others. Figure this out now, because we
      * are going to look at the feature bits in deciding which
