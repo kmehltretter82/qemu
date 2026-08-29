@@ -51,6 +51,7 @@
 #include "system/whpx.h"
 #include "system/qtest.h"
 #include "system/system.h"
+#include "system/reset.h"
 #include "hw/core/loader.h"
 #include "qapi/error.h"
 #include "qemu/bitops.h"
@@ -82,6 +83,7 @@
 #include "hw/acpi/pcihp.h"
 #include "target/arm/cpu-qom.h"
 #include "target/arm/internals.h"
+#include "target/arm/cpu.h"
 #include "target/arm/multiprocessing.h"
 #include "target/arm/gtimer.h"
 #include "hw/mem/pc-dimm.h"
@@ -392,6 +394,60 @@ static int gic_fdt_irq_type_spi(const VirtMachineState *vms)
         GICV5_SPI : GIC_FDT_IRQ_TYPE_SPI;
 }
 
+/*
+ * qemu-exact: -machine virt,dma-coherent=off drops every "dma-coherent" DT
+ * property so Linux treats all DMA as non-coherent and must do cache
+ * maintenance around it (the real-SoC case stock virt never exercises).
+ */
+static void virt_fdt_dma_coherent(void *fdt, const char *node)
+{
+    VirtMachineState *vms = VIRT_MACHINE(qdev_get_machine());
+
+    if (vms->dma_coherent) {
+        qemu_fdt_setprop(fdt, node, "dma-coherent", NULL, 0);
+    }
+}
+
+static void virt_poison_region(MemoryRegion *mr, uint8_t byte, uint64_t seed)
+{
+    uint64_t size = memory_region_size(mr);
+    uint8_t *p = memory_region_get_ram_ptr(mr);
+
+    if (!seed) {
+        memset(p, byte, size);
+        return;
+    }
+    for (uint64_t off = 0; off + 8 <= size; off += 8) {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        stq_p(p + off, seed);
+    }
+}
+
+/*
+ * qemu-exact: -machine virt,x-exact-poison=on fills RAM (and MTE tag RAM)
+ * with a pattern (x-poison-byte) or seeded random data (x-poison-seed) at
+ * every machine reset, before the ROM loader re-places kernel/initrd/DTB,
+ * and enables register poisoning at kernel entry (arm_exact_poison_cpu).
+ */
+static void virt_machine_reset(MachineState *ms, ResetType type)
+{
+    VirtMachineState *vms = VIRT_MACHINE(ms);
+
+    if (vms->exact_poison) {
+        Object *tag;
+
+        virt_poison_region(ms->ram, vms->poison_byte, vms->poison_seed);
+        tag = object_resolve_path_type("mach-virt.tag", TYPE_MEMORY_REGION, NULL);
+        if (tag) {
+            virt_poison_region(MEMORY_REGION(tag), vms->poison_byte,
+                               vms->poison_seed ? vms->poison_seed ^ 0x5555 : 1);
+        }
+    }
+    qemu_devices_reset(type);
+}
+
 static void create_fdt(VirtMachineState *vms)
 {
     MachineState *ms = MACHINE(vms);
@@ -420,7 +476,7 @@ static void create_fdt(VirtMachineState *vms)
      * - It avoids spurious warnings from the Linux kernel about
      *   devices which can't do DMA at all
      */
-    qemu_fdt_setprop(fdt, "/", "dma-coherent", NULL, 0);
+    virt_fdt_dma_coherent(fdt, "/");
 
     /* /chosen must exist for load_dtb to fill in necessary properties later */
     qemu_fdt_add_subnode(fdt, "/chosen");
@@ -1771,7 +1827,7 @@ static void create_virtio_devices(const VirtMachineState *vms)
         qemu_fdt_setprop_cells(ms->fdt, nodename, "interrupts",
                                gic_fdt_irq_type_spi(vms), irq,
                                GIC_FDT_IRQ_FLAGS_EDGE_LO_HI);
-        qemu_fdt_setprop(ms->fdt, nodename, "dma-coherent", NULL, 0);
+        virt_fdt_dma_coherent(ms->fdt, nodename);
         g_free(nodename);
     }
 }
@@ -1957,7 +2013,7 @@ static FWCfgState *create_fw_cfg(const VirtMachineState *vms, AddressSpace *as)
                             "compatible", "qemu,fw-cfg-mmio");
     qemu_fdt_setprop_sized_cells(ms->fdt, nodename, "reg",
                                  2, base, 2, size);
-    qemu_fdt_setprop(ms->fdt, nodename, "dma-coherent", NULL, 0);
+    virt_fdt_dma_coherent(ms->fdt, nodename);
     g_free(nodename);
     return fw_cfg;
 }
@@ -2022,7 +2078,7 @@ static void create_smmuv3_dt_bindings(const VirtMachineState *vms, hwaddr base,
     qemu_fdt_setprop(ms->fdt, node, "interrupt-names", irq_names,
                      sizeof(irq_names));
 
-    qemu_fdt_setprop(ms->fdt, node, "dma-coherent", NULL, 0);
+    virt_fdt_dma_coherent(ms->fdt, node);
     qemu_fdt_setprop_cell(ms->fdt, node, "#iommu-cells", 1);
     qemu_fdt_setprop_cell(ms->fdt, node, "phandle", vms->iommu_phandle);
     g_free(node);
@@ -2224,7 +2280,7 @@ static void create_pcie(VirtMachineState *vms)
     qemu_fdt_setprop_cell(ms->fdt, nodename, "linux,pci-domain", 0);
     qemu_fdt_setprop_cells(ms->fdt, nodename, "bus-range", 0,
                            nr_pcie_buses - 1);
-    qemu_fdt_setprop(ms->fdt, nodename, "dma-coherent", NULL, 0);
+    virt_fdt_dma_coherent(ms->fdt, nodename);
 
     if (vms->msi_phandle) {
         qemu_fdt_setprop_cells(ms->fdt, nodename, "msi-map",
@@ -3258,6 +3314,8 @@ static void machvirt_init(MachineState *machine)
     vms->bootinfo.skip_dtb_autoload = true;
     vms->bootinfo.firmware_loaded = firmware_loaded;
     vms->bootinfo.psci_conduit = vms->psci_conduit;
+    arm_exact_poison_regs = vms->exact_poison;
+    arm_exact_poison_seed = vms->poison_seed;
     arm_load_kernel(ARM_CPU(first_cpu), machine, &vms->bootinfo);
 
     vms->machine_done.notify = virt_machine_done;
@@ -3276,6 +3334,64 @@ static void virt_set_secure(Object *obj, bool value, Error **errp)
     VirtMachineState *vms = VIRT_MACHINE(obj);
 
     vms->secure = value;
+}
+
+static bool virt_get_dma_coherent(Object *obj, Error **errp)
+{
+    return VIRT_MACHINE(obj)->dma_coherent;
+}
+
+static void virt_set_dma_coherent(Object *obj, bool value, Error **errp)
+{
+    VIRT_MACHINE(obj)->dma_coherent = value;
+}
+
+static bool virt_get_exact_poison(Object *obj, Error **errp)
+{
+    return VIRT_MACHINE(obj)->exact_poison;
+}
+
+static void virt_set_exact_poison(Object *obj, bool value, Error **errp)
+{
+    VIRT_MACHINE(obj)->exact_poison = value;
+}
+
+static void virt_get_poison_byte(Object *obj, Visitor *v, const char *name,
+                                 void *opaque, Error **errp)
+{
+    uint8_t value = VIRT_MACHINE(obj)->poison_byte;
+
+    visit_type_uint8(v, name, &value, errp);
+}
+
+static void virt_set_poison_byte(Object *obj, Visitor *v, const char *name,
+                                 void *opaque, Error **errp)
+{
+    uint8_t value;
+
+    if (!visit_type_uint8(v, name, &value, errp)) {
+        return;
+    }
+    VIRT_MACHINE(obj)->poison_byte = value;
+}
+
+static void virt_get_poison_seed(Object *obj, Visitor *v, const char *name,
+                                 void *opaque, Error **errp)
+{
+    uint64_t value = VIRT_MACHINE(obj)->poison_seed;
+
+    visit_type_uint64(v, name, &value, errp);
+}
+
+static void virt_set_poison_seed(Object *obj, Visitor *v, const char *name,
+                                 void *opaque, Error **errp)
+{
+    uint64_t value;
+
+    if (!visit_type_uint64(v, name, &value, errp)) {
+        return;
+    }
+    VIRT_MACHINE(obj)->poison_seed = value;
 }
 
 static bool virt_get_virt(Object *obj, Error **errp)
@@ -4162,6 +4278,7 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
     HotplugHandlerClass *hc = HOTPLUG_HANDLER_CLASS(oc);
 
     mc->init = machvirt_init;
+    mc->reset = virt_machine_reset;
     /* Start with max_cpus set to 512, which is the maximum supported by KVM.
      * The value may be reduced later when we have more information about the
      * configuration of the particular instance.
@@ -4215,6 +4332,22 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
         "Enable ACPI");
     object_class_property_add_bool(oc, "secure", virt_get_secure,
                                    virt_set_secure);
+    object_class_property_add_bool(oc, "dma-coherent", virt_get_dma_coherent,
+                                   virt_set_dma_coherent);
+    object_class_property_set_description(oc, "dma-coherent",
+                                          "qemu-exact: set off to advertise "
+                                          "non-coherent DMA in the DT");
+    object_class_property_add_bool(oc, "x-exact-poison", virt_get_exact_poison,
+                                   virt_set_exact_poison);
+    object_class_property_set_description(oc, "x-exact-poison",
+                                          "qemu-exact: poison RAM and UNKNOWN "
+                                          "registers at reset");
+    object_class_property_add(oc, "x-poison-byte", "uint8",
+                              virt_get_poison_byte, virt_set_poison_byte,
+                              NULL, NULL);
+    object_class_property_add(oc, "x-poison-seed", "uint64",
+                              virt_get_poison_seed, virt_set_poison_seed,
+                              NULL, NULL);
     object_class_property_set_description(oc, "secure",
                                                 "Set on/off to enable/disable the ARM "
                                                 "Security Extensions (TrustZone)");
@@ -4360,6 +4493,10 @@ static void virt_instance_init(Object *obj)
      * boot UEFI blobs which assume no TrustZone support.
      */
     vms->secure = false;
+    vms->dma_coherent = true;
+    vms->exact_poison = false;
+    vms->poison_byte = 0xdf;
+    vms->poison_seed = 0;
 
     /* EL2 is also disabled by default, for similar reasons */
     vms->virt = false;

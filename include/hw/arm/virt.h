@@ -176,6 +176,11 @@ struct VirtMachineState {
     bool virt;
     bool ras;
     bool mte;
+    /* qemu-exact */
+    bool dma_coherent;
+    bool exact_poison;
+    uint8_t poison_byte;
+    uint64_t poison_seed;
     bool dtb_randomness;
     bool second_ns_uart_present;
     OnOffAuto acpi;

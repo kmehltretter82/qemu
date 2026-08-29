@@ -22,6 +22,7 @@
 #include "exec/target_page.h"
 #include "helper.h"
 #include "internals.h"
+#include "exact/exact.h"
 #include "cpu-features.h"
 #include "accel/tcg/cpu-loop.h"
 #include "accel/tcg/probe.h"
@@ -1254,6 +1255,12 @@ uint32_t HELPER(get_cp_reg)(CPUARMState *env, const void *rip)
 void HELPER(set_cp_reg64)(CPUARMState *env, const void *rip, uint64_t value)
 {
     const ARMCPRegInfo *ri = rip;
+
+    /* qemu-exact: all AArch64 TLBI are opc0 == 1, crn == 8 (9 for NXS) */
+    if (unlikely(arm_exact_tlb_enabled) && ri->opc0 == 1 &&
+        (ri->crn == 8 || ri->crn == 9)) {
+        arm_exact_tlb_tlbi(env, ri, value);
+    }
 
     if (ri->type & ARM_CP_IO) {
         bql_lock();

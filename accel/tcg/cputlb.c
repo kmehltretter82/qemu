@@ -1338,8 +1338,13 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
                            CPUTLBEntryFull *full, uintptr_t retaddr)
 {
     ram_addr_t ram_addr = mem_vaddr + full->xlat_offset;
+    const TCGCPUOps *tcg_ops = cpu->cc->tcg_ops;
 
     trace_memory_notdirty_write_access(mem_vaddr, ram_addr, size);
+
+    if (unlikely(tcg_ops->ptwatch_write)) {
+        tcg_ops->ptwatch_write(cpu, ram_addr, size, retaddr);
+    }
 
     if (!physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {
         tb_invalidate_phys_range_fast(cpu, ram_addr, size, retaddr);

@@ -36,6 +36,7 @@
 #include "qapi/visitor.h"
 #include "hw/core/qdev-properties.h"
 #include "internals.h"
+#include "exact/exact.h"
 #include "cpu-features.h"
 
 /* convert between <register>_IDX and SYS_<register> */
@@ -684,6 +685,96 @@ void aarch64_cpu_lpa2_finalize(ARMCPU *cpu, Error **errp)
     t = FIELD_DP64(t, ID_AA64MMFR0, TGRAN16_2, 3); /* 16k stage2 w/ LPA2 */
     t = FIELD_DP64(t, ID_AA64MMFR0, TGRAN4_2, 3);  /*  4k stage2 w/ LPA2 */
     SET_IDREG(&cpu->isar, ID_AA64MMFR0, t);
+}
+
+/*
+ * qemu-exact: apply the adversarial CPU knobs. All default to "unchanged".
+ *   x-ctr-dic / x-ctr-idc : CTR_EL0.DIC / IDC (0 forces Linux to do I-cache
+ *                           and D-cache-to-PoU maintenance after code writes)
+ *   x-ctr-cwg / x-ctr-erg : cache writeback granule / exclusives reservation
+ *                           granule exponents (log2 words)
+ *   x-asid-bits           : 8 or 16 (ID_AA64MMFR0.ASIDBITS); 8 makes Linux's
+ *                           ASID allocator roll over every 256 mms
+ *   x-bbm-level           : ID_AA64MMFR2.BBM 0..2 (0 = Linux must always do
+ *                           break-before-make)
+ */
+void aarch64_cpu_exact_finalize(ARMCPU *cpu, Error **errp)
+{
+    ARMISARegisters *isar = &cpu->isar;
+    uint64_t t;
+
+    if (cpu->prop_exact_tlb) {
+        arm_exact_tlb_enabled = true;
+        arm_exact_tlb_init();
+    }
+
+    if (cpu->prop_ctr_dic != 0xff) {
+        cpu->ctr = FIELD_DP64(cpu->ctr, CTR_EL0, DIC, cpu->prop_ctr_dic & 1);
+    }
+    if (cpu->prop_ctr_idc != 0xff) {
+        cpu->ctr = FIELD_DP64(cpu->ctr, CTR_EL0, IDC, cpu->prop_ctr_idc & 1);
+        if (!(cpu->prop_ctr_idc & 1)) {
+            /*
+             * IDC=0 is only meaningful if the guest also sees a level of
+             * unification to clean to: Linux's read_cpuid_effective_cachetype()
+             * (arch/arm64/include/asm/cache.h) forces IDC=1 when CLIDR_EL1.LoC
+             * is 0 or LoUIS and LoUU are both 0, which is what -cpu max
+             * advertises. Give it one, otherwise the knob is silently ignored.
+             */
+            uint32_t c = GET_IDREG(isar, CLIDR);
+
+            if (FIELD_EX32(c, CLIDR_EL1, LOC) == 0) {
+                c = FIELD_DP32(c, CLIDR_EL1, LOC, 1);
+            }
+            if (FIELD_EX32(c, CLIDR_EL1, LOUIS) == 0 &&
+                FIELD_EX32(c, CLIDR_EL1, LOUU) == 0) {
+                c = FIELD_DP32(c, CLIDR_EL1, LOUIS, 1);
+                c = FIELD_DP32(c, CLIDR_EL1, LOUU, 1);
+            }
+            SET_IDREG(isar, CLIDR, c);
+        }
+    }
+    if (cpu->prop_ctr_cwg != 0xff) {
+        if (cpu->prop_ctr_cwg > 15) {
+            error_setg(errp, "x-ctr-cwg must be 0..15");
+            return;
+        }
+        cpu->ctr = FIELD_DP64(cpu->ctr, CTR_EL0, CWG, cpu->prop_ctr_cwg);
+    }
+    if (cpu->prop_ctr_erg != 0xff) {
+        if (cpu->prop_ctr_erg > 15) {
+            error_setg(errp, "x-ctr-erg must be 0..15");
+            return;
+        }
+        cpu->ctr = FIELD_DP64(cpu->ctr, CTR_EL0, ERG, cpu->prop_ctr_erg);
+    }
+    if (cpu->prop_asid_bits != 0xff) {
+        int v;
+
+        switch (cpu->prop_asid_bits) {
+        case 8:
+            v = 0;
+            break;
+        case 16:
+            v = 2;
+            break;
+        default:
+            error_setg(errp, "x-asid-bits must be 8 or 16");
+            return;
+        }
+        t = GET_IDREG(isar, ID_AA64MMFR0);
+        t = FIELD_DP64(t, ID_AA64MMFR0, ASIDBITS, v);
+        SET_IDREG(isar, ID_AA64MMFR0, t);
+    }
+    if (cpu->prop_bbm_level != 0xff) {
+        if (cpu->prop_bbm_level > 2) {
+            error_setg(errp, "x-bbm-level must be 0..2");
+            return;
+        }
+        t = GET_IDREG(isar, ID_AA64MMFR2);
+        t = FIELD_DP64(t, ID_AA64MMFR2, BBM, cpu->prop_bbm_level);
+        SET_IDREG(isar, ID_AA64MMFR2, t);
+    }
 }
 
 static void aarch64_a57_initfn(Object *obj)
