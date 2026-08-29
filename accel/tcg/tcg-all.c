@@ -30,6 +30,7 @@
 #include "tcg/startup.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
+#include "accel/tcg/chaos.h"
 #include "qemu/accel.h"
 #include "qemu/atomic.h"
 #include "qapi/qapi-types-common.h"
@@ -256,6 +257,58 @@ static void tcg_set_one_insn_per_tb(Object *obj, bool value, Error **errp)
     qatomic_set(&one_insn_per_tb, value);
 }
 
+static bool tcg_get_chaos(Object *obj, Error **errp)
+{
+    return tcg_chaos_enabled;
+}
+
+static void tcg_set_chaos(Object *obj, bool value, Error **errp)
+{
+    tcg_chaos_enabled = value;
+}
+
+static void tcg_get_chaos_seed(Object *obj, Visitor *v, const char *name,
+                               void *opaque, Error **errp)
+{
+    uint64_t value = tcg_chaos_seed;
+
+    visit_type_uint64(v, name, &value, errp);
+}
+
+static void tcg_set_chaos_seed(Object *obj, Visitor *v, const char *name,
+                               void *opaque, Error **errp)
+{
+    uint64_t value;
+
+    if (!visit_type_uint64(v, name, &value, errp)) {
+        return;
+    }
+    tcg_chaos_seed = value ? value : 1;
+}
+
+static void tcg_get_chaos_permille(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    uint64_t value = tcg_chaos_permille;
+
+    visit_type_uint64(v, name, &value, errp);
+}
+
+static void tcg_set_chaos_permille(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    uint64_t value;
+
+    if (!visit_type_uint64(v, name, &value, errp)) {
+        return;
+    }
+    if (value > 1000) {
+        error_setg(errp, "x-exact-chaos-permille must be 0..1000");
+        return;
+    }
+    tcg_chaos_permille = value;
+}
+
 static void tcg_accel_class_init(ObjectClass *oc, const void *data)
 {
     AccelClass *ac = ACCEL_CLASS(oc);
@@ -286,6 +339,22 @@ static void tcg_accel_class_init(ObjectClass *oc, const void *data)
                                    tcg_set_one_insn_per_tb);
     object_class_property_set_description(oc, "one-insn-per-tb",
         "Only put one guest insn in each translation block");
+
+    object_class_property_add_bool(oc, "x-exact-chaos",
+                                   tcg_get_chaos, tcg_set_chaos);
+    object_class_property_set_description(oc, "x-exact-chaos",
+        "Stall vCPUs and delay interrupts at seeded random points, to widen "
+        "the windows the guest's own races need");
+    object_class_property_add(oc, "x-exact-chaos-seed", "int",
+                              tcg_get_chaos_seed, tcg_set_chaos_seed,
+                              NULL, NULL);
+    object_class_property_set_description(oc, "x-exact-chaos-seed",
+        "Seed for chaos scheduling; a run is reproducible from it");
+    object_class_property_add(oc, "x-exact-chaos-permille", "int",
+                              tcg_get_chaos_permille, tcg_set_chaos_permille,
+                              NULL, NULL);
+    object_class_property_set_description(oc, "x-exact-chaos-permille",
+        "How often to stall, per 1000 opportunities (default 5)");
 }
 
 static const TypeInfo tcg_accel_type = {

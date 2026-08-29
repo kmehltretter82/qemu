@@ -759,7 +759,8 @@ void arm_exact_tlb_leaf(CPUARMState *env, ARMMMUIdx mmu_idx,
          * 16 extra guest loads, and a corruption introduced through a member
          * we never walk would otherwise stay invisible.
          */
-        if ((desc_val & (1ULL << 52)) && lg_page_size == 12 &&
+        if ((desc_val & (1ULL << 52)) &&
+            ex_contig_entries(level, lg_page_size) &&
             key.space == ARMSS_NonSecure && e->contig_countdown-- == 0) {
             e->contig_countdown = EX_CONTIG_SAMPLE;
             ex_check_contig(env, &key, desc_pa, desc_val, level, lg_page_size);
@@ -784,7 +785,8 @@ void arm_exact_tlb_leaf(CPUARMState *env, ARMMMUIdx mmu_idx,
         e->fill_tlbi_seq = ex_tlbi_seq;
         g_hash_table_insert(ex_tab, nk, e);
         ex_stat_fills++;
-        if ((desc_val & (1ULL << 52)) && lg_page_size == 12 &&
+        if ((desc_val & (1ULL << 52)) &&
+            ex_contig_entries(level, lg_page_size) &&
             key.space == ARMSS_NonSecure) {
             ex_check_contig(env, &key, desc_pa, desc_val, level, lg_page_size);
         }

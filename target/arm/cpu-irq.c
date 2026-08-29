@@ -8,6 +8,7 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#include "accel/tcg/chaos.h"
 #include "internals.h"
 
 #ifdef CONFIG_TCG
@@ -171,6 +172,11 @@ static inline bool arm_excp_unmasked(CPUState *cs, unsigned int excp_idx,
 
 bool arm_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
+    if (unlikely(tcg_chaos_enabled) && tcg_chaos_defer_irq(cs)) {
+        /* The request stays pending: this only moves delivery later. */
+        return false;
+    }
+
     CPUARMState *env = cpu_env(cs);
     uint32_t cur_el = arm_current_el(env);
     bool secure = arm_is_secure(env);
