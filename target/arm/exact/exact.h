@@ -24,6 +24,8 @@ void arm_exact_tlb_table(CPUARMState *env, ARMMMUIdx mmu_idx,
                          ARMSecuritySpace space, uint64_t va, uint64_t desc_pa,
                          uint64_t desc_val, int level, int lg_cover,
                          void *host);
+void arm_exact_tlb_tlbi32(CPUARMState *env, const struct ARMCPRegInfo *ri,
+                          uint64_t value);
 void arm_exact_tlb_tlbi(CPUARMState *env, const struct ARMCPRegInfo *ri,
                         uint64_t value);
 void arm_exact_tlb_dump(void);
