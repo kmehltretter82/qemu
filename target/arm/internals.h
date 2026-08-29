@@ -42,6 +42,8 @@ void arm_log_unpred(int el, uint64_t pc, const char *what,
                     const char *fmt, ...) G_GNUC_PRINTF(4, 5);
 /* @rip is an ARMCPRegInfo *; void here so this header needs no cpregs.h. */
 void arm_check_res0(const void *rip, uint64_t value, uint64_t pc, int el);
+/* @envp is a CPUARMState *; void so this header stays free of cpu.h. */
+void arm_log_unpred_stxr(void *envp, uint64_t pc, int el, uint64_t store_size);
 
 #endif
 #include "hw/core/registerfields.h"
