@@ -72,6 +72,8 @@ static GHashTable *dc_sites;
 static uint64_t dc_stat_dma_rd, dc_stat_dma_wr, dc_stat_cpu_ld, dc_stat_cpu_st;
 static uint64_t dc_stat_clean, dc_stat_inval, dc_stat_joins, dc_stat_reports;
 static uint64_t dc_stat_nc_skipped;
+/* State of the line just before each device access, for diagnosing misses. */
+static uint64_t dc_stat_dev_wr_state[4], dc_stat_dev_rd_state[4];
 
 static bool dc_site_seen(int cls, uint64_t a, uint64_t b)
 {
@@ -209,6 +211,7 @@ void arm_exact_dcache_dma(uint64_t ram_addr, uint64_t len, bool is_write,
 
         if (is_write) {
             dc_stat_dma_wr++;
+            dc_stat_dev_wr_state[l->state & 3]++;
             if (l->state == DC_DIRTY && !l->reported) {
                 l->reported = true;
                 dc_stat_reports++;
@@ -229,6 +232,7 @@ void arm_exact_dcache_dma(uint64_t ram_addr, uint64_t len, bool is_write,
             l->reported = false;
         } else {
             dc_stat_dma_rd++;
+            dc_stat_dev_rd_state[l->state & 3]++;
             if ((l->state == DC_DIRTY || l->state == DC_DIRTY_DEFAULT) &&
                 !l->reported) {
                 l->reported = true;
@@ -418,6 +422,20 @@ void arm_exact_dcache_dump(void)
                   g_hash_table_size(dc_pages), dc_stat_dma_rd, dc_stat_dma_wr,
                   dc_stat_cpu_ld, dc_stat_cpu_st, dc_stat_clean, dc_stat_inval,
                   dc_stat_nc_skipped, dc_stat_reports);
+    qemu_log_mask(LOG_EXACT,
+                  "exact-dcache: line state at device write: %" PRIu64
+                  " never-cleaned, %" PRIu64 " clean, %" PRIu64 " dirty, %"
+                  PRIu64 " device-written; at device read: %" PRIu64
+                  " never-cleaned, %" PRIu64 " clean, %" PRIu64 " dirty, %"
+                  PRIu64 " device-written\n",
+                  dc_stat_dev_wr_state[DC_DIRTY_DEFAULT],
+                  dc_stat_dev_wr_state[DC_CLEAN],
+                  dc_stat_dev_wr_state[DC_DIRTY],
+                  dc_stat_dev_wr_state[DC_DMA_WRITTEN],
+                  dc_stat_dev_rd_state[DC_DIRTY_DEFAULT],
+                  dc_stat_dev_rd_state[DC_CLEAN],
+                  dc_stat_dev_rd_state[DC_DIRTY],
+                  dc_stat_dev_rd_state[DC_DMA_WRITTEN]);
 }
 
 void arm_exact_dcache_nc_skipped(void)
