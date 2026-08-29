@@ -60,6 +60,7 @@ typedef struct DcLine {
     uint16_t writer_cpu;
     uint8_t state;
     bool reported;
+    bool ever_stored;   /* the CPU has stored into this line at some point */
 } DcLine;
 
 typedef struct DcPage {
@@ -74,6 +75,7 @@ static uint64_t dc_stat_clean, dc_stat_inval, dc_stat_joins, dc_stat_reports;
 static uint64_t dc_stat_nc_skipped;
 /* State of the line just before each device access, for diagnosing misses. */
 static uint64_t dc_stat_dev_wr_state[4], dc_stat_dev_rd_state[4];
+static uint64_t dc_stat_dev_wr_stored;
 
 static bool dc_site_seen(int cls, uint64_t a, uint64_t b)
 {
@@ -212,6 +214,27 @@ void arm_exact_dcache_dma(uint64_t ram_addr, uint64_t len, bool is_write,
         if (is_write) {
             dc_stat_dma_wr++;
             dc_stat_dev_wr_state[l->state & 3]++;
+            dc_stat_dev_wr_stored += l->ever_stored;
+            if (l->state == DC_DIRTY_DEFAULT && !l->reported) {
+                /*
+                 * The page joined the watched set at this very access, so we
+                 * never saw what the CPU did to the line before. Adversarially
+                 * the line may still be dirty in the cache; say so, but keep it
+                 * distinct from the case where we watched the store happen.
+                 */
+                l->reported = true;
+                dc_stat_reports++;
+                if (!dc_site_seen(5, a, 0)) {
+                    qemu_log_mask(LOG_EXACT,
+                        "exact-dcache: VIOLATION device (%s) writes a line "
+                        "that has never been cleaned while we watched it: if "
+                        "the CPU holds it dirty, the write-back will overwrite "
+                        "what the device wrote\n"
+                        "exact-dcache:   line ram 0x%" PRIx64 " (no CPU store "
+                        "seen: the page joined the watched set here)\n",
+                        as_name ? as_name : "?", (uint64_t)a);
+                }
+            }
             if (l->state == DC_DIRTY && !l->reported) {
                 l->reported = true;
                 dc_stat_reports++;
@@ -295,6 +318,7 @@ void arm_exact_dcache_cpu(CPUState *cs, uint64_t ram_addr, unsigned size,
                 }
             }
             l->state = DC_DIRTY;
+            l->ever_stored = true;
             l->writer_pc = env->pc;
             l->writer_lr = env->xregs[30];
             l->writer_cpu = cs->cpu_index;
@@ -436,6 +460,9 @@ void arm_exact_dcache_dump(void)
                   dc_stat_dev_rd_state[DC_CLEAN],
                   dc_stat_dev_rd_state[DC_DIRTY],
                   dc_stat_dev_rd_state[DC_DMA_WRITTEN]);
+    qemu_log_mask(LOG_EXACT,
+                  "exact-dcache: %" PRIu64 " device writes landed in a line the"
+                  " CPU had stored into at some point\n", dc_stat_dev_wr_stored);
 }
 
 void arm_exact_dcache_nc_skipped(void)
