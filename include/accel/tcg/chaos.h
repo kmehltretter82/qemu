@@ -8,7 +8,7 @@
 
 extern bool tcg_chaos_enabled;
 extern uint64_t tcg_chaos_seed;
-extern unsigned tcg_chaos_permille;
+extern unsigned tcg_chaos_rate;
 extern unsigned tcg_chaos_max_us;
 extern unsigned tcg_chaos_irq_blocks;
 

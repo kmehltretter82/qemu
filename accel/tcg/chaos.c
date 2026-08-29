@@ -19,11 +19,21 @@
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
 #include "hw/core/cpu.h"
+#include "qemu/log.h"
+#include "qemu/notify.h"
+#include "system/system.h"
 #include "accel/tcg/chaos.h"
 
 bool tcg_chaos_enabled;
 uint64_t tcg_chaos_seed = 1;
-unsigned tcg_chaos_permille = 5;        /* stalls per 1000 decision points */
+/*
+ * Stalls per million opportunities. The decision is taken between translation
+ * blocks, which happens on the order of a million times a second per vCPU, so
+ * a per-mille rate would mean thousands of sleeps a second and the guest would
+ * crawl instead of being perturbed. 100 per million is roughly one stall every
+ * 10ms of guest execution.
+ */
+unsigned tcg_chaos_rate = 100;
 unsigned tcg_chaos_max_us = 200;        /* longest stall */
 unsigned tcg_chaos_irq_blocks = 8;      /* longest interrupt delay, in TBs */
 
@@ -36,6 +46,27 @@ typedef struct ChaosCpu {
 
 #define CHAOS_MAX_CPUS 64
 static ChaosCpu chaos_cpu[CHAOS_MAX_CPUS];
+
+/*
+ * How often it actually fired. Without this, "the result did not change" and
+ * "chaos never ran" look identical, which is the way to fool yourself.
+ */
+static uint64_t chaos_stalls, chaos_stall_us, chaos_irq_defers;
+
+static void chaos_report(Notifier *n, void *unused)
+{
+    if (!tcg_chaos_enabled) {
+        return;
+    }
+    qemu_log_mask(LOG_EXACT, "exact-chaos: %" PRIu64 " stalls totalling %"
+                  PRIu64 " us, %" PRIu64 " interrupts held back (rate %u per "
+                  "million, seed %" PRIu64 ")\n",
+                  chaos_stalls, chaos_stall_us, chaos_irq_defers,
+                  tcg_chaos_rate, tcg_chaos_seed);
+}
+
+static Notifier chaos_exit_notifier = { .notify = chaos_report };
+static bool chaos_notifier_added;
 
 static uint64_t chaos_next(ChaosCpu *c)
 {
@@ -70,15 +101,23 @@ void tcg_chaos_maybe_stall(CPUState *cpu)
 {
     ChaosCpu *c = chaos_for(cpu);
     uint64_t r;
+    unsigned us;
 
     if (!c) {
         return;
     }
+    if (!chaos_notifier_added) {
+        chaos_notifier_added = true;
+        qemu_add_exit_notifier(&chaos_exit_notifier);
+    }
     r = chaos_next(c);
-    if ((r % 1000) >= tcg_chaos_permille) {
+    if ((r % 1000000) >= tcg_chaos_rate) {
         return;
     }
-    g_usleep(1 + ((r >> 16) % tcg_chaos_max_us));
+    us = 1 + ((r >> 16) % tcg_chaos_max_us);
+    qatomic_inc(&chaos_stalls);
+    qatomic_add(&chaos_stall_us, us);
+    g_usleep(us);
 }
 
 /*
@@ -94,9 +133,10 @@ bool tcg_chaos_defer_irq(CPUState *cpu)
     }
     if (c->irq_hold) {
         c->irq_hold--;
+        qatomic_inc(&chaos_irq_defers);
         return true;
     }
-    if ((chaos_next(c) % 1000) < tcg_chaos_permille) {
+    if ((chaos_next(c) % 1000000) < tcg_chaos_rate * 100) {
         c->irq_hold = 1 + (chaos_next(c) % tcg_chaos_irq_blocks);
         return true;
     }

@@ -286,15 +286,15 @@ static void tcg_set_chaos_seed(Object *obj, Visitor *v, const char *name,
     tcg_chaos_seed = value ? value : 1;
 }
 
-static void tcg_get_chaos_permille(Object *obj, Visitor *v, const char *name,
+static void tcg_get_chaos_rate(Object *obj, Visitor *v, const char *name,
                                    void *opaque, Error **errp)
 {
-    uint64_t value = tcg_chaos_permille;
+    uint64_t value = tcg_chaos_rate;
 
     visit_type_uint64(v, name, &value, errp);
 }
 
-static void tcg_set_chaos_permille(Object *obj, Visitor *v, const char *name,
+static void tcg_set_chaos_rate(Object *obj, Visitor *v, const char *name,
                                    void *opaque, Error **errp)
 {
     uint64_t value;
@@ -302,11 +302,11 @@ static void tcg_set_chaos_permille(Object *obj, Visitor *v, const char *name,
     if (!visit_type_uint64(v, name, &value, errp)) {
         return;
     }
-    if (value > 1000) {
-        error_setg(errp, "x-exact-chaos-permille must be 0..1000");
+    if (value > 1000000) {
+        error_setg(errp, "x-exact-chaos-rate must be 0..1000000");
         return;
     }
-    tcg_chaos_permille = value;
+    tcg_chaos_rate = value;
 }
 
 static void tcg_accel_class_init(ObjectClass *oc, const void *data)
@@ -350,10 +350,10 @@ static void tcg_accel_class_init(ObjectClass *oc, const void *data)
                               NULL, NULL);
     object_class_property_set_description(oc, "x-exact-chaos-seed",
         "Seed for chaos scheduling; a run is reproducible from it");
-    object_class_property_add(oc, "x-exact-chaos-permille", "int",
-                              tcg_get_chaos_permille, tcg_set_chaos_permille,
+    object_class_property_add(oc, "x-exact-chaos-rate", "int",
+                              tcg_get_chaos_rate, tcg_set_chaos_rate,
                               NULL, NULL);
-    object_class_property_set_description(oc, "x-exact-chaos-permille",
+    object_class_property_set_description(oc, "x-exact-chaos-rate",
         "How often to stall, per 1000 opportunities (default 5)");
 }
 
