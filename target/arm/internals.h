@@ -33,6 +33,16 @@
 #ifdef CONFIG_TCG
 #include "accel/tcg/tb-cpu-state.h"
 #include "tcg/tcg-gvec-desc.h"
+
+/*
+ * qemu-exact (-d unpred): report a CONSTRAINED UNPREDICTABLE or reserved
+ * encoding the guest executed. @el and @pc identify the guest instruction.
+ */
+void arm_log_unpred(int el, uint64_t pc, const char *what,
+                    const char *fmt, ...) G_GNUC_PRINTF(4, 5);
+/* @rip is an ARMCPRegInfo *; void here so this header needs no cpregs.h. */
+void arm_check_res0(const void *rip, uint64_t value, uint64_t pc, int el);
+
 #endif
 #include "hw/core/registerfields.h"
 #include "system/memory.h"

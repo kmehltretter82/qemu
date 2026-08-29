@@ -3187,6 +3187,9 @@ static void handle_sys(DisasContext *s, bool isread,
     case ARM_CP_GCSPUSHX:
         /* Choose the CONSTRAINED UNPREDICTABLE for UNDEF. */
         if (rt != 31) {
+            arm_log_unpred(s->current_el, s->pc_curr, "GCS Rt != 31",
+                           "we UNDEF; the architecture also allows executing "
+                           "it or treating Rt as 31");
             unallocated_encoding(s);
         } else if (s->gcs_en) {
             gen_gcspushx(s);
@@ -3195,6 +3198,9 @@ static void handle_sys(DisasContext *s, bool isread,
     case ARM_CP_GCSPOPCX:
         /* Choose the CONSTRAINED UNPREDICTABLE for UNDEF. */
         if (rt != 31) {
+            arm_log_unpred(s->current_el, s->pc_curr, "GCS Rt != 31",
+                           "we UNDEF; the architecture also allows executing "
+                           "it or treating Rt as 31");
             unallocated_encoding(s);
         } else if (s->gcs_en) {
             gen_gcspopcx(s);
@@ -3203,6 +3209,9 @@ static void handle_sys(DisasContext *s, bool isread,
     case ARM_CP_GCSPOPX:
         /* Choose the CONSTRAINED UNPREDICTABLE for UNDEF. */
         if (rt != 31) {
+            arm_log_unpred(s->current_el, s->pc_curr, "GCS Rt != 31",
+                           "we UNDEF; the architecture also allows executing "
+                           "it or treating Rt as 31");
             unallocated_encoding(s);
         } else if (s->gcs_en) {
             gen_gcspopx(s);
@@ -4981,6 +4990,9 @@ static bool do_SET(DisasContext *s, arg_set *a, bool is_epilogue,
      */
     if (a->rs == a->rn || a->rs == a->rd || a->rn == a->rd ||
         a->rd == 31 || a->rn == 31) {
+        arm_log_unpred(s->current_el, s->pc_curr, "MOPS operand overlap",
+                       "SET* with rd=%d rs=%d rn=%d: we UNDEF, another "
+                       "implementation may execute it", a->rd, a->rs, a->rn);
         return false;
     }
 
@@ -5036,6 +5048,9 @@ static bool do_CPY(DisasContext *s, arg_cpy *a, bool is_epilogue, CpyFn fn)
      */
     if (a->rs == a->rn || a->rs == a->rd || a->rn == a->rd ||
         a->rd == 31 || a->rs == 31 || a->rn == 31) {
+        arm_log_unpred(s->current_el, s->pc_curr, "MOPS operand overlap",
+                       "CPY* with rd=%d rs=%d rn=%d: we UNDEF, another "
+                       "implementation may execute it", a->rd, a->rs, a->rn);
         return false;
     }
 
