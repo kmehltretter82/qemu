@@ -11277,6 +11277,23 @@ static void aarch64_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
 
+    /*
+     * An LDXR still open when the block ends. The instruction that ended the
+     * block is usually the reason - a BL into an instrumented atomic, an
+     * indirect branch, an exception-generating instruction - and it is exactly
+     * the case the STXR-side report cannot see, because the STXR is in the
+     * next block. What was found is still a forbidden instruction after an
+     * LDXR in program order, which is the hazard; the matching STXR is
+     * reported as 0 to say the block ended before it was reached.
+     */
+    if (unlikely(dc->ldex_active)) {
+        dc->ldex_active = false;
+        if (dc->ldex_bad_what) {
+            arm_exact_llsc_pair(dc->ldex_pc, 0, dc->ldex_bad_pc,
+                                dc->ldex_bad_what);
+        }
+    }
+
     if (unlikely(dc->ss_active)) {
         /* Note that this means single stepping WFI doesn't halt the CPU.
          * For conditional branch insns this is harmless unreachable code as

@@ -2024,6 +2024,16 @@ static void gen_load_exclusive(DisasContext *s, int rt, int rt2,
     MemOp opc = size | MO_ALIGN | s->be_data;
 
     s->is_ldex = true;
+    /*
+     * qemu-exact: open a forward-progress check on the pair. A32 only -
+     * classifying a Thumb-2 stream needs the 16/32-bit boundary, and a
+     * detector that guesses is worse than one that declines.
+     */
+    if (unlikely(qemu_loglevel_mask(LOG_EXACT)) && !s->thumb) {
+        s->ldex_active = true;
+        s->ldex_pc = s->pc_curr;
+        s->ldex_bad_what = NULL;
+    }
 
     if (size == 3) {
         TCGv_i32 tmp2 = tcg_temp_new_i32();
@@ -2079,6 +2089,13 @@ static void gen_store_exclusive(DisasContext *s, int rd, int rt, int rt2,
        } */
     fail_label = gen_new_label();
     done_label = gen_new_label();
+
+    if (unlikely(s->ldex_active)) {
+        s->ldex_active = false;
+        arm_exact_llsc_pair(s->ldex_pc, s->pc_curr, s->ldex_bad_pc,
+                            s->ldex_bad_what);
+    }
+
     extaddr = tcg_temp_new_i64();
     tcg_gen_extu_i32_i64(extaddr, addr);
 
@@ -6611,6 +6628,13 @@ static void arm_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     dc->base.pc_next = pc + 4;
     disas_arm_insn(dc, insn);
 
+    /* After the decode, so the LDREX and the STREX do not report themselves. */
+    if (unlikely(dc->ldex_active) && dc->pc_curr != dc->ldex_pc &&
+        !dc->ldex_bad_what) {
+        dc->ldex_bad_what = arm_exact_llsc_forbidden_a32(insn);
+        dc->ldex_bad_pc = dc->pc_curr;
+    }
+
     arm_post_translate_insn(dc);
 
     /* ARM is a fixed-length ISA.  We performed the cross-page check
@@ -6803,6 +6827,15 @@ static void thumb_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
 static void arm_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
+
+    /* An LDREX still open when the block ends - see aarch64_tr_tb_stop(). */
+    if (unlikely(dc->ldex_active)) {
+        dc->ldex_active = false;
+        if (dc->ldex_bad_what) {
+            arm_exact_llsc_pair(dc->ldex_pc, 0, dc->ldex_bad_pc,
+                                dc->ldex_bad_what);
+        }
+    }
 
     /* At this stage dc->condjmp will only be set when the skipped
        instruction was a conditional branch or trap, and the PC has
