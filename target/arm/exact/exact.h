@@ -62,4 +62,18 @@ void arm_exact_dcache_page_joined(uint64_t ram_addr);
 void arm_exact_dcache_nc_skipped(void);
 void arm_exact_dcache_dump(void);
 
+/* exclusive.c */
+extern bool arm_exact_exclusive_enabled;
+extern unsigned arm_exact_exclusive_rate;
+extern unsigned arm_exact_exclusive_maxrun;
+extern uint64_t arm_exact_exclusive_seed;
+void arm_exact_exclusive_init(void);
+bool arm_exact_stxr_fail(CPUARMState *env, uint64_t addr);
+void arm_exact_exclusive_exception(CPUARMState *env);
+void arm_exact_exclusive_dump(void);
+const char *arm_exact_llsc_forbidden_a64(uint32_t insn);
+void arm_exact_llsc_pair(uint64_t ldex_pc, uint64_t stex_pc, uint64_t bad_pc,
+                         const char *what);
+void arm_exact_llsc_dump(void);
+
 #endif

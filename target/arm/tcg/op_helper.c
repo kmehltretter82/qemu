@@ -1551,3 +1551,8 @@ void HELPER(vesb)(CPUARMState *env)
         cpu_reset_interrupt(env_cpu(env), CPU_INTERRUPT_VSERR);
     }
 }
+
+uint32_t HELPER(exact_stxr_fail)(CPUARMState *env, uint64_t addr)
+{
+    return arm_exact_stxr_fail(env, addr);
+}

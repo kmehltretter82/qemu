@@ -711,6 +711,12 @@ static const Property arm_cpu_exact_properties[] = {
     DEFINE_PROP_BOOL("x-exact-icache-full", ARMCPU, prop_exact_icache_full, false),
     DEFINE_PROP_BOOL("x-exact-dcache", ARMCPU, prop_exact_dcache, false),
     DEFINE_PROP_UINT8("x-exact-dcache-line", ARMCPU, prop_dcache_line, 64),
+    DEFINE_PROP_BOOL("x-exact-exclusive", ARMCPU, prop_exact_exclusive, false),
+    DEFINE_PROP_UINT32("x-exact-exclusive-rate", ARMCPU, prop_exclusive_rate,
+                       10000),
+    DEFINE_PROP_UINT8("x-exact-exclusive-maxrun", ARMCPU, prop_exclusive_maxrun,
+                      2),
+    DEFINE_PROP_UINT64("x-exact-exclusive-seed", ARMCPU, prop_exclusive_seed, 1),
 };
 
 /* qemu-exact knobs are meaningful on any AArch64 CPU model, not only max */
@@ -738,6 +744,30 @@ void aarch64_cpu_exact_finalize(ARMCPU *cpu, Error **errp)
         arm_exact_dcache_line = cpu->prop_dcache_line;
         arm_exact_dcache_enabled = true;
         arm_exact_dcache_init();
+    }
+    /*
+     * Unconditional: the LL/SC forward-progress check rides on -d exact, not
+     * on the knob, and it needs the exit notifier to print its summary.
+     */
+    arm_exact_exclusive_init();
+    if (cpu->prop_exact_exclusive) {
+        if (cpu->prop_exclusive_rate > 1000000) {
+            error_setg(errp, "x-exact-exclusive-rate is per million, max 1000000");
+            return;
+        }
+        arm_exact_exclusive_enabled = true;
+        arm_exact_exclusive_rate = cpu->prop_exclusive_rate;
+        arm_exact_exclusive_maxrun = cpu->prop_exclusive_maxrun;
+        arm_exact_exclusive_seed = cpu->prop_exclusive_seed;
+        /*
+         * ERG is what tells the guest how far apart two lock words have to be
+         * before a store to one can steal the other's reservation. QEMU's max
+         * advertises the smallest granule there is (16 bytes), which is the
+         * kindest possible value; 64 bytes is what real cores ship.
+         */
+        if (cpu->prop_ctr_erg == 0xff) {
+            cpu->prop_ctr_erg = 4;
+        }
     }
     if (cpu->prop_exact_icache || cpu->prop_exact_icache_full) {
         arm_exact_icache_enabled = true;

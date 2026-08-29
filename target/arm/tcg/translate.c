@@ -31,6 +31,7 @@
 #include "exec/translator.h"
 #include "helper.h"
 #include "helper-mve.h"
+#include "exact/exact.h"
 
 #define ENABLE_ARCH_4T    arm_dc_feature(s, ARM_FEATURE_V4T)
 #define ENABLE_ARCH_5     arm_dc_feature(s, ARM_FEATURE_V5)
@@ -2080,6 +2081,15 @@ static void gen_store_exclusive(DisasContext *s, int rd, int rt, int rt2,
     done_label = gen_new_label();
     extaddr = tcg_temp_new_i64();
     tcg_gen_extu_i32_i64(extaddr, addr);
+
+    /* qemu-exact: see the AArch64 gen_store_exclusive() for why this is legal. */
+    if (unlikely(arm_exact_exclusive_enabled)) {
+        TCGv_i32 spurious = tcg_temp_new_i32();
+
+        gen_helper_exact_stxr_fail(spurious, tcg_env, extaddr);
+        tcg_gen_brcondi_i32(TCG_COND_NE, spurious, 0, fail_label);
+    }
+
     tcg_gen_brcond_i64(TCG_COND_NE, extaddr, cpu_exclusive_addr, fail_label);
 
     taddr = gen_aa32_addr(s, addr, opc);
@@ -6347,6 +6357,7 @@ static void arm_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
     dc->isar = &cpu->isar;
     dc->condjmp = 0;
     dc->pc_save = dc->base.pc_first;
+    dc->ldex_active = false;   /* qemu-exact LL/SC check: A64 only for now */
     dc->aarch64 = false;
     dc->thumb = EX_TBFLAG_AM32(tb_flags, THUMB);
     dc->be_data = EX_TBFLAG_ANY(tb_flags, BE_DATA) ? MO_BE : MO_LE;

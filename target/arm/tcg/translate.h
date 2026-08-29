@@ -210,6 +210,17 @@ typedef struct DisasContext {
     uint8_t fpmr_el;
     /* Offset from VNCR_EL2 when FEAT_NV2 redirects this reg to memory */
     uint32_t nv2_redirect_offset;
+    /*
+     * qemu-exact: LDXR/STXR forward-progress checking (DDI0487 B2.12.5).
+     * ldex_active is set by gen_load_exclusive() and cleared by
+     * gen_store_exclusive(); while it is set, every instruction translated in
+     * between is classified, and the first one the architecture does not allow
+     * there is remembered so the store can name it.
+     */
+    bool ldex_active;
+    uint64_t ldex_pc;
+    uint64_t ldex_bad_pc;
+    const char *ldex_bad_what;
 } DisasContext;
 
 typedef struct DisasCompare {

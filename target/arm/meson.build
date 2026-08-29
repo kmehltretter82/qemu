@@ -32,7 +32,7 @@ arm_common_system_ss.add(files(
   'arm-qmp-cmds.c',
 ))
 arm_system_ss.add(files('exact/poison.c', 'exact/atlb.c', 'exact/icache.c', 'exact/dcache.c'))
-arm_common_user_system_ss.add(files('exact/unpred.c'))
+arm_common_user_system_ss.add(files('exact/unpred.c', 'exact/exclusive.c'))
 arm_system_ss.add(when: 'CONFIG_KVM', if_true: files('hyp_gdbstub.c', 'kvm.c'))
 arm_system_ss.add(when: 'CONFIG_HVF', if_true: files('hyp_gdbstub.c'))
 
