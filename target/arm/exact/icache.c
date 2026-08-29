@@ -51,19 +51,26 @@ bool arm_exact_icache_enabled;
 bool arm_exact_icache_full;
 
 /*
- * One bit per line of RAM: written since it was last cleaned to the PoU.
- * This is what catches code that is executed from memory that never held
- * code before, such as a kernel image an EFI stub has just relocated: the
- * per line records below only exist for lines the instruction side has
- * fetched, so a store into fresh memory would otherwise be invisible.
+ * One 64 bit mask per line of RAM, one bit per byte: written since it was
+ * last cleaned to the PoU. This is what catches code executed from memory
+ * that never held code before, such as a kernel image an EFI stub has just
+ * relocated: the per line records below only exist for lines the
+ * instruction side has fetched, so a store into fresh memory would
+ * otherwise be invisible.
  *
+ * It has to be byte granular, like the tracked lines: the ftrace call-ops
+ * literal of a function that starts on a line boundary lives in the last
+ * eight bytes of the previous function's last line, and a whole line bit
+ * would report that function's tail as freshly written code.
+ *
+ * Eight bytes per line of RAM is 1/8 of the guest's memory, but it is
+ * calloc'd and only lines that are actually stored to ever cost anything.
  * In normal mode only stores to pages holding translations take the slow
- * path, so the bitmap covers just those. With x-exact-icache-full=on every
- * page of RAM is protected at machine init and every store is seen, at a
- * cost of a few times the runtime; that is the mode for calibrations of
- * this class.
+ * path, so it covers just those. With x-exact-icache-full=on every page of
+ * RAM is protected at machine init and every store is seen, at a cost of a
+ * few times the runtime; that is the mode for calibrations of this class.
  */
-static unsigned long *ic_dirty;
+static uint64_t *ic_dirty;
 static uint64_t ic_dirty_lines;
 
 #define IC_LINE 64
@@ -164,7 +171,7 @@ static int ic_ram_block_cb(RAMBlock *rb, void *opaque)
 static void ic_machine_done(Notifier *n, void *opaque)
 {
     qemu_ram_foreach_block(ic_ram_block_cb, NULL);
-    ic_dirty = bitmap_new(ic_dirty_lines);
+    ic_dirty = g_malloc0_n(ic_dirty_lines, sizeof(*ic_dirty));
     if (arm_exact_icache_full) {
         qemu_log_mask(LOG_EXACT, "exact-icache: full store tracking, %" PRIu64
                       " lines of RAM watched\n", ic_dirty_lines);
@@ -285,7 +292,7 @@ void arm_exact_icache_fetch(CPUState *cs, uint64_t ram_addr, unsigned size)
 
         if (!l) {
             l = ic_line(a, true);
-            if (ic_dirty && ln < ic_dirty_lines && test_bit(ln, ic_dirty)) {
+            if (ic_dirty && ln < ic_dirty_lines && (ic_dirty[ln] & m)) {
                 /*
                  * Never fetched before, but written since it was last
                  * cleaned: code executed from memory the data side filled
@@ -303,11 +310,14 @@ void arm_exact_icache_fetch(CPUState *cs, uint64_t ram_addr, unsigned size)
                         "unification\n"
                         "exact-icache:   fetch cpu=%d pc=0x%" PRIx64
                         " of line ram 0x%" PRIx64 " bytes 0x%016" PRIx64
-                        ", first instruction 0x%08x\n"
+                        " (dirty bytes 0x%016" PRIx64
+                        "), first instruction 0x%08x\n"
                         "exact-icache:   the line had never been executed "
                         "before, so the writer was not recorded; the last "
-                        "store to it was after its last dc cvau\n",
-                        cs->cpu_index, (uint64_t)env->pc, (uint64_t)a, m, w0);
+                        "store to it was after its last dc cvau; history:\n",
+                        cs->cpu_index, (uint64_t)env->pc, (uint64_t)a, m,
+                        ic_dirty[ln], w0);
+                    ic_dump_history(ln);
                 }
             }
             l->present = true;
@@ -402,9 +412,10 @@ void arm_exact_icache_store(CPUState *cs, uint64_t ram_addr, unsigned size)
         uint64_t ln = a / IC_LINE;
 
         if (ic_dirty && ln < ic_dirty_lines) {
-            set_bit(ln, ic_dirty);      /* dirty in the D-cache until cleaned */
+            ic_dirty[ln] |= m;          /* dirty in the D-cache until cleaned */
         }
         if (!l) {
+            ic_event(ln, EV_STORE, cs, m);
             continue;                   /* never fetched: the bit is enough */
         }
         ic_stat_store++;
@@ -450,7 +461,7 @@ void arm_exact_icache_maint(CPUState *cs, uint64_t ram_addr, bool all,
     qemu_mutex_lock(&ic_lock);
     if (all) {
         if (clean && ic_dirty) {
-            bitmap_zero(ic_dirty, ic_dirty_lines);
+            memset(ic_dirty, 0, ic_dirty_lines * sizeof(*ic_dirty));
         }
         g_hash_table_iter_init(&it, ic_lines);
         while (g_hash_table_iter_next(&it, &k, &v)) {
@@ -470,11 +481,12 @@ void arm_exact_icache_maint(CPUState *cs, uint64_t ram_addr, bool all,
         return;
     }
     if (clean && ic_dirty && ram_addr / IC_LINE < ic_dirty_lines) {
-        clear_bit(ram_addr / IC_LINE, ic_dirty);
+        ic_dirty[ram_addr / IC_LINE] = 0;
     }
     l = ic_line(ram_addr, false);
     if (!l) {
         ic_stat_maint_miss++;
+        ic_event(ram_addr / IC_LINE, clean ? EV_CLEAN : EV_INVAL, cs, 0);
         qemu_mutex_unlock(&ic_lock);
         return;
     }
