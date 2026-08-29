@@ -95,7 +95,41 @@ typedef struct IcLine {
  * instruction and before the maintenance, and those functions' own ftrace
  * entries are among the instructions it patches.
  */
-static bool cmodx_safe(uint32_t insn)
+/*
+ * The A32 half of the same rule. A 32-bit kernel patches the same kinds of
+ * site - ftrace call sites, jump labels, kprobes - but with ARM encodings, so
+ * decoding only A64 here reports every one of them as an unsafe modification.
+ * (A Thumb-2 kernel would need more than this: instructions are 2 or 4 bytes
+ * and the boundary is not recoverable from the line alone, so we do not claim
+ * to cover it.)
+ */
+static bool cmodx_safe_a32(uint32_t insn)
+{
+    if ((insn & 0x0f000000) == 0x0a000000) {   /* B    */
+        return true;
+    }
+    if ((insn & 0x0f000000) == 0x0b000000) {   /* BL   */
+        return true;
+    }
+    if ((insn & 0x0fffffff) == 0x0320f000) {   /* NOP  */
+        return true;
+    }
+    if ((insn & 0x0f000000) == 0x0f000000) {   /* SVC  */
+        return true;
+    }
+    if (insn == 0xf57ff06f) {                  /* ISB  */
+        return true;
+    }
+    switch (insn & 0x0ff000f0) {
+    case 0x01200070:                           /* BKPT */
+    case 0x01400070:                           /* HVC  */
+    case 0x01600070:                           /* SMC  */
+        return true;
+    }
+    return false;
+}
+
+static bool cmodx_safe_a64(uint32_t insn)
 {
     if ((insn & 0xfc000000) == 0x14000000) {   /* B   */
         return true;
@@ -117,6 +151,18 @@ static bool cmodx_safe(uint32_t insn)
         return true;
     }
     return false;
+}
+
+/* The guest's execution state decides which encoding the bytes are in. */
+static bool cmodx_safe_for(CPUARMState *env, uint32_t insn)
+{
+    return is_a64(env) ? cmodx_safe_a64(insn) : cmodx_safe_a32(insn);
+}
+
+/* A 32-bit guest keeps its PC in r15, not in env->pc. */
+static uint64_t ic_pc(CPUARMState *env)
+{
+    return is_a64(env) ? env->pc : env->regs[15];
 }
 
 /* a ring of recent events, so a report can show the line's whole history */
@@ -213,7 +259,7 @@ static void ic_event(uint64_t line, int kind, CPUState *cs, uint64_t mask)
     e->line = line;
     e->kind = kind;
     e->cpu = cs->cpu_index;
-    e->pc = env->pc;
+    e->pc = ic_pc(env);
     e->lr = env->xregs[30];
     e->mask = mask;
 }
@@ -300,7 +346,7 @@ void arm_exact_icache_fetch(CPUState *cs, uint64_t ram_addr, unsigned size)
                  */
                 ic_stat_fresh++;
                 ic_stat_reports++;
-                if (!ic_site_seen(0, (uint64_t)env->pc)) {
+                if (!ic_site_seen(0, ic_pc(env))) {
                     const uint8_t *cur = qemu_map_ram_ptr(NULL, a);
                     uint32_t w0 = ldl_le_p(cur + (off & ~3u));
 
@@ -315,7 +361,7 @@ void arm_exact_icache_fetch(CPUState *cs, uint64_t ram_addr, unsigned size)
                         "exact-icache:   the line had never been executed "
                         "before, so the writer was not recorded; the last "
                         "store to it was after its last dc cvau; history:\n",
-                        cs->cpu_index, (uint64_t)env->pc, (uint64_t)a, m,
+                        cs->cpu_index, ic_pc(env), (uint64_t)a, m,
                         ic_dirty[ln], w0);
                     ic_dump_history(ln);
                 }
@@ -351,7 +397,7 @@ void arm_exact_icache_fetch(CPUState *cs, uint64_t ram_addr, unsigned size)
                     oldw |= (uint32_t)o << (8 * b);
                     neww |= (uint32_t)cur[w + b] << (8 * b);
                 }
-                if (!(cmodx_safe(oldw) && cmodx_safe(neww))) {
+                if (!(cmodx_safe_for(env, oldw) && cmodx_safe_for(env, neww))) {
                     bad = w;
                     break;
                 }
@@ -370,7 +416,7 @@ void arm_exact_icache_fetch(CPUState *cs, uint64_t ram_addr, unsigned size)
         }
         if (why) {
             ic_stat_reports++;
-            if (!ic_site_seen(l->writer_lr, (uint64_t)env->pc)) {
+            if (!ic_site_seen(l->writer_lr, ic_pc(env))) {
                 qemu_log_mask(LOG_EXACT,
                     "exact-icache: VIOLATION executing bytes %s\n"
                     "exact-icache:   instruction at line offset %u was "
@@ -384,7 +430,7 @@ void arm_exact_icache_fetch(CPUState *cs, uint64_t ram_addr, unsigned size)
                     "exact-icache:   last clean pc=0x%" PRIx64
                     ", last invalidate pc=0x%" PRIx64 "; history:\n",
                     why, bad, oldw, neww,
-                    cs->cpu_index, (uint64_t)env->pc, (uint64_t)a, m,
+                    cs->cpu_index, ic_pc(env), (uint64_t)a, m,
                     (unsigned)l->writer_cpu, l->writer_pc, l->writer_lr,
                     l->dirty, l->changed, l->present,
                     l->clean_pc, l->inval_pc);
@@ -439,8 +485,9 @@ void arm_exact_icache_store(CPUState *cs, uint64_t ram_addr, unsigned size)
         }
         l->dirty |= m;
         l->changed |= m;
-        l->writer_pc = env->pc;
-        l->writer_lr = env->xregs[30];
+        l->writer_pc = ic_pc(env);
+        /* the link register is x30 in AArch64 and r14 in AArch32 */
+        l->writer_lr = is_a64(env) ? env->xregs[30] : env->regs[14];
         l->writer_cpu = cs->cpu_index;
     }
     qemu_mutex_unlock(&ic_lock);

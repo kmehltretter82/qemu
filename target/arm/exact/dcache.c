@@ -443,7 +443,15 @@ void arm_exact_dcache_maint(CPUState *cs, uint64_t ram_addr, bool all,
         qemu_mutex_unlock(&dc_lock);
         return;
     }
-    p = dc_page(ram_addr, kind != 'i');
+    /*
+     * An invalidate by VA marks the page as DMA memory just as well as a
+     * clean does. arm64 always cleans when handing a buffer to a device, so
+     * joining only on a clean was enough there; arm32 *invalidates* for
+     * DMA_FROM_DEVICE (v7_dma_map_area -> v7_dma_inv_range), so those pages
+     * would never join, and the first device write would then be reported
+     * against a line we had never watched.
+     */
+    p = dc_page(ram_addr, true);
     if (!p) {
         qemu_mutex_unlock(&dc_lock);
         return;
