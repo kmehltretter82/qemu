@@ -234,13 +234,29 @@ static GHashTable *ex_tab_of(unsigned cpu)
 
 /* ---------------------------------------------------------------- lookup */
 
-static uint32_t ex_asid_of(CPUARMState *env, ARMMMUIdx mmu_idx, uint64_t desc)
+static uint32_t ex_asid_of(CPUARMState *env, ARMMMUIdx mmu_idx, uint64_t desc,
+                           int level)
 {
     uint64_t tcr, ttbr;
     unsigned bits;
 
     if (regime_is_stage2(mmu_idx)) {
         return EX_ASID_GLOBAL;      /* stage 2 has no ASID, only a VMID */
+    }
+    if (!regime_using_lpae_format(env, mmu_idx)) {
+        /*
+         * Short descriptors (ARMv7 without LPAE). Two differences from the
+         * long format, both of which read as "everything is global" if you
+         * ignore them: the ASID is in CONTEXTIDR rather than the top of TTBR,
+         * and nG is bit 17 of a section descriptor but bit 11 of a page
+         * descriptor. A level-1 table descriptor has no nG at all.
+         */
+        uint32_t ng = level == 1 ? (1u << 17) : (1u << 11);
+
+        if (!(desc & ng)) {
+            return EX_ASID_GLOBAL;
+        }
+        return env->cp15.contextidr_el[1] & 0xff;
     }
     if (!(desc & (1ULL << 11))) {
         return EX_ASID_GLOBAL;          /* nG == 0 */
@@ -639,7 +655,7 @@ void arm_exact_tlb_table(CPUARMState *env, ARMMMUIdx mmu_idx,
      * space carries the current ASID.
      */
     key.asid = (regime_has_2_ranges(mmu_idx) && !((int64_t)va < 0))
-               ? ex_asid_of(env, mmu_idx, 1ULL << 11) : EX_ASID_GLOBAL;
+               ? ex_asid_of(env, mmu_idx, 1ULL << 11, 3) : EX_ASID_GLOBAL;
     key.vmid = ex_vmid_of(env, mmu_idx);
     key.regime = ex_regime_of(mmu_idx);
     key.space = space;
@@ -723,7 +739,7 @@ void arm_exact_tlb_leaf(CPUARMState *env, ARMMMUIdx mmu_idx,
 
     memset(&key, 0, sizeof(key));
     key.va = va & ~((1ULL << lg_page_size) - 1);
-    key.asid = ex_asid_of(env, mmu_idx, desc_val);
+    key.asid = ex_asid_of(env, mmu_idx, desc_val, level);
     key.vmid = ex_vmid_of(env, mmu_idx);
     key.regime = ex_regime_of(mmu_idx);
     key.space = space;
