@@ -1274,6 +1274,17 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
     uint32_t dacr;
     bool ns;
     ARMSecuritySpace out_space;
+    /*
+     * qemu-exact: the short-descriptor walk feeds the same architectural TLB
+     * shadow as the long-descriptor one. Two levels instead of four, 1M
+     * sections and 16M supersections instead of blocks, and no contiguous
+     * hint, but the obligation on the guest is identical: a translation the
+     * hardware may have cached stays cached until the matching TLBI.
+     */
+    hwaddr exact_desc_pa = 0;
+    void *exact_desc_host = NULL;
+    uint32_t exact_desc_val = 0;
+    int exact_level = 1;
 
     /* Pagetable walk.  */
     /* Lookup l1 descriptor.  */
@@ -1286,6 +1297,9 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
         goto do_fault;
     }
     desc = arm_ldl_ptw(env, ptw, fi);
+    exact_desc_pa = ptw->out_phys;
+    exact_desc_host = ptw->out_host;
+    exact_desc_val = desc;
     if (fi->type != ARMFault_None) {
         goto do_fault;
     }
@@ -1336,12 +1350,25 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
             pxn = (desc >> 2) & 1;
         }
         ns = extract32(desc, 3, 1);
+        /*
+         * A level-1 table descriptor: hardware may hold this in a walk cache,
+         * which only a non-last-level invalidation removes. It covers 1M.
+         */
+        if (unlikely(arm_exact_tlb_enabled) && !ptw->in_debug) {
+            arm_exact_tlb_table(env, ptw->in_mmu_idx, ptw->in_space, address,
+                                exact_desc_pa, exact_desc_val, 1, 20,
+                                exact_desc_host);
+        }
         /* Lookup l2 entry.  */
         table = (desc & 0xfffffc00) | ((address >> 10) & 0x3fc);
         if (!S1_ptw_translate(env, ptw, table, fi)) {
             goto do_fault;
         }
         desc = arm_ldl_ptw(env, ptw, fi);
+        exact_desc_pa = ptw->out_phys;
+        exact_desc_host = ptw->out_host;
+        exact_desc_val = desc;
+        exact_level = 2;
         if (fi->type != ARMFault_None) {
             goto do_fault;
         }
@@ -1405,6 +1432,14 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
     result->f.attrs.space = out_space;
     result->f.attrs.secure = arm_space_is_secure(out_space);
     result->f.phys_addr = phys_addr;
+
+    /* qemu-exact: record the leaf, whatever size it turned out to be. */
+    if (unlikely(arm_exact_tlb_enabled) && !ptw->in_debug) {
+        arm_exact_tlb_leaf(env, ptw->in_mmu_idx, ptw->in_space, address,
+                           exact_desc_pa, exact_desc_val, phys_addr,
+                           exact_level, result->f.lg_page_size,
+                           exact_desc_host);
+    }
     return true;
 do_fault:
     fi->domain = domain;
