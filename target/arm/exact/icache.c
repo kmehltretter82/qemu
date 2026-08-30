@@ -260,7 +260,7 @@ static void ic_event(uint64_t line, int kind, CPUState *cs, uint64_t mask)
     e->kind = kind;
     e->cpu = cs->cpu_index;
     e->pc = ic_pc(env);
-    e->lr = env->xregs[30];
+    e->lr = is_a64(env) ? env->xregs[30] : env->regs[14];
     e->mask = mask;
 }
 
@@ -540,14 +540,14 @@ void arm_exact_icache_maint(CPUState *cs, uint64_t ram_addr, bool all,
     if (clean) {
         ic_event(ram_addr / IC_LINE, EV_CLEAN, cs, l->dirty);
         l->dirty = 0;
-        l->clean_pc = env->pc;
+        l->clean_pc = ic_pc(env);
         ic_stat_clean++;
     }
     if (invalidate) {
         ic_event(ram_addr / IC_LINE, EV_INVAL, cs, l->changed);
         l->present = false;
         l->changed = 0;
-        l->inval_pc = env->pc;
+        l->inval_pc = ic_pc(env);
         ic_stat_inval++;
     }
     qemu_mutex_unlock(&ic_lock);

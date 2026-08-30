@@ -261,6 +261,17 @@ static GHashTable *ex_tab_of(unsigned cpu)
 
 /* ---------------------------------------------------------------- lookup */
 
+/*
+ * A 32-bit guest keeps its PC in r15, not in env->pc, so every arm32 TLB
+ * report attributed the offending access to pc=0x0. This is the third model
+ * to have had it (icache.c, then dcache.c), which is why it was found by
+ * auditing all of them for env->pc rather than waiting for the next report.
+ */
+static uint64_t ex_pc(CPUARMState *env)
+{
+    return is_a64(env) ? env->pc : env->regs[15];
+}
+
 static uint32_t ex_asid_of(CPUARMState *env, ARMMMUIdx mmu_idx, uint64_t desc,
                            int level)
 {
@@ -358,7 +369,7 @@ static void ex_report(CPUARMState *env, const char *cls, const ExEntry *old,
     CPUState *cs = env_cpu(env);
     uint64_t diff = old->desc_val ^ new_desc;
 
-    if (ex_site_seen(0, (uint64_t)env->pc, old->key.va)) {
+    if (ex_site_seen(0, ex_pc(env), old->key.va)) {
         return;
     }
     qemu_log_mask(LOG_EXACT,
@@ -369,7 +380,7 @@ static void ex_report(CPUARMState *env, const char *cls, const ExEntry *old,
              "exact-tlb:   output address 0x%" PRIx64 " -> 0x%" PRIx64
              ", filled by cpu=%u, %" PRIu64 " TLBI ops executed since (none "
              "of them covered this entry)\n",
-             cls, cs->cpu_index, (uint64_t)env->pc, arm_current_el(env),
+             cls, cs->cpu_index, ex_pc(env), arm_current_el(env),
              ex_regime_name(old->key.regime),
              old->key.asid == EX_ASID_GLOBAL ? "global " : "",
              (unsigned)(old->key.asid == EX_ASID_GLOBAL ? 0 : old->key.asid),
@@ -563,7 +574,7 @@ void arm_exact_ptwatch_write(CPUState *cs, uint64_t ram_addr, unsigned size,
                               GUINT_TO_POINTER(ram_addr & TARGET_PAGE_MASK))) {
         ex_resolve_locked(cs);
         ex_pending[cs->cpu_index] = (ExPending){
-            .ram_addr = ram_addr, .size = size, .pc = env->pc, .valid = true,
+            .ram_addr = ram_addr, .size = size, .pc = ex_pc(env), .valid = true,
         };
     }
     qemu_mutex_unlock(&ex_lock);
@@ -652,13 +663,13 @@ static void ex_check_contig(CPUARMState *env, const ExKey *key, uint64_t desc_pa
             why = "output addresses not consecutive";
         }
         if (why) {
-            if (!ex_site_seen(2, (uint64_t)env->pc, key->va)) {
+            if (!ex_site_seen(2, ex_pc(env), key->va)) {
                 qemu_log_mask(LOG_EXACT,
                     "exact-tlb: VIOLATION contiguous block inconsistent (%s) "
                     "cpu=%d pc=0x%" PRIx64 " va=0x%" PRIx64 " regime=%s\n"
                     "exact-tlb:   block at PA 0x%" PRIx64 ", entry %u of %u is "
                     "0x%016" PRIx64 ", entry 0 is 0x%016" PRIx64 "\n",
-                    why, env_cpu(env)->cpu_index, (uint64_t)env->pc,
+                    why, env_cpu(env)->cpu_index, ex_pc(env),
                     key->va, ex_regime_name(key->regime), base_pa, i,
                     entries, d[i], d[0]);
             }
@@ -724,7 +735,7 @@ void arm_exact_tlb_table(CPUARMState *env, ARMMMUIdx mmu_idx,
                 ex_stat_violations++;
                 ExDesc *sd = g_hash_table_lookup(ex_desc,
                                                  GUINT_TO_POINTER(ra_desc));
-                if (!ex_site_seen(3, (uint64_t)env->pc, key.va)) {
+                if (!ex_site_seen(3, ex_pc(env), key.va)) {
                     qemu_log_mask(LOG_EXACT,
                         "exact-tlb: VIOLATION cached table descriptor changed "
                         "without a non-last-level invalidation cpu=%d "
@@ -734,7 +745,7 @@ void arm_exact_tlb_table(CPUARMState *env, ARMMMUIdx mmu_idx,
                         " changed 0x%016" PRIx64 " -> 0x%016" PRIx64
                         ", next level table 0x%" PRIx64 " -> 0x%" PRIx64
                         ", last store to it from pc=0x%" PRIx64 "\n",
-                        env_cpu(env)->cpu_index, (uint64_t)env->pc,
+                        env_cpu(env)->cpu_index, ex_pc(env),
                         ex_regime_name(key.regime), key.va, level, desc_pa,
                         e->desc_val, desc_val,
                         (uint64_t)(e->desc_val & MAKE_64BIT_MASK(12, 36)),
