@@ -94,6 +94,7 @@ static uint64_t dc_lr(CPUARMState *env)
     return is_a64(env) ? env->xregs[30] : env->regs[14];
 }
 
+static bool dc_shortdesc_warned;
 static QemuMutex dc_lock;
 static GHashTable *dc_pages;        /* page number -> DcPage */
 static GHashTable *dc_sites;
@@ -180,6 +181,33 @@ bool arm_exact_dcache_track_page(CPUState *cs, CPUTLBEntryFull *full,
     }
     if (!dc_cacheable(full->extra.arm.pte_attrs)) {
         dc_stat_nc_skipped++;
+        /*
+         * Say so once, loudly, when it is the *model* that cannot tell rather
+         * than the guest using Device memory. get_phys_addr_v6() - ARMv7
+         * without LPAE - never fills in cacheattrs, because short descriptors
+         * carry the memory type in TEX[2:0]/C/B (through PRRR/NMRR when
+         * SCTLR.TRE is set) and nothing else in QEMU needs it decoded. So
+         * pte_attrs is 0, which reads as Device, and every CPU access is
+         * skipped: a classic-arm32 run recorded 13 loads and 2 stores where
+         * the LPAE one recorded 259 million.
+         *
+         * Skipping is the safe direction - the model reports nothing rather
+         * than the wrong thing - but silence here looks exactly like a clean
+         * result, which is the failure this rig keeps having to design out.
+         */
+        if (!dc_shortdesc_warned) {
+            CPUARMState *env = cpu_env(cs);
+
+            if (!regime_using_lpae_format(env, arm_mmu_idx(env))) {
+                dc_shortdesc_warned = true;
+                qemu_log_mask(LOG_EXACT,
+                    "exact-dcache: this guest uses short descriptors, whose "
+                    "memory attributes QEMU does not decode (cacheattrs is "
+                    "never set by get_phys_addr_v6). Every CPU access looks "
+                    "like Device memory and is skipped, so D-cache results on "
+                    "a non-LPAE arm32 kernel mean nothing.\n");
+            }
+        }
         return false;
     }
     return true;
