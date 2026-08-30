@@ -77,6 +77,23 @@ typedef struct DcPage {
     DcLine line[DC_LINES_PER_PAGE_MAX];
 } DcPage;
 
+/*
+ * A 32-bit guest keeps its PC in r15, not in dc_pc(env), so every arm32 D-cache
+ * report came out attributed to pc=0x0 - the same defect the I-cache model had
+ * before ic_pc(). Without this an arm32 violation names neither the store nor
+ * the maintenance that discarded it, which makes it untriageable.
+ */
+static uint64_t dc_pc(CPUARMState *env)
+{
+    return is_a64(env) ? env->pc : env->regs[15];
+}
+
+/* Likewise the link register: x30 on AArch64, r14 on AArch32. */
+static uint64_t dc_lr(CPUARMState *env)
+{
+    return is_a64(env) ? env->xregs[30] : env->regs[14];
+}
+
 static QemuMutex dc_lock;
 static GHashTable *dc_pages;        /* page number -> DcPage */
 static GHashTable *dc_sites;
@@ -349,7 +366,7 @@ void arm_exact_dcache_cpu(CPUState *cs, uint64_t ram_addr, unsigned size,
             if (l->state == DC_DMA_WRITTEN && !l->reported) {
                 l->reported = true;
                 dc_stat_reports++;
-                if (!dc_site_seen(3, env->pc, 0)) {
+                if (!dc_site_seen(3, dc_pc(env), 0)) {
                     qemu_log_mask(LOG_EXACT,
                         "exact-dcache: VIOLATION CPU store into a line the "
                         "device wrote and nobody invalidated: the write "
@@ -357,17 +374,17 @@ void arm_exact_dcache_cpu(CPUState *cs, uint64_t ram_addr, unsigned size,
                         "the device's other bytes in it are lost\n"
                         "exact-dcache:   line ram 0x%" PRIx64 " cpu=%d pc=0x%"
                         PRIx64 " (called from 0x%" PRIx64 ")\n",
-                        (uint64_t)a, cs->cpu_index, (uint64_t)env->pc,
-                        (uint64_t)env->xregs[30]);
+                        (uint64_t)a, cs->cpu_index, (uint64_t)dc_pc(env),
+                        dc_lr(env));
                 }
             }
             if (l->ever_devwr) {
-                dc_note(a, 's', env->pc, l->state);
+                dc_note(a, 's', dc_pc(env), l->state);
             }
             if (l->inflight && !l->inflight_reported) {
                 l->inflight_reported = true;
                 dc_stat_exposed_reports++;
-                if (!dc_site_seen(6, env->pc, 0)) {
+                if (!dc_site_seen(6, dc_pc(env), 0)) {
                     qemu_log_mask(LOG_EXACT,
                         "exact-dcache: VIOLATION CPU store into a line that a "
                         "device is writing right now: the buffer is mapped by "
@@ -376,14 +393,14 @@ void arm_exact_dcache_cpu(CPUState *cs, uint64_t ram_addr, unsigned size,
                         "writes will be lost\n"
                         "exact-dcache:   line ram 0x%" PRIx64 " cpu=%d pc=0x%"
                         PRIx64 " (called from 0x%" PRIx64 ")\n",
-                        (uint64_t)a, cs->cpu_index, (uint64_t)env->pc,
-                        (uint64_t)env->xregs[30]);
+                        (uint64_t)a, cs->cpu_index, (uint64_t)dc_pc(env),
+                        dc_lr(env));
                 }
             }
             l->state = DC_DIRTY;
             l->ever_stored = true;
-            l->writer_pc = env->pc;
-            l->writer_lr = env->xregs[30];
+            l->writer_pc = dc_pc(env);
+            l->writer_lr = dc_lr(env);
             l->writer_cpu = cs->cpu_index;
             l->reported = false;
         } else {
@@ -391,15 +408,15 @@ void arm_exact_dcache_cpu(CPUState *cs, uint64_t ram_addr, unsigned size,
             if (l->state == DC_DMA_WRITTEN && !l->reported) {
                 l->reported = true;
                 dc_stat_reports++;
-                if (!dc_site_seen(4, env->pc, 0)) {
+                if (!dc_site_seen(4, dc_pc(env), 0)) {
                     qemu_log_mask(LOG_EXACT,
                         "exact-dcache: VIOLATION CPU load from a line the "
                         "device wrote and nobody invalidated: the cache may "
                         "still hold the old contents\n"
                         "exact-dcache:   line ram 0x%" PRIx64 " cpu=%d pc=0x%"
                         PRIx64 " (called from 0x%" PRIx64 ")\n",
-                        (uint64_t)a, cs->cpu_index, (uint64_t)env->pc,
-                        (uint64_t)env->xregs[30]);
+                        (uint64_t)a, cs->cpu_index, (uint64_t)dc_pc(env),
+                        dc_lr(env));
                 }
             }
         }
@@ -458,13 +475,13 @@ void arm_exact_dcache_maint(CPUState *cs, uint64_t ram_addr, bool all,
     }
     l = dc_line(p, ram_addr);
     if (l->ever_devwr || l->ever_stored) {
-        dc_note(ram_addr & ~(ram_addr_t)(DC_LINE - 1), kind, env->pc, l->state);
+        dc_note(ram_addr & ~(ram_addr_t)(DC_LINE - 1), kind, dc_pc(env), l->state);
     }
     if (kind == 'i') {
         dc_stat_inval++;
         if (l->state == DC_DIRTY) {
             dc_stat_reports++;
-            if (!dc_site_seen(5, env->pc, l->writer_lr)) {
+            if (!dc_site_seen(5, dc_pc(env), l->writer_lr)) {
                 qemu_log_mask(LOG_EXACT,
                     "exact-dcache: VIOLATION DC IVAC on a line with CPU data "
                     "that was never cleaned: the invalidate discards the "
@@ -472,7 +489,7 @@ void arm_exact_dcache_maint(CPUState *cs, uint64_t ram_addr, bool all,
                     "exact-dcache:   line ram 0x%" PRIx64 " invalidated by "
                     "cpu=%d pc=0x%" PRIx64 "; the store was by cpu=%u pc=0x%"
                     PRIx64 " (called from 0x%" PRIx64 ")\n",
-                    (uint64_t)ram_addr, cs->cpu_index, (uint64_t)env->pc,
+                    (uint64_t)ram_addr, cs->cpu_index, (uint64_t)dc_pc(env),
                     (unsigned)l->writer_cpu, l->writer_pc, l->writer_lr);
             }
         }
