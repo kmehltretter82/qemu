@@ -290,9 +290,33 @@ void arm_exact_llsc_pair(uint64_t ldex_pc, uint64_t stex_pc, uint64_t bad_pc,
  */
 const char *arm_exact_llsc_forbidden_a32(uint32_t insn)
 {
-    /* ISB lives in the unconditional space and has a fixed encoding. */
-    if ((insn & 0xfffffff0) == 0xf57ff060) {
-        return "an ISB";
+    /*
+     * The unconditional space (cond == 0xF) must be decoded first: its
+     * encodings overlap the normal groups. 0xf57ff05a - DMB ISH, which Go's
+     * 64-bit atomic add puts between LDREXD and STREXD - satisfies the
+     * load/store test below and was reported as a memory access until this
+     * existed. DMB and DSB are *permitted* between the pair; only ISB is not.
+     */
+    if ((insn & 0xf0000000) == 0xf0000000) {
+        if ((insn & 0xfffffff0) == 0xf57ff060) {
+            return "an ISB";
+        }
+        if ((insn & 0xfe000000) == 0xfa000000) {    /* BLX (immediate) */
+            return "a branch with link";
+        }
+        /*
+         * PLD/PLDW/PLI are software prefetches, which B2.12.5 does forbid.
+         * They are the 0xf5/0xf7 memory-hint encodings with bit 24 set.
+         */
+        if ((insn & 0xfd300000) == 0xf4100000 ||
+            (insn & 0xfd300000) == 0xf5100000) {
+            return "a software prefetch";
+        }
+        /*
+         * Everything else here - DMB, DSB, CPS, SETEND, NEON/VFP data
+         * processing - is either permitted or not something to guess about.
+         */
+        return NULL;
     }
     if ((insn & 0x0f000000) == 0x0f000000) {    /* SVC */
         return "an exception-generating instruction";
@@ -329,9 +353,6 @@ const char *arm_exact_llsc_forbidden_a32(uint32_t insn)
         return "a branch with link";
     }
     if ((insn & 0x0ff000f0) == 0x01200030) {    /* BLX (register) */
-        return "a branch with link";
-    }
-    if ((insn & 0xfe000000) == 0xfa000000) {    /* BLX (immediate) */
         return "a branch with link";
     }
     if ((insn & 0x0ff000f0) == 0x01200010) {    /* BX */
