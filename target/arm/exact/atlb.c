@@ -295,8 +295,23 @@ static uint32_t ex_asid_of(CPUARMState *env, ARMMMUIdx mmu_idx, uint64_t desc,
     /* TCR_ELx.A1 (bit 22) selects which TTBR holds the ASID */
     ttbr = extract64(tcr, 22, 1) ? env->cp15.ttbr1_el[regime_el(mmu_idx)]
                                  : env->cp15.ttbr0_el[regime_el(mmu_idx)];
-    bits = FIELD_EX64(GET_IDREG(&env_archcpu(env)->isar, ID_AA64MMFR0),
-                      ID_AA64MMFR0, ASIDBITS) == 2 ? 16 : 8;
+    /*
+     * Track all 16 bits even when the guest has been told it only has 8.
+     *
+     * A CPU with 16-bit ASIDs may report ASIDBits == 0, and the architecture
+     * then requires *software* to pass zero in ASID[15:8] - the hardware is
+     * entitled to use whatever it is given. That mismatch is the whole subject
+     * of c0900d15d31c ("arm64: Ensure bits ASID[15:8] are masked out when the
+     * kernel uses 8-bit ASIDs"), where Linux leaves its ASID generation number
+     * in those bits and two threads of one process end up with different
+     * 16-bit ASIDs after a rollover.
+     *
+     * Tracking 16 bits is therefore the adversarial-but-legal reading, and it
+     * costs nothing against a correct kernel: one that zeroes ASID[15:8] gives
+     * the same key either way. Forcing the *CPU* to 8-bit ASIDs, as the FVP
+     * profile did, removes the mismatch and makes the bug unreproducible.
+     */
+    bits = 16;
     return extract64(ttbr, 48, bits);
 }
 
