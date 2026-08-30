@@ -78,6 +78,33 @@ bool arm_exact_tlb_enabled;
                         (1ULL << 53) | (1ULL << 54) |                   \
                         (0xfULL << 55) | (0xfULL << 59))
 
+/*
+ * The same idea for short descriptors (ARMv7 without LPAE), where the bits sit
+ * somewhere else entirely - applying the long-descriptor mask to them reports
+ * every ordinary permission change as a missing TLBI. A boot of a non-LPAE
+ * kernel produced 11 such reports, all of them AP[1] (bit 11 of a section) and
+ * XN (bit 4), before this existed.
+ *
+ *   level 1, section:    4 XN, 11:10 AP[1:0], 15 AP[2], 9 impl-def
+ *   level 2, small page: 0 XN,  5:4  AP[1:0],  9 AP[2]
+ *   level 2, large page: 15 XN, 5:4  AP[1:0],  9 AP[2]
+ *
+ * Large and small pages share the AP positions, so one mask covers level 2 if
+ * it includes both XN bits.
+ */
+#define EX_BENIGN_MASK_V6_L1 ((1ULL << 4) | (3ULL << 10) | (1ULL << 15) | \
+                              (1ULL << 9))
+#define EX_BENIGN_MASK_V6_L2 ((1ULL << 0) | (3ULL << 4) | (1ULL << 9) |   \
+                              (1ULL << 15))
+
+static uint64_t ex_benign_mask(CPUARMState *env, ARMMMUIdx mmu_idx, int level)
+{
+    if (regime_using_lpae_format(env, mmu_idx)) {
+        return EX_BENIGN_MASK;
+    }
+    return level == 1 ? EX_BENIGN_MASK_V6_L1 : EX_BENIGN_MASK_V6_L2;
+}
+
 typedef struct ExKey {
     uint64_t va;
     uint32_t asid;      /* EX_ASID_GLOBAL for a global (nG == 0) mapping */
@@ -759,7 +786,7 @@ void arm_exact_tlb_leaf(CPUARMState *env, ARMMMUIdx mmu_idx,
         if (e->desc_pa == desc_pa && e->desc_val != desc_val) {
             uint64_t diff = e->desc_val ^ desc_val;
 
-            if (diff & ~EX_BENIGN_MASK) {
+            if (diff & ~ex_benign_mask(env, mmu_idx, level)) {
                 ex_stat_violations++;
                 ex_report(env, (desc_val & 1) && (e->desc_val & 1)
                           ? "live translation changed without invalidation"
