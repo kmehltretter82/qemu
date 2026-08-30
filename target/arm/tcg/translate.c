@@ -6839,7 +6839,16 @@ static void arm_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
     /* An LDREX still open when the block ends - see aarch64_tr_tb_stop(). */
     if (unlikely(dc->ldex_active)) {
         dc->ldex_active = false;
-        if (dc->ldex_bad_what) {
+        /*
+         * Only when the offending instruction *ended* the block. That is the
+         * case this report exists for - a BL or indirect branch between the
+         * pair, which terminates translation and hides the pair-form report.
+         * An instruction merely following the load is not evidence of
+         * anything: arm32's atomic64_read() is a bare LDREXD with no STREXD
+         * at all, so the pair never closes and the compiler's next stack
+         * spill was being reported as an unsafe LL/SC loop.
+         */
+        if (dc->ldex_bad_what && dc->ldex_bad_pc == dc->pc_curr) {
             arm_exact_llsc_pair(dc->ldex_pc, 0, dc->ldex_bad_pc,
                                 dc->ldex_bad_what);
         }
