@@ -130,7 +130,8 @@ typedef struct ExEntry {
 
 
 typedef struct ExDesc {
-    void *host;                 /* host pointer to the eight byte descriptor */
+    void *host;                 /* host pointer to the descriptor */
+    uint8_t size;               /* 8 for a long descriptor, 4 for a short one */
     uint64_t last_val;
     uint64_t broke_seq;         /* ex_tlbi_seq + 1 when cleared, 0 if live */
     uint64_t broke_val;         /* what it held before it was cleared */
@@ -267,6 +268,11 @@ static GHashTable *ex_tab_of(unsigned cpu)
  * to have had it (icache.c, then dcache.c), which is why it was found by
  * auditing all of them for env->pc rather than waiting for the next report.
  */
+static unsigned ex_desc_size(CPUARMState *env, ARMMMUIdx mmu_idx)
+{
+    return regime_using_lpae_format(env, mmu_idx) ? 8 : 4;
+}
+
 static uint64_t ex_pc(CPUARMState *env)
 {
     return is_a64(env) ? env->pc : env->regs[15];
@@ -442,14 +448,24 @@ static void ex_resolve_locked(CPUState *cs)
     }
     p->valid = false;
     end = p->ram_addr + p->size;
-    for (a = p->ram_addr & ~7ULL; a < end; a += 8) {
+    /*
+     * Step by four, not eight: a short descriptor (ARMv7 without LPAE) is four
+     * bytes, and the kernel writes two adjacent ones with a single 64-bit
+     * store. Reading that back as one eight-byte descriptor produced values
+     * like 0x79945e7f79944e7f - two entries glued together - and reported a
+     * break-before-make violation against a descriptor that had not changed,
+     * tagged "(contiguous block)" because bit 52 landed inside the neighbour.
+     * A long-descriptor table has nothing at the odd four-byte offsets, so
+     * the extra lookups simply miss.
+     */
+    for (a = p->ram_addr & ~3ULL; a < end; a += 4) {
         ExDesc *d = g_hash_table_lookup(ex_desc, GUINT_TO_POINTER(a));
         uint64_t newv, old;
 
         if (!d) {
             continue;           /* not a descriptor we have ever walked */
         }
-        newv = ldq_le_p(d->host);
+        newv = d->size == 4 ? ldl_le_p(d->host) : ldq_le_p(d->host);
         old = d->last_val;
         if (newv == old) {
             continue;
@@ -481,7 +497,8 @@ static void ex_resolve_locked(CPUState *cs)
              */
             if (d->broke_seq && d->broke_seq == ex_tlbi_seq + 1 &&
                 (((d->broke_val ^ newv) & ~EX_BENIGN_MASK) ||
-                 ((d->broke_val | newv) & (1ULL << 52)))) {
+                 (d->size == 8 &&
+                  ((d->broke_val | newv) & (1ULL << 52))))) {
                 ex_stat_bbm++;
                 ex_stat_violations++;
                 if (!ex_site_seen(1, d->broke_pc, p->pc)) {
@@ -495,7 +512,8 @@ static void ex_resolve_locked(CPUState *cs)
                         "%s\n",
                         (uint64_t)a, d->broke_cpu, d->broke_pc,
                         cs->cpu_index, p->pc, d->broke_val, newv,
-                        ((d->broke_val | newv) & (1ULL << 52))
+                        (d->size == 8 &&
+                         ((d->broke_val | newv) & (1ULL << 52)))
                         ? " (contiguous block)" : "");
                 }
             }
@@ -507,7 +525,7 @@ static void ex_resolve_locked(CPUState *cs)
 
 /* remember a descriptor we have walked, and make stores to its page trap */
 static ram_addr_t ex_desc_note(void *host, uint64_t val, const ExKey *key,
-                               uint64_t desc_pa)
+                               uint64_t desc_pa, unsigned size)
 {
     MemoryRegion *mr;
     ram_addr_t offset, ra;
@@ -525,6 +543,7 @@ static ram_addr_t ex_desc_note(void *host, uint64_t val, const ExKey *key,
     d = g_hash_table_lookup(ex_desc, GUINT_TO_POINTER(ra));
     if (d) {
         d->last_val = val;
+        d->size = size;
         d->key = *key;
         d->desc_pa = desc_pa;
         d->have_key = true;
@@ -532,6 +551,7 @@ static ram_addr_t ex_desc_note(void *host, uint64_t val, const ExKey *key,
     }
     d = g_new0(ExDesc, 1);
     d->host = host;
+    d->size = size;
     d->last_val = val;
     d->key = *key;
     d->desc_pa = desc_pa;
@@ -716,7 +736,7 @@ void arm_exact_tlb_table(CPUARMState *env, ARMMMUIdx mmu_idx,
 
     qemu_mutex_lock(&ex_lock);
     ex_resolve_locked(env_cpu(env));
-    ra_desc = ex_desc_note(host, desc_val, &key, desc_pa);
+    ra_desc = ex_desc_note(host, desc_val, &key, desc_pa, ex_desc_size(env, mmu_idx));
     tab = ex_tab_of(env_cpu(env)->cpu_index);
     if (!tab) {
         qemu_mutex_unlock(&ex_lock);
@@ -800,7 +820,7 @@ void arm_exact_tlb_leaf(CPUARMState *env, ARMMMUIdx mmu_idx,
 
     qemu_mutex_lock(&ex_lock);
     ex_resolve_locked(env_cpu(env));
-    ex_desc_note(host, desc_val, &key, desc_pa);
+    ex_desc_note(host, desc_val, &key, desc_pa, ex_desc_size(env, mmu_idx));
     ex_tab = ex_tab_of(env_cpu(env)->cpu_index);
     if (!ex_tab) {
         qemu_mutex_unlock(&ex_lock);
