@@ -373,7 +373,19 @@ static void n3ds_sysctl_reset(DeviceState *dev)
     N3DSSysctlState *s = N3DS_SYSCTL(dev);
 
     memset(s->cfg9_regs, 0, sizeof(s->cfg9_regs));
-    memset(s->cfg_regs, 0, sizeof(s->cfg_regs));
+    /*
+     * CFG_BOOTENV (0x10010000) lives in the always-on backup domain on the
+     * console: it survives a warm reset / MCU reboot and is cleared only by a
+     * true power-off. Preserve it across the guest reset so Luma3DS's
+     * coldboot-vs-reboot autoboot decision behaves like hardware (a fresh
+     * QEMU launch zero-inits the state, i.e. coldboot; a `-M n3ds` reboot
+     * keeps whatever the guest left).
+     */
+    {
+        uint32_t bootenv = regs_read(s->cfg_regs, 0x00, 4);
+        memset(s->cfg_regs, 0, sizeof(s->cfg_regs));
+        regs_write(s->cfg_regs, 0x00, bootenv, 4);
+    }
     memset(s->cfg11_regs, 0, sizeof(s->cfg11_regs));
     memset(s->pdn_regs, 0, sizeof(s->pdn_regs));
     memset(s->fcramcfg_regs, 0, sizeof(s->fcramcfg_regs));
