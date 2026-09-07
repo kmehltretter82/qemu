@@ -20,7 +20,11 @@ Modelled hardware
 - TMIO SD/MMC host (``0x10006000``) with the SD card on port 0 and the
   eMMC "NAND" on port 1
 - Three I2C controllers and the power-management MCU (power off,
-  reboot, RTC, battery)
+  reboot, RTC, battery, and the 200 bytes of free storage behind
+  registers ``0x60``/``0x61`` that Luma3DS keeps its boot configuration
+  in; ``-global n3ds-mcu.free-regs=FILE`` backs them with a file so they
+  persist across runs like the battery-backed originals, and Luma3DS
+  then boots without its first-boot configuration menu)
 - HID pad register, driven from the keyboard: A=X, B=Z, X=S, Y=A,
   L=Q, R=W, Start=Enter, Select=Backspace, D-pad=cursor keys
 - LCD/PDC framebuffer controllers with a two-screen console (top

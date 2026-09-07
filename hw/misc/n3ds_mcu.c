@@ -5,7 +5,10 @@
  * Only the pieces early firmware and Linux rely on are modelled: the
  * register file with auto-increment, power off / reboot through
  * register 0x20, LCD/backlight power (0x22), LEDs, battery level, RTC
- * (host wall-clock, BCD) and the interrupt status/mask words.
+ * (host wall-clock, BCD), the interrupt status/mask words and the 200
+ * bytes of free storage behind registers 0x60/0x61 that Luma3DS keeps
+ * its boot configuration in (the "free-regs" property backs them with a
+ * file, so they survive like the battery-backed originals).
  *
  * Documentation: 3dbrew I2C_Registers ("MCU" section).
  *
@@ -15,7 +18,9 @@
 #include "qemu/osdep.h"
 #include "qemu/bswap.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/i2c/i2c.h"
+#include "qapi/error.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
@@ -38,6 +43,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(N3DSMcuState, N3DS_MCU)
 #define MCU_REG_LED_STATE   0x2D
 #define MCU_REG_RTC_SEC     0x30
 #define MCU_REG_RTC_YEAR    0x36
+#define MCU_REG_FREE_INDEX  0x60  /* offset into the free storage */
+#define MCU_REG_FREE_DATA   0x61  /* the storage itself, offset auto-increments */
+
+#define MCU_FREE_SIZE       200
 
 #define POWER_CTL_POWEROFF  0x01
 #define POWER_CTL_REBOOT    0x04
@@ -49,6 +58,17 @@ struct N3DSMcuState {
     uint8_t reg;
     bool addr_pending;
     qemu_irq irq;                /* MCU interrupt line (GIC 0x71 via GPIO) */
+
+    /*
+     * Free storage (3dbrew: 0x60 selects the offset, every access to 0x61
+     * reads or writes the byte there and moves on). Battery-backed on the
+     * console, so a device reset leaves it alone; the optional file makes
+     * it persistent across QEMU runs as well.
+     */
+    uint8_t free[MCU_FREE_SIZE];
+    uint8_t free_idx;
+    bool free_dirty;
+    char *free_path;
 };
 
 /* Interrupt status bits 24-31 (LCD/backlight power events) are not maskable */
@@ -115,6 +135,21 @@ static void n3ds_mcu_update_rtc(N3DSMcuState *s)
     s->regs[MCU_REG_RTC_YEAR] = to_bcd(tm.tm_year % 100);
 }
 
+static void n3ds_mcu_free_flush(N3DSMcuState *s)
+{
+    GError *err = NULL;
+
+    if (!s->free_dirty || !s->free_path) {
+        return;
+    }
+    s->free_dirty = false;
+    if (!g_file_set_contents(s->free_path, (const gchar *)s->free,
+                             sizeof(s->free), &err)) {
+        qemu_log("n3ds-mcu: cannot write %s: %s\n", s->free_path, err->message);
+        g_error_free(err);
+    }
+}
+
 static int n3ds_mcu_event(I2CSlave *i2c, enum i2c_event event)
 {
     N3DSMcuState *s = N3DS_MCU(i2c);
@@ -126,6 +161,9 @@ static int n3ds_mcu_event(I2CSlave *i2c, enum i2c_event event)
     case I2C_START_RECV:
         n3ds_mcu_update_rtc(s);
         break;
+    case I2C_FINISH:
+        n3ds_mcu_free_flush(s);
+        break;
     default:
         break;
     }
@@ -135,11 +173,25 @@ static int n3ds_mcu_event(I2CSlave *i2c, enum i2c_event event)
 static uint8_t n3ds_mcu_recv(I2CSlave *i2c)
 {
     N3DSMcuState *s = N3DS_MCU(i2c);
-    uint8_t v = s->regs[s->reg];
+    uint8_t v;
 
-    if (s->reg >= MCU_REG_IRQ_STATUS && s->reg < MCU_REG_IRQ_STATUS + 4) {
+    switch (s->reg) {
+    case MCU_REG_FREE_INDEX:
+        v = s->free_idx;
+        break;
+    case MCU_REG_FREE_DATA:
+        /* the offset moves, the register does not */
+        v = s->free[s->free_idx];
+        s->free_idx = (s->free_idx + 1) % MCU_FREE_SIZE;
+        return v;
+    case MCU_REG_IRQ_STATUS ... MCU_REG_IRQ_STATUS + 3:
+        v = s->regs[s->reg];
         s->regs[s->reg] = 0;
         n3ds_mcu_update_irq(s);
+        break;
+    default:
+        v = s->regs[s->reg];
+        break;
     }
     s->reg++;
     return v;
@@ -174,6 +226,14 @@ static int n3ds_mcu_send(I2CSlave *i2c, uint8_t data)
     case MCU_REG_LCD_POWER:
         n3ds_mcu_lcd_power(s, data);
         break;
+    case MCU_REG_FREE_INDEX:
+        s->free_idx = data % MCU_FREE_SIZE;
+        break;
+    case MCU_REG_FREE_DATA:
+        s->free[s->free_idx] = data;
+        s->free_idx = (s->free_idx + 1) % MCU_FREE_SIZE;
+        s->free_dirty = true;
+        return 0;
     default:
         s->regs[s->reg] = data;
         break;
@@ -189,10 +249,27 @@ static void n3ds_mcu_init(Object *obj)
     qdev_init_gpio_out(DEVICE(obj), &s->irq, 1);
 }
 
+static void n3ds_mcu_realize(DeviceState *dev, Error **errp)
+{
+    N3DSMcuState *s = N3DS_MCU(dev);
+    g_autofree gchar *data = NULL;
+    gsize len = 0;
+
+    if (!s->free_path || !g_file_test(s->free_path, G_FILE_TEST_EXISTS)) {
+        return;
+    }
+    if (!g_file_get_contents(s->free_path, &data, &len, NULL)) {
+        error_setg(errp, "n3ds-mcu: cannot read free-regs file %s", s->free_path);
+        return;
+    }
+    memcpy(s->free, data, MIN(len, sizeof(s->free)));
+}
+
 static void n3ds_mcu_reset(DeviceState *dev)
 {
     N3DSMcuState *s = N3DS_MCU(dev);
 
+    /* s->free is battery-backed and survives a reset */
     memset(s->regs, 0, sizeof(s->regs));
     s->regs[MCU_REG_VERSION_HI] = 0x03;
     s->regs[MCU_REG_VERSION_LO] = 0x05;
@@ -202,8 +279,13 @@ static void n3ds_mcu_reset(DeviceState *dev)
     memset(&s->regs[MCU_REG_IRQ_MASK], 0xFF, 4);
     s->reg = 0;
     s->addr_pending = false;
+    s->free_idx = 0;
     n3ds_mcu_update_rtc(s);
 }
+
+static const Property n3ds_mcu_properties[] = {
+    DEFINE_PROP_STRING("free-regs", N3DSMcuState, free_path),
+};
 
 static void n3ds_mcu_class_init(ObjectClass *klass, const void *data)
 {
@@ -213,7 +295,9 @@ static void n3ds_mcu_class_init(ObjectClass *klass, const void *data)
     k->event = n3ds_mcu_event;
     k->recv = n3ds_mcu_recv;
     k->send = n3ds_mcu_send;
+    dc->realize = n3ds_mcu_realize;
     device_class_set_legacy_reset(dc, n3ds_mcu_reset);
+    device_class_set_props(dc, n3ds_mcu_properties);
 }
 
 static const TypeInfo n3ds_mcu_info = {
