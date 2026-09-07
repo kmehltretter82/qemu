@@ -48,6 +48,7 @@ struct N3DSSysctlState {
     MemoryRegion *boot9_lock;    /* reads-as-zero overlay on the protected boot ROM halves */
     MemoryRegion *boot11_lock;
     bool luma_state;             /* reset to the state Luma3DS leaves (stub ROMs) */
+    bool cfg_reset_once;
     qemu_irq socmode_irq;
 
     uint8_t cfg9_regs[0x1000];
@@ -56,6 +57,7 @@ struct N3DSSysctlState {
     uint8_t pdn_regs[0x1000];
     uint8_t fcramcfg_regs[0x1000];
     uint32_t socinfo;
+    uint32_t initial_bootenv;    /* test a warm Luma/HOS entry on first reset */
     uint8_t otp_data[0x100];     /* console-unique OTP (encrypted, as read) */
     uint8_t twl_console_id[8];   /* 0x10012100 */
 };
@@ -382,9 +384,12 @@ static void n3ds_sysctl_reset(DeviceState *dev)
      * keeps whatever the guest left).
      */
     {
-        uint32_t bootenv = regs_read(s->cfg_regs, 0x00, 4);
+        uint32_t bootenv = s->cfg_reset_once ?
+            regs_read(s->cfg_regs, 0x00, 4) : s->initial_bootenv;
+
         memset(s->cfg_regs, 0, sizeof(s->cfg_regs));
         regs_write(s->cfg_regs, 0x00, bootenv, 4);
+        s->cfg_reset_once = true;
     }
     memset(s->cfg11_regs, 0, sizeof(s->cfg11_regs));
     memset(s->pdn_regs, 0, sizeof(s->pdn_regs));
@@ -454,6 +459,7 @@ static const Property n3ds_sysctl_properties[] = {
                      TYPE_MEMORY_REGION, MemoryRegion *),
     /* CFG11_SOCINFO: 1 = CTR, 3 = LGR1 (New 3DS proto), 7 = LGR2 (New 3DS) */
     DEFINE_PROP_UINT32("socinfo", N3DSSysctlState, socinfo, 7),
+    DEFINE_PROP_UINT32("bootenv", N3DSSysctlState, initial_bootenv, 0),
     DEFINE_PROP_LINK("boot9-lock", N3DSSysctlState, boot9_lock,
                      TYPE_MEMORY_REGION, MemoryRegion *),
     DEFINE_PROP_LINK("boot11-lock", N3DSSysctlState, boot11_lock,
