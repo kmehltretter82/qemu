@@ -45,6 +45,22 @@ static int gic_post_load(void *opaque, int version_id)
     GICState *s = (GICState *)opaque;
     ARMGICCommonClass *c = ARM_GIC_COMMON_GET_CLASS(s);
 
+    if (s->revision == REV_11MPCORE) {
+        int irq;
+
+        for (irq = 0; irq < GIC_NR_SGIS; irq++) {
+            /*
+             * Older QEMU versions stored a single model bit for each SGI.
+             * The line-level byte was unused for SGIs, so it doubles as the
+             * per-source model mask without changing the migration format.
+             */
+            if (!s->irq_state[irq].sgi_model &&
+                GIC_DIST_TEST_MODEL(irq)) {
+                s->irq_state[irq].sgi_model = (1U << s->num_cpu) - 1;
+            }
+        }
+    }
+
     if (c->post_load) {
         c->post_load(s);
     }
@@ -330,6 +346,10 @@ static void arm_gic_common_reset_hold(Object *obj, ResetType type)
     for (i = 0; i < GIC_NR_SGIS; i++) {
         GIC_DIST_SET_ENABLED(i, ALL_CPU_MASK);
         GIC_DIST_SET_EDGE_TRIGGER(i);
+        if (s->sgi_model_reset_cpu0 & (1U << i)) {
+            s->irq_state[i].sgi_model = 1;
+            GIC_DIST_SET_MODEL(i);
+        }
     }
 
     for (i = 0; i < ARRAY_SIZE(s->priority2); i++) {
@@ -421,6 +441,8 @@ static const Property arm_gic_common_properties[] = {
     DEFINE_PROP_UINT32("num-priority-bits", GICState, n_prio_bits, 8),
     DEFINE_PROP_UINT8("priority-reset", GICState, priority_reset, 0),
     DEFINE_PROP_UINT8("target-reset", GICState, target_reset, 0),
+    DEFINE_PROP_UINT16("sgi-model-reset-cpu0", GICState,
+                       sgi_model_reset_cpu0, 0),
     DEFINE_PROP_UINT64("pending-reset", GICState, pending_reset, 0),
 };
 

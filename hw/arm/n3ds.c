@@ -550,6 +550,12 @@ static void n3ds_init(MachineState *machine)
             /* and every shared interrupt pointed at core 0 */
             object_property_set_uint(gic, "target-reset", 0x01, &error_abort);
             /*
+             * The chainloader leaves CPU0's SGIs in 1:N mode while the
+             * secondary CPUs retain the N:N reset mode.
+             */
+            object_property_set_uint(gic, "sgi-model-reset-cpu0", 0xffff,
+                                     &error_abort);
+            /*
              * The display controllers, the PXI sync line and the MCU's I2C
              * bus have all pulsed by the time we take over, and nothing has
              * acknowledged them: ids 40-43, 80 and 85 read pending, the same

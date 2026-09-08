@@ -56,7 +56,11 @@ typedef struct gic_irq_state {
     uint8_t enabled;
     uint8_t pending;
     uint8_t active;
-    uint8_t level;
+    union {
+        uint8_t level;
+        /* ARM11 MPCore SGIs use this byte as a source-CPU model mask. */
+        uint8_t sgi_model;
+    };
     bool model; /* 0 = N:N, 1 = 1:N */
     bool edge_trigger; /* true: edge-triggered, false: level-triggered  */
     uint8_t group;
@@ -102,6 +106,7 @@ struct GICState {
     uint32_t n_prio_bits;
     uint8_t priority_reset;   /* what a board's firmware leaves behind */
     uint8_t target_reset;
+    uint16_t sgi_model_reset_cpu0;
     uint64_t pending_reset;   /* shared interrupts left asserted at hand-off */
 
     /* If we present the GICv2 without security extensions to a guest,

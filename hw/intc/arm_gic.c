@@ -596,6 +596,34 @@ static inline uint32_t gic_clear_pending_sgi(GICState *s, int irq, int cpu)
     return ret;
 }
 
+static uint32_t gic_clear_pending_sgi_11mpcore(GICState *s, int irq,
+                                               int cpu)
+{
+    uint8_t src_mask = s->sgi_pending[irq][cpu];
+    int src = ctz32(src_mask);
+    int target;
+
+    assert(src_mask != 0);
+
+    if (s->irq_state[irq].sgi_model & (1U << src)) {
+        /* 1:N: an acknowledge on one target clears this sender's SGI on all. */
+        for (target = 0; target < s->num_cpu; target++) {
+            s->sgi_pending[irq][target] &= ~(1U << src);
+            if (s->sgi_pending[irq][target] == 0) {
+                GIC_DIST_CLEAR_PENDING(irq, 1U << target);
+            }
+        }
+    } else {
+        /* N:N: each target acknowledges the sender's SGI independently. */
+        s->sgi_pending[irq][cpu] &= ~(1U << src);
+        if (s->sgi_pending[irq][cpu] == 0) {
+            GIC_DIST_CLEAR_PENDING(irq, 1U << cpu);
+        }
+    }
+
+    return irq | (src << 10);
+}
+
 uint32_t gic_acknowledge_irq(GICState *s, int cpu, MemTxAttrs attrs)
 {
     int ret, irq;
@@ -624,8 +652,12 @@ uint32_t gic_acknowledge_irq(GICState *s, int cpu, MemTxAttrs attrs)
         /* Clear pending flags for both level and edge triggered interrupts.
          * Level triggered IRQs will be reasserted once they become inactive.
          */
-        gic_clear_pending(s, irq, cpu);
-        ret = irq;
+        if (irq < GIC_NR_SGIS) {
+            ret = gic_clear_pending_sgi_11mpcore(s, irq, cpu);
+        } else {
+            gic_clear_pending(s, irq, cpu);
+            ret = irq;
+        }
     } else {
         if (irq < GIC_NR_SGIS) {
             ret = gic_clear_pending_sgi(s, irq, cpu);
@@ -1114,7 +1146,12 @@ static uint8_t gic_dist_readb(void *opaque, hwaddr offset, MemTxAttrs attrs)
                 continue; /* Ignore Non-secure access of Group0 IRQ */
             }
 
-            if (GIC_DIST_TEST_MODEL(irq + i)) {
+            if (s->revision == REV_11MPCORE &&
+                irq + i < GIC_NR_SGIS) {
+                if (s->irq_state[irq + i].sgi_model & (1U << cpu)) {
+                    res |= (1 << (i * 2));
+                }
+            } else if (GIC_DIST_TEST_MODEL(irq + i)) {
                 res |= (1 << (i * 2));
             }
             if (GIC_DIST_TEST_EDGE_TRIGGER(irq + i)) {
@@ -1446,7 +1483,15 @@ static void gic_dist_writeb(void *opaque, hwaddr offset,
             }
 
             if (s->revision == REV_11MPCORE) {
-                if (value & (1 << (i * 2))) {
+                if (irq + i < GIC_NR_SGIS) {
+                    if (value & (1 << (i * 2))) {
+                        s->irq_state[irq + i].sgi_model |= 1U << cpu;
+                    } else {
+                        s->irq_state[irq + i].sgi_model &= ~(1U << cpu);
+                    }
+                    s->irq_state[irq + i].model =
+                        s->irq_state[irq + i].sgi_model != 0;
+                } else if (value & (1 << (i * 2))) {
                     GIC_DIST_SET_MODEL(irq + i);
                 } else {
                     GIC_DIST_CLEAR_MODEL(irq + i);
