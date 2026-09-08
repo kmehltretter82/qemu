@@ -771,9 +771,14 @@ static void gic_set_cpu_control(GICState *s, int cpu, uint32_t value,
 
 static uint8_t gic_get_running_priority(GICState *s, int cpu, MemTxAttrs attrs)
 {
-    if ((s->revision != REV_11MPCORE) && (s->running_priority[cpu] > 0xff)) {
-        /* Idle priority */
-        return 0xff;
+    if (s->running_priority[cpu] > 0xff) {
+        /*
+         * ARM11 MPCore reports the largest implemented priority value when
+         * idle. Later GIC revisions permit and use the architectural 0xff
+         * idle value even when they implement fewer than eight priority bits.
+         */
+        return s->revision == REV_11MPCORE ?
+               gic_fullprio_mask(s, cpu) & 0xff : 0xff;
     }
 
     if (gic_cpu_ns_access(s, cpu, attrs)) {
@@ -1734,7 +1739,12 @@ static MemTxResult gic_cpu_write(GICState *s, int cpu, int offset,
                 s->abpr[cpu] = MAX(value & 0x7, GIC_MIN_ABPR);
             }
         } else {
-            int min_bpr = gic_is_vcpu(cpu) ? GIC_VIRT_MIN_BPR : GIC_MIN_BPR;
+            /*
+             * The 11MPCore TRM says a BPR value outside b011..b111 has the
+             * same effect as writing b011. Virtual interfaces have their own
+             * architectural minimum.
+             */
+            int min_bpr = gic_min_bpr(s, cpu);
             s->bpr[cpu] = MAX(value & 0x7, min_bpr);
         }
         break;

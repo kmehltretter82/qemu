@@ -183,6 +183,20 @@ static inline bool gic_is_vcpu(int cpu)
     return cpu >= GIC_NCPU;
 }
 
+static inline int gic_min_bpr(GICState *s, int cpu)
+{
+    if (gic_is_vcpu(cpu)) {
+        return GIC_VIRT_MIN_BPR;
+    }
+
+    /* ARM11 MPCore clamps BPR to its implemented priority width. */
+    if (s->revision == REV_11MPCORE) {
+        return MAX(7 - (int)s->n_prio_bits, GIC_MIN_BPR);
+    }
+
+    return GIC_MIN_BPR;
+}
+
 static inline int gic_get_vcpu_real_id(int cpu)
 {
     return (cpu >= GIC_NCPU) ? (cpu - GIC_NCPU) : cpu;
