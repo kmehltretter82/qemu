@@ -7,16 +7,29 @@
 #include "qemu/osdep.h"
 #include "libqtest-single.h"
 
+#define N3DS_GIC_CPU_BASE 0x17e00100
 #define N3DS_GIC_DIST_BASE 0x17e01000
+
+#define GICC_BPR 0x08
+#define GICC_RPR 0x14
 
 static char *guest_error_log;
 
+static void test_cpu_priority_registers(void)
+{
+    /* ARM11 MPCore implements four priority bits. */
+    g_assert_cmphex(readl(N3DS_GIC_CPU_BASE + GICC_BPR), ==, 0x03);
+    g_assert_cmphex(readl(N3DS_GIC_CPU_BASE + GICC_RPR), ==, 0xf0);
+
+    /* BPR values below the implemented minimum behave as the minimum. */
+    writel(N3DS_GIC_CPU_BASE + GICC_BPR, 0);
+    g_assert_cmphex(readl(N3DS_GIC_CPU_BASE + GICC_BPR), ==, 0x03);
+    writel(N3DS_GIC_CPU_BASE + GICC_BPR, 7);
+    g_assert_cmphex(readl(N3DS_GIC_CPU_BASE + GICC_BPR), ==, 0x07);
+}
+
 static void test_active_registers(void)
 {
-    g_autofree char *contents = NULL;
-    gsize length;
-    GError *error = NULL;
-
     /* The implemented active registers are read-only. */
     g_assert_cmphex(readl(N3DS_GIC_DIST_BASE + 0x300), ==, 0);
     writel(N3DS_GIC_DIST_BASE + 0x300, 0xffffffff);
@@ -29,19 +42,15 @@ static void test_active_registers(void)
     g_assert_cmphex(readl(N3DS_GIC_DIST_BASE + 0x380), ==, 0);
     writel(N3DS_GIC_DIST_BASE + 0x3fc, 0xffffffff);
     g_assert_cmphex(readl(N3DS_GIC_DIST_BASE + 0x3fc), ==, 0);
-
-    /* Stop QEMU to flush its -D output before checking the log. */
-    qtest_end();
-    g_assert_true(g_file_get_contents(guest_error_log, &contents, &length,
-                                      &error));
-    g_assert_no_error(error);
-    g_assert_cmpuint(length, ==, 0);
 }
 
 int main(int argc, char **argv)
 {
     g_autofree char *args = NULL;
+    g_autofree char *contents = NULL;
     g_autofree char *quoted_log = NULL;
+    gsize length;
+    GError *error = NULL;
     int log_fd;
     int ret;
 
@@ -55,8 +64,17 @@ int main(int argc, char **argv)
                            "-d guest_errors -D %s", quoted_log);
 
     qtest_start(args);
+    qtest_add_func("/n3ds/gic/cpu-priority-registers",
+                   test_cpu_priority_registers);
     qtest_add_func("/n3ds/gic/active-registers", test_active_registers);
     ret = g_test_run();
+
+    /* Stop QEMU to flush its -D output before checking the log. */
+    qtest_end();
+    g_assert_true(g_file_get_contents(guest_error_log, &contents, &length,
+                                      &error));
+    g_assert_no_error(error);
+    g_assert_cmpuint(length, ==, 0);
 
     unlink(guest_error_log);
     g_free(guest_error_log);
