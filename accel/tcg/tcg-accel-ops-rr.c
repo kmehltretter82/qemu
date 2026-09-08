@@ -281,7 +281,8 @@ static void *rr_cpu_thread_fn(void *arg)
 
                 bql_unlock();
                 if (icount_enabled()) {
-                    icount_prepare_for_run(cpu, cpu_budget);
+                    uint32_t w = cpu->tcg_exec_weight ? cpu->tcg_exec_weight : 1;
+                    icount_prepare_for_run(cpu, cpu_budget * w);
                 }
                 r = tcg_cpu_exec(cpu);
                 if (icount_enabled()) {

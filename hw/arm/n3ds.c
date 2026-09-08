@@ -381,6 +381,10 @@ static void n3ds_init(MachineState *machine)
         } else if (i >= 2) {
             ARM_CPU(cpu)->reset_sctlr = 0x00056078;
         }
+        /* ARM11 MPCore runs at 268 MHz vs the ARM9 at 134 MHz: give it
+         * twice the per-round icount budget so the two interleave in
+         * roughly the right ratio (only takes effect under -icount). */
+        CPU(cpu)->tcg_exec_weight = 2;
         qdev_realize(DEVICE(cpu), NULL, &error_fatal);
     }
     qdev_realize(DEVICE(cluster), NULL, &error_fatal);
@@ -399,6 +403,7 @@ static void n3ds_init(MachineState *machine)
                              &error_abort);
     s->arm9.tcm_region_changed = n3ds_arm9_tcm_changed;
     s->arm9.tcm_region_opaque = s;
+    CPU(&s->arm9)->tcg_exec_weight = 1;   /* 134 MHz reference */
     qdev_realize(DEVICE(&s->arm9), NULL, &error_fatal);
     qdev_realize(DEVICE(cluster), NULL, &error_fatal);
 

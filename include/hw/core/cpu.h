@@ -508,6 +508,14 @@ struct CPUState {
     unsigned singlestep_flags;
     int64_t icount_budget;
     int64_t icount_extra;
+    /*
+     * TCG per-CPU execution weight for heterogeneous machines: under
+     * icount the RR scheduler gives this CPU a budget scaled by
+     * tcg_exec_weight, modelling different core clocks (e.g. the 3DS
+     * ARM11 at 268 MHz vs the ARM9 at 134 MHz -> weights 2 and 1).
+     * 0 means "unset", treated as 1.
+     */
+    uint32_t tcg_exec_weight;
     uint64_t random_seed;
     sigjmp_buf jmp_env;
 
