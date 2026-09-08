@@ -234,6 +234,7 @@ static void arm11mpcore_initfn(Object *obj)
      * (c0,c0,2 reads the MIDR), TLBTR 0x800, no IFAR, no cache lockdown */
     cpu->ctr = 0x1d152152;
     cpu->tcmtr_reads_midr = true;
+    cpu->id_pfr2_undef = true;
     cpu->tlbtr = 0x00000800;
     /* v6 debug architecture: 6 breakpoints, 2 watchpoints, 2 context ids */
     cpu->isar.dbgdidr = 0x15110005;

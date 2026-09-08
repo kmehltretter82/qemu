@@ -309,6 +309,13 @@ static CPAccessResult access_el3_aa32ns(CPUARMState *env,
     return CP_ACCESS_OK;
 }
 
+static CPAccessResult access_undefined(CPUARMState *env,
+                                       const ARMCPRegInfo *ri,
+                                       bool isread)
+{
+    return CP_ACCESS_UNDEFINED;
+}
+
 /*
  * Some secure-only AArch32 registers trap to EL3 if used from
  * Secure EL1 (but are just ordinary UNDEF in other non-EL3 contexts).
@@ -7537,6 +7544,17 @@ void register_cp_regs_for_features(ARMCPU *cpu)
             }
         } else {
             define_arm_cp_regs(cpu, id_pre_v8_midr_cp_reginfo);
+            if (cpu->id_pfr2_undef) {
+                ARMCPRegInfo id_pfr2_undef = {
+                    .name = "ID_PFR2",
+                    .cp = 15, .crn = 0, .crm = 3,
+                    .opc1 = 0, .opc2 = 4,
+                    .access = PL1_R, .accessfn = access_undefined,
+                    .type = ARM_CP_CONST | ARM_CP_OVERRIDE,
+                };
+
+                define_one_arm_cp_reg(cpu, &id_pfr2_undef);
+            }
         }
         define_arm_cp_regs(cpu, id_cp_reginfo);
         /*

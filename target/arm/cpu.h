@@ -1124,12 +1124,15 @@ struct ArchCPU {
     /*
      * Values of the TCM Type (c0,c0,2) and TLB Type (c0,c0,3) registers;
      * tcmtr_reads_midr: this core returns the MIDR for c0,c0,2.
+     * id_pfr2_undef: this pre-v8 core takes an undefined instruction for
+     * the later ID_PFR2 encoding rather than treating it as RAZ.
      * no_ifar / no_cache_lockdown: the core has no IFAR (c6,c0,2) or
      * cache lockdown registers (c9,c0,*); accesses are UNDEFINED.
      */
     uint32_t tcmtr;
     uint32_t tlbtr;
     bool tcmtr_reads_midr;
+    bool id_pfr2_undef;
     /*
      * Pre-v7 L1 cache lockdown, which is implementation defined. A core
      * that has no instruction-side lockdown register takes an undefined
