@@ -805,14 +805,12 @@ static uint8_t gic_get_running_priority(GICState *s, int cpu, MemTxAttrs attrs)
 {
     if (s->running_priority[cpu] > 0xff) {
         /*
-         * Idle priority: the largest value the priority field can hold,
-         * which is 0xff only when all eight bits are implemented. Returning
-         * the internal 0x100 truncated would read as 0x00 - the highest
-         * priority - which is what commit 71aa735b0a fixed for GICv1 and
-         * GICv2. It left the 11MPCore case alone for want of a clear
-         * specification; deriving the value covers every revision.
+         * ARM11 MPCore reports the largest implemented priority value when
+         * idle. Later GIC revisions permit and use the architectural 0xff
+         * idle value even when they implement fewer than eight priority bits.
          */
-        return gic_fullprio_mask(s, cpu) & 0xff;
+        return s->revision == REV_11MPCORE ?
+               gic_fullprio_mask(s, cpu) & 0xff : 0xff;
     }
 
     if (gic_cpu_ns_access(s, cpu, attrs)) {
@@ -1804,15 +1802,11 @@ static MemTxResult gic_cpu_write(GICState *s, int cpu, int offset,
             }
         } else {
             /*
-             * An interface with fewer than eight priority bits cannot split
-             * them below the bits it has, so writes below that minimum take
-             * the minimum - the same rule the reset value follows. The
-             * 11MPCore TRM puts it as: a value outside b011..b111 has the
-             * same effect as writing b011.
+             * The 11MPCore TRM says a BPR value outside b011..b111 has the
+             * same effect as writing b011. Virtual interfaces have their own
+             * architectural minimum.
              */
-            int min_bpr = gic_is_vcpu(cpu) ? GIC_VIRT_MIN_BPR :
-                          (s->n_prio_bits < 7 ? 7 - s->n_prio_bits :
-                                                GIC_MIN_BPR);
+            int min_bpr = gic_min_bpr(s, cpu);
             s->bpr[cpu] = MAX(value & 0x7, min_bpr);
         }
         break;
