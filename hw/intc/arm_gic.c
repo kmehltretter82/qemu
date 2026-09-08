@@ -1052,6 +1052,15 @@ static uint8_t gic_dist_readb(void *opaque, hwaddr offset, MemTxAttrs attrs)
         }
     } else if (offset < 0x400) {
         /* Interrupt Set/Clear Active.  */
+        if (s->revision == REV_11MPCORE && offset >= 0x320) {
+            /*
+             * ARM11 MPCore only implements read-only active registers at
+             * 0x300..0x31c. The rest of this range is reserved and RAZ/WI
+             * (ARM DDI 0360F, table 10-1).
+             */
+            return 0;
+        }
+
         if (offset < 0x380) {
             irq = (offset - 0x300) * 8;
         } else if (s->revision == 2) {
@@ -1351,6 +1360,12 @@ static void gic_dist_writeb(void *opaque, hwaddr offset,
                 GIC_DIST_CLEAR_PENDING(irq + i, ALL_CPU_MASK);
             }
         }
+    } else if (offset < 0x400 && s->revision == REV_11MPCORE) {
+        /*
+         * Active registers are read-only on ARM11 MPCore and the remaining
+         * addresses through 0x3fc are reserved. Writes to both are ignored
+         * (ARM DDI 0360F, table 10-1).
+         */
     } else if (offset < 0x380) {
         /* Interrupt Set Active.  */
         if (s->revision != 2) {
