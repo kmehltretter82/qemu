@@ -55,6 +55,22 @@ No boot ROM dump is needed.
 backs the eMMC and can be an empty file, but must be present for
 firmware that initialises the eMMC.
 
+Instruction-count scheduling
+----------------------------
+
+When QEMU is run with ``-icount``, its round-robin TCG scheduler gives each
+ARM11 CPU twice the instruction budget of the ARM9 CPU. This matches the
+hardware's default 268 MHz to 134 MHz clock ratio. The relative budgets can
+be changed for scheduling experiments without rebuilding QEMU:
+
+.. code-block:: bash
+
+  $ qemu-system-arm -M n3ds,arm11-icount-weight=3,arm9-icount-weight=1 \
+      -icount shift=0,sleep=off ...
+
+Both weights accept values from 1 through 1024 and have no effect unless
+``-icount`` is enabled.
+
 Known gaps
 ----------
 

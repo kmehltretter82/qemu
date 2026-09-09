@@ -19,6 +19,7 @@
 #include "qemu/units.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
+#include "qapi/visitor.h"
 #include "hw/core/boards.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/qdev-properties.h"
@@ -64,6 +65,8 @@ struct N3DSMachineState {
     char *boot11_path;
     char *otp_path;
     char *nand_cid;              /* 16 bytes hex as the console reads them */
+    uint32_t arm11_icount_weight;
+    uint32_t arm9_icount_weight;
     ARMCPU arm11[N3DS_NUM_ARM11];
     ARMCPU arm9;
 
@@ -337,6 +340,56 @@ static void n3ds_set_nand_cid(Object *obj, const char *v, Error **errp)
     s->nand_cid = g_strdup(v);
 }
 
+static void n3ds_get_arm11_icount_weight(Object *obj, Visitor *v,
+                                          const char *name, void *opaque,
+                                          Error **errp)
+{
+    uint32_t value = N3DS_MACHINE(obj)->arm11_icount_weight;
+
+    visit_type_uint32(v, name, &value, errp);
+}
+
+static void n3ds_set_arm11_icount_weight(Object *obj, Visitor *v,
+                                          const char *name, void *opaque,
+                                          Error **errp)
+{
+    uint32_t value;
+
+    if (!visit_type_uint32(v, name, &value, errp)) {
+        return;
+    }
+    if (value < 1 || value > 1024) {
+        error_setg(errp, "%s must be between 1 and 1024", name);
+        return;
+    }
+    N3DS_MACHINE(obj)->arm11_icount_weight = value;
+}
+
+static void n3ds_get_arm9_icount_weight(Object *obj, Visitor *v,
+                                         const char *name, void *opaque,
+                                         Error **errp)
+{
+    uint32_t value = N3DS_MACHINE(obj)->arm9_icount_weight;
+
+    visit_type_uint32(v, name, &value, errp);
+}
+
+static void n3ds_set_arm9_icount_weight(Object *obj, Visitor *v,
+                                         const char *name, void *opaque,
+                                         Error **errp)
+{
+    uint32_t value;
+
+    if (!visit_type_uint32(v, name, &value, errp)) {
+        return;
+    }
+    if (value < 1 || value > 1024) {
+        error_setg(errp, "%s must be between 1 and 1024", name);
+        return;
+    }
+    N3DS_MACHINE(obj)->arm9_icount_weight = value;
+}
+
 static void n3ds_init(MachineState *machine)
 {
     N3DSMachineState *s = N3DS_MACHINE(machine);
@@ -384,7 +437,7 @@ static void n3ds_init(MachineState *machine)
         /* ARM11 MPCore runs at 268 MHz vs the ARM9 at 134 MHz: give it
          * twice the per-round icount budget so the two interleave in
          * roughly the right ratio (only takes effect under -icount). */
-        CPU(cpu)->tcg_exec_weight = 2;
+        CPU(cpu)->tcg_exec_weight = s->arm11_icount_weight;
         qdev_realize(DEVICE(cpu), NULL, &error_fatal);
     }
     qdev_realize(DEVICE(cluster), NULL, &error_fatal);
@@ -403,7 +456,7 @@ static void n3ds_init(MachineState *machine)
                              &error_abort);
     s->arm9.tcm_region_changed = n3ds_arm9_tcm_changed;
     s->arm9.tcm_region_opaque = s;
-    CPU(&s->arm9)->tcg_exec_weight = 1;   /* 134 MHz reference */
+    CPU(&s->arm9)->tcg_exec_weight = s->arm9_icount_weight;
     qdev_realize(DEVICE(&s->arm9), NULL, &error_fatal);
     qdev_realize(DEVICE(cluster), NULL, &error_fatal);
 
@@ -844,6 +897,14 @@ static void n3ds_init(MachineState *machine)
     qemu_register_reset(n3ds_cpu_reset, s);
 }
 
+static void n3ds_machine_instance_init(Object *obj)
+{
+    N3DSMachineState *s = N3DS_MACHINE(obj);
+
+    s->arm11_icount_weight = 2;
+    s->arm9_icount_weight = 1;
+}
+
 static void n3ds_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
@@ -871,12 +932,23 @@ static void n3ds_machine_class_init(ObjectClass *oc, const void *data)
         "eMMC CID (32 hex digits) as the console reports it (essential.exefs nand_cid)");
     object_class_property_set_description(oc, "otp",
         "OTP dump (256 bytes) presented at 0x10012000");
+    object_class_property_add(oc, "arm11-icount-weight", "uint32",
+                              n3ds_get_arm11_icount_weight,
+                              n3ds_set_arm11_icount_weight, NULL, NULL);
+    object_class_property_set_description(oc, "arm11-icount-weight",
+        "Relative icount execution budget for each ARM11 CPU (default: 2)");
+    object_class_property_add(oc, "arm9-icount-weight", "uint32",
+                              n3ds_get_arm9_icount_weight,
+                              n3ds_set_arm9_icount_weight, NULL, NULL);
+    object_class_property_set_description(oc, "arm9-icount-weight",
+        "Relative icount execution budget for the ARM9 CPU (default: 1)");
 }
 
 static const TypeInfo n3ds_machine_type = {
     .name = TYPE_N3DS_MACHINE,
     .parent = TYPE_MACHINE,
     .instance_size = sizeof(N3DSMachineState),
+    .instance_init = n3ds_machine_instance_init,
     .class_init = n3ds_machine_class_init,
     .interfaces = arm_machine_interfaces,
 };
