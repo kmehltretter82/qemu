@@ -45,6 +45,22 @@ static int gic_post_load(void *opaque, int version_id)
     GICState *s = (GICState *)opaque;
     ARMGICCommonClass *c = ARM_GIC_COMMON_GET_CLASS(s);
 
+    if (s->revision == REV_11MPCORE) {
+        int irq;
+
+        for (irq = 0; irq < GIC_NR_SGIS; irq++) {
+            /*
+             * Older QEMU versions stored a single model bit for each SGI.
+             * The line-level byte was unused for SGIs, so it doubles as the
+             * per-source model mask without changing the migration format.
+             */
+            if (!s->irq_state[irq].sgi_model &&
+                GIC_DIST_TEST_MODEL(irq)) {
+                s->irq_state[irq].sgi_model = (1U << s->num_cpu) - 1;
+            }
+        }
+    }
+
     if (c->post_load) {
         c->post_load(s);
     }
