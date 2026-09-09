@@ -122,6 +122,10 @@ static void bcm2835_systmr_reset(DeviceState *dev)
 {
     BCM2835SystemTimerState *s = BCM2835_SYSTIMER(dev);
 
+    for (size_t i = 0; i < ARRAY_SIZE(s->tmr); i++) {
+        timer_del(&s->tmr[i].timer);
+        qemu_set_irq(s->tmr[i].irq, 0);
+    }
     memset(&s->reg, 0, sizeof(s->reg));
 }
 
@@ -142,14 +146,39 @@ static void bcm2835_systmr_realize(DeviceState *dev, Error **errp)
     }
 }
 
-static const VMStateDescription bcm2835_systmr_vmstate = {
-    .name = "bcm2835_sys_timer",
+static const VMStateDescription bcm2835_systmr_compare_vmstate = {
+    .name = "bcm2835_sys_timer_compare",
     .version_id = 1,
     .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER(timer, BCM2835SystemTimerCompare),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static int bcm2835_systmr_post_load(void *opaque, int version_id)
+{
+    BCM2835SystemTimerState *s = opaque;
+
+    for (size_t i = 0; i < ARRAY_SIZE(s->tmr); i++) {
+        qemu_set_irq(s->tmr[i].irq, extract32(s->reg.ctrl_status, i, 1));
+    }
+    return 0;
+}
+
+static const VMStateDescription bcm2835_systmr_vmstate = {
+    .name = "bcm2835_sys_timer",
+    .version_id = 2,
+    .minimum_version_id = 1,
+    .post_load = bcm2835_systmr_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(reg.ctrl_status, BCM2835SystemTimerState),
         VMSTATE_UINT32_ARRAY(reg.compare, BCM2835SystemTimerState,
                              BCM2835_SYSTIMER_COUNT),
+        VMSTATE_STRUCT_ARRAY(tmr, BCM2835SystemTimerState,
+                             BCM2835_SYSTIMER_COUNT, 2,
+                             bcm2835_systmr_compare_vmstate,
+                             BCM2835SystemTimerCompare),
         VMSTATE_END_OF_LIST()
     }
 };

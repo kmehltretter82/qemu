@@ -723,7 +723,7 @@ static ClockMuxInitInfo CLOCK_MUX_INIT_INFO[] = {
         .name = "emmc2",
         .int_bits = 4,
         .frac_bits = 8,
-        FILL_CLOCK_MUX_INIT_INFO(EMMC2, unknown),
+        FILL_CLOCK_MUX_INIT_INFO(EMMC2, periph),
     },
 };
 
@@ -1011,8 +1011,13 @@ static const ClockMuxResetInfo CLOCK_MUX_RESET_INFO[] = {
     },
 
     [CPRMAN_CLOCK_EMMC2] = {
-        .cm_ctl = 0, /* unknown */
-        .cm_div = 0
+        /*
+         * The firmware normally programs this; QEMU boots the kernel directly,
+         * so give it the same PLLC_PER / divide-by-6 setup as EMMC (~281 MHz)
+         * rather than leaving it disabled with a zero divider.
+         */
+        .cm_ctl = 0x00000295,
+        .cm_div = 0x00006000,
     },
 };
 

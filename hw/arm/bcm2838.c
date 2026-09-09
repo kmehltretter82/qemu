@@ -12,6 +12,7 @@
 #include "hw/arm/raspi_platform.h"
 #include "hw/core/sysbus.h"
 #include "hw/arm/bcm2838.h"
+#include "target/arm/cpu-features.h"
 #include "trace.h"
 
 #define GIC400_MAINTENANCE_IRQ      9
@@ -93,6 +94,30 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
         /* set periphbase/CBAR value for CPU-local registers */
         object_property_set_int(OBJECT(&s_base->cpu[n].core), "reset-cbar",
                                 bc_base->peri_base, &error_abort);
+
+        /*
+         * The BCM2711 generic timer runs at 54 MHz (the SoC crystal). Without
+         * this the generic cortex-a72 model uses its 62.5 MHz back-compat
+         * default, so CNTFRQ_EL0 does not match the board.
+         */
+        object_property_set_uint(OBJECT(&s_base->cpu[n].core), "cntfrq",
+                                 54000000, &error_abort);
+
+        /*
+         * The BCM2711's Cortex-A72 is built without ARMv8 Crypto Extensions,
+         * but the generic cortex-a72 model advertises them. Clear AES/PMULL and
+         * SHA1/SHA2 from ID_AA64ISAR0 (keeping CRC32) so the guest sees, and
+         * can only execute, what the real board provides.
+         */
+        {
+            ARMISARegisters *isar = &s_base->cpu[n].core.isar;
+            uint64_t isar0 = GET_IDREG(isar, ID_AA64ISAR0);
+
+            isar0 = FIELD_DP64(isar0, ID_AA64ISAR0, AES, 0);
+            isar0 = FIELD_DP64(isar0, ID_AA64ISAR0, SHA1, 0);
+            isar0 = FIELD_DP64(isar0, ID_AA64ISAR0, SHA2, 0);
+            SET_IDREG(isar, ID_AA64ISAR0, isar0);
+        }
 
         /* start powered off if not enabled */
         object_property_set_bool(OBJECT(&s_base->cpu[n].core),
@@ -192,9 +217,26 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->mboxes), 0,
                        qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_MBOX));
 
+    /* Connect the GPIO interrupts to the interrupt controller */
+    for (int n = 0; n < BCM2838_GPIO_NUM_IRQS; n++) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(&ps->gpio), n,
+                           qdev_get_gpio_in(gicdev,
+                                            GIC_SPI_INTERRUPT_GPIO0 + n));
+    }
+
     /* Connect SD host to the interrupt controller */
     sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->sdhost), 0,
                        qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_SDHOST));
+
+    /* Connect the system timer compares to the interrupt controller */
+    for (int n = 0; n < 4; n++) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->systmr), n,
+                    qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_SYSTIMER0 + n));
+    }
+
+    /* Connect SPI0 to the interrupt controller */
+    sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->spi[0]), 0,
+                       qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_SPI0));
 
     /* According to DTS, EMMC and EMMC2 share one irq */
     DeviceState *mmc_irq_orgate = DEVICE(&ps->mmc_irq_orgate);
@@ -208,6 +250,10 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
                        qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_MPHI));
     sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->dwc2), 0,
                        qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_DWC2));
+
+    /* Connect the internal xHCI to the interrupt controller */
+    sysbus_connect_irq(SYS_BUS_DEVICE(&ps->xhci), 0,
+                       qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_XHCI));
 
     /* Connect DMA 0-6 to the interrupt controller */
     for (int n = GIC_SPI_INTERRUPT_DMA_0; n <= GIC_SPI_INTERRUPT_DMA_6; n++) {

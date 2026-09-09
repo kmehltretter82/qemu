@@ -43,6 +43,25 @@
 #define TXFR_LEN   32
 const uint32_t check_data = 0x12345678;
 
+static void wait_for_migration_complete(QTestState *qts)
+{
+    while (true) {
+        QDict *response = qtest_qmp(qts,
+                                    "{ 'execute': 'query-migrate' }");
+        QDict *result = qdict_get_qdict(response, "return");
+        const char *status = qdict_get_str(result, "status");
+        bool complete = !strcmp(status, "completed");
+
+        g_assert_cmpstr(status, !=, "failed");
+        g_assert_cmpstr(status, !=, "cancelled");
+        qobject_unref(response);
+        if (complete) {
+            return;
+        }
+        g_usleep(1000);
+    }
+}
+
 static void bcm2835_dma_test_interrupt(int dma_c, int irq_line)
 {
     uint64_t dma_base = RASPI3_DMA_BASE + dma_c * 0x100;
@@ -105,12 +124,84 @@ static void bcm2835_dma_test_interrupts(void)
     bcm2835_dma_test_interrupt(14, 11);
 }
 
+static void test_dma_reset_clears_irq(void)
+{
+    uint64_t dma_base = RASPI3_DMA_BASE;
+
+    writel(SCB_ADDR + 0, BCM2708_DMA_S_INC | BCM2708_DMA_D_INC |
+                         BCM2708_DMA_INT_EN);
+    writel(SCB_ADDR + 4, S_ADDR);
+    writel(SCB_ADDR + 8, D_ADDR);
+    writel(SCB_ADDR + 12, TXFR_LEN);
+    writel(dma_base + BCM2708_DMA_ADDR, SCB_ADDR);
+    writel(S_ADDR, check_data);
+    writel(dma_base + BCM2708_DMA_CS, BCM2708_DMA_ACTIVE);
+
+    writel(RASPI3_IC_BASE + IRQ_ENABLE_1, 1 << 16);
+    g_assert_cmphex(readl(RASPI3_IC_BASE + IRQ_PENDING_1) & (1 << 16),
+                    ==, 1 << 16);
+
+    qtest_system_reset(global_qtest);
+
+    writel(RASPI3_IC_BASE + IRQ_ENABLE_1, 1 << 16);
+    g_assert_cmphex(readl(RASPI3_IC_BASE + IRQ_PENDING_1) & (1 << 16),
+                    ==, 0);
+}
+
+static void test_dma_irq_migration(void)
+{
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    const uint64_t dma_base = RASPI3_DMA_BASE;
+    QTestState *src, *dst;
+    int fd;
+
+    fd = g_file_open_tmp("bcm2835-dma-migration-XXXXXX", &state_path, NULL);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+
+    src = qtest_init("-M raspi3b -S");
+    qtest_irq_intercept_out_named(src, "/machine/soc/peripherals/dma",
+                                  "sysbus-irq");
+    qtest_writel(src, SCB_ADDR + 0,
+                 BCM2708_DMA_S_INC | BCM2708_DMA_D_INC | BCM2708_DMA_INT_EN);
+    qtest_writel(src, SCB_ADDR + 4, S_ADDR);
+    qtest_writel(src, SCB_ADDR + 8, D_ADDR);
+    qtest_writel(src, SCB_ADDR + 12, TXFR_LEN);
+    qtest_writel(src, dma_base + BCM2708_DMA_ADDR, SCB_ADDR);
+    qtest_writel(src, S_ADDR, check_data);
+    qtest_writel(src, dma_base + BCM2708_DMA_CS, BCM2708_DMA_ACTIVE);
+    g_assert_true(qtest_get_irq(src, 0));
+
+    uri = g_strdup_printf("file:%s", state_path);
+    qtest_qmp_assert_success(src,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    wait_for_migration_complete(src);
+    qtest_quit(src);
+
+    dst = qtest_init("-M raspi3b -S -incoming defer");
+    qtest_irq_intercept_out_named(dst, "/machine/soc/peripherals/dma",
+                                  "sysbus-irq");
+    qtest_qmp_assert_success(dst,
+        "{ 'execute': 'migrate-incoming', 'arguments': { 'uri': %s } }",
+        uri);
+    wait_for_migration_complete(dst);
+    g_assert_true(qtest_get_irq(dst, 0));
+    qtest_quit(dst);
+
+    unlink(state_path);
+}
+
 int main(int argc, char **argv)
 {
     int ret;
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/bcm2835/dma/test_interrupts",
                    bcm2835_dma_test_interrupts);
+    qtest_add_func("/bcm2835/dma/reset_clears_irq",
+                   test_dma_reset_clears_irq);
+    qtest_add_func("/bcm2835/dma/migration_irq",
+                   test_dma_irq_migration);
     qtest_start("-machine raspi3b");
     ret = g_test_run();
     qtest_end();

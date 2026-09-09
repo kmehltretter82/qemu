@@ -21,6 +21,41 @@
 /* Capabilities for SD controller: no DMA, high-speed, default clocks etc. */
 #define BCM2835_SDHC_CAPAREG 0x52134b4
 
+/* SoC-internal xHCI (brcm,bcm2711-xhci) at bus 0x7e9c0000 */
+#define XHCI_OFFSET 0x9c0000
+
+/* Async AXI bridge (ASB) minimal model.
+ *
+ * The Linux bcm2835-power driver gates all power-domain registration on reading
+ * the ASCII "brdg" identifier from ASB_AXI_BRDG_ID; if it does not match it
+ * returns -ENODEV and no power domains are created. Provide that identifier and
+ * otherwise read as zero (which lets the driver's ASB enable/disable poll loop
+ * fall straight through).
+ */
+#define ASB_AXI_BRDG_ID   0x20
+#define ASB_BRDG_ID_MAGIC 0x62726467 /* "brdg" */
+
+static uint64_t bcm2838_asb_read(void *opaque, hwaddr offset, unsigned size)
+{
+    if (offset == ASB_AXI_BRDG_ID) {
+        return ASB_BRDG_ID_MAGIC;
+    }
+    return 0;
+}
+
+static void bcm2838_asb_write(void *opaque, hwaddr offset, uint64_t value,
+                              unsigned size)
+{
+}
+
+static const MemoryRegionOps bcm2838_asb_ops = {
+    .read = bcm2838_asb_read,
+    .write = bcm2838_asb_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
+};
+
 static void bcm2838_peripherals_init(Object *obj)
 {
     BCM2838PeripheralState *s = BCM2838_PERIPHERALS(obj);
@@ -37,6 +72,10 @@ static void bcm2838_peripherals_init(Object *obj)
 
     /* GPIO */
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_BCM2838_GPIO);
+
+    /* SoC-internal xHCI USB controller */
+    object_initialize_child(obj, "xhci", &s->xhci, TYPE_XHCI_SYSBUS);
+    qdev_prop_set_uint32(DEVICE(&s->xhci), "slots", XHCI_MAXSLOTS);
 
     object_property_add_const_link(OBJECT(&s->gpio), "sdbus-sdhci",
                                    OBJECT(&s_base->sdhci.sdbus));
@@ -93,6 +132,13 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(&s_base->peri_mr, EMMC2_OFFSET,
                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->emmc2),
                                 0));
+
+    /* SoC-internal xHCI USB controller */
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->xhci), errp)) {
+        return;
+    }
+    memory_region_add_subregion(&s_base->peri_mr, XHCI_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->xhci), 0));
 
     /* According to DTS, EMMC and EMMC2 share one irq */
     if (!qdev_realize(DEVICE(&s->mmc_irq_orgate), NULL, errp)) {
@@ -179,8 +225,11 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(&s_base->peri_mr, BCM2838_MPHI_OFFSET,
                                 &s->mphi_mr_alias);
 
-    create_unimp(s_base, &s->clkisp, "bcm2835-clkisp", CLOCK_ISP_OFFSET,
-                 CLOCK_ISP_SIZE);
+    /* RPiVid ASB (DT reg-name "rpivid_asb", at CLOCK_ISP_OFFSET) */
+    memory_region_init_io(&s->rpivid_asb, OBJECT(s), &bcm2838_asb_ops, s,
+                          "bcm2838-rpivid-asb", CLOCK_ISP_SIZE);
+    memory_region_add_subregion(&s_base->peri_mr, CLOCK_ISP_OFFSET,
+                                &s->rpivid_asb);
 
     /* GPIO */
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->gpio), errp)) {
@@ -190,10 +239,18 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
         &s_base->peri_mr, GPIO_OFFSET,
         sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->gpio), 0));
 
-    object_property_add_alias(OBJECT(s), "sd-bus", OBJECT(&s->gpio), "sd-bus");
+    /*
+     * On a real Pi 4 / Pi 400 the microSD card is on EMMC2, and the mainline
+     * device tree expects mmcblk there (mmc@7e340000 is "okay", sdhost is
+     * disabled). Route the machine's boot SD card to EMMC2 rather than to the
+     * legacy sdhost/sdhci GPIO mux, which serves the SDIO/WiFi role here.
+     */
+    object_property_add_alias(OBJECT(s), "sd-bus", OBJECT(&s->emmc2), "sd-bus");
 
-    /* BCM2838 RPiVid ASB must be mapped to prevent kernel crash */
-    create_unimp(s_base, &s->asb, "bcm2838-asb", BRDG_OFFSET, 0x24);
+    /* Async AXI bridge (DT reg-name "asb") */
+    memory_region_init_io(&s->asb, OBJECT(s), &bcm2838_asb_ops, s,
+                          "bcm2838-asb", 0x24);
+    memory_region_add_subregion(&s_base->peri_mr, BRDG_OFFSET, &s->asb);
 }
 
 static void bcm2838_peripherals_class_init(ObjectClass *oc, const void *data)

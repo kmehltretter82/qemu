@@ -107,7 +107,9 @@ static uint64_t bcm2835_i2c_read(void *opaque, hwaddr addr, unsigned size)
         /* We receive I2C messages directly instead of using FIFOs */
         if (s->s & BCM2835_I2C_S_TA) {
             readval = i2c_recv(s->bus);
-            s->dlen -= 1;
+            if (s->dlen > 0) {
+                s->dlen -= 1;
+            }
 
             if (s->dlen == 0) {
                 bcm2835_i2c_finish_transfer(s);
@@ -143,8 +145,8 @@ static void bcm2835_i2c_write(void *opaque, hwaddr addr,
         /* ST is a one-shot operation; it must read back as 0 */
         s->c = writeval & ~BCM2835_I2C_C_ST;
 
-        /* Start transfer */
-        if (writeval & (BCM2835_I2C_C_ST | BCM2835_I2C_C_I2CEN)) {
+        /* Start transfer: ST (start) triggers it, not merely I2CEN (enable) */
+        if (writeval & BCM2835_I2C_C_ST) {
             bcm2835_i2c_begin_transfer(s);
             /*
              * Handle special case where transfer starts with zero data length.
@@ -179,7 +181,9 @@ static void bcm2835_i2c_write(void *opaque, hwaddr addr,
         if (s->s & BCM2835_I2C_S_TA) {
             if (s->s & BCM2835_I2C_S_TXD) {
                 if (!i2c_send(s->bus, writeval & 0xff)) {
-                    s->dlen -= 1;
+                    if (s->dlen > 0) {
+                        s->dlen -= 1;
+                    }
                 } else {
                     s->s |= BCM2835_I2C_S_ERR;
                 }
@@ -235,16 +239,27 @@ static void bcm2835_i2c_reset(DeviceState *dev)
     s->c = 0x0;
     s->s = BCM2835_I2C_S_TXD | BCM2835_I2C_S_TXE;
     s->dlen = 0x0;
+    s->last_dlen = 0x0;
     s->a = 0x0;
     s->div = 0x5dc;
     s->del = 0x00300030;
     s->clkt = 0x40;
+    bcm2835_i2c_update_interrupt(s);
+}
+
+static int bcm2835_i2c_post_load(void *opaque, int version_id)
+{
+    BCM2835I2CState *s = opaque;
+
+    bcm2835_i2c_update_interrupt(s);
+    return 0;
 }
 
 static const VMStateDescription vmstate_bcm2835_i2c = {
     .name = TYPE_BCM2835_I2C,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = bcm2835_i2c_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(c, BCM2835I2CState),
         VMSTATE_UINT32(s, BCM2835I2CState),

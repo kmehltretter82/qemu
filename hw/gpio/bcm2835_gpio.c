@@ -110,6 +110,41 @@ static int gpfsel_is_out(BCM2835GpioState *s, int index)
     return 0;
 }
 
+static void bcm2835_gpio_set_out(BCM2835GpioState *s, int index, bool level)
+{
+    s->out_level = deposit64(s->out_level, index, 1, level);
+    qemu_set_irq(s->out[index], level);
+}
+
+static void bcm2835_gpio_replay_outputs(BCM2835GpioState *s)
+{
+    for (int i = 0; i < ARRAY_SIZE(s->out); i++) {
+        qemu_set_irq(s->out[i], extract64(s->out_level, i, 1));
+    }
+}
+
+static void bcm2835_gpio_update_irq(BCM2835GpioState *s)
+{
+    qemu_set_irq(s->irq[0], (s->eds[0] & 0x0fffffff) != 0);
+    qemu_set_irq(s->irq[1],
+                 ((s->eds[0] & 0xf0000000) || (s->eds[1] & 0x00003fff)) != 0);
+    qemu_set_irq(s->irq[2], (s->eds[1] & 0x003fc000) != 0);
+}
+
+static void bcm2835_gpio_level_detect(BCM2835GpioState *s, int bank,
+                                      uint32_t level)
+{
+    s->eds[bank] |= (s->hen[bank] & level);
+    s->eds[bank] |= (s->len[bank] & ~level);
+}
+
+static void bcm2835_gpio_edge_detect(BCM2835GpioState *s, int bank,
+                                     uint32_t rising, uint32_t falling)
+{
+    s->eds[bank] |= ((s->ren[bank] | s->aren[bank]) & rising);
+    s->eds[bank] |= ((s->fen[bank] | s->afen[bank]) & falling);
+}
+
 static void gpset(BCM2835GpioState *s,
         uint32_t val, uint8_t start, uint8_t count, uint32_t *lev)
 {
@@ -119,12 +154,19 @@ static void gpset(BCM2835GpioState *s,
     int i;
     for (i = 0; i < count; i++) {
         if ((changes & cur) && (gpfsel_is_out(s, start + i))) {
-            qemu_set_irq(s->out[start + i], 1);
+            bcm2835_gpio_set_out(s, start + i, true);
         }
         cur <<= 1;
     }
 
     *lev |= val;
+
+    {
+        int bank = (start >= 32) ? 1 : 0;
+        bcm2835_gpio_edge_detect(s, bank, changes, 0);
+        bcm2835_gpio_level_detect(s, bank, *lev);
+        bcm2835_gpio_update_irq(s);
+    }
 }
 
 static void gpclr(BCM2835GpioState *s,
@@ -136,12 +178,19 @@ static void gpclr(BCM2835GpioState *s,
     int i;
     for (i = 0; i < count; i++) {
         if ((changes & cur) && (gpfsel_is_out(s, start + i))) {
-            qemu_set_irq(s->out[start + i], 0);
+            bcm2835_gpio_set_out(s, start + i, false);
         }
         cur <<= 1;
     }
 
     *lev &= ~val;
+
+    {
+        int bank = (start >= 32) ? 1 : 0;
+        bcm2835_gpio_edge_detect(s, bank, 0, changes);
+        bcm2835_gpio_level_detect(s, bank, *lev);
+        bcm2835_gpio_update_irq(s);
+    }
 }
 
 static uint64_t bcm2835_gpio_read(void *opaque, hwaddr offset,
@@ -169,20 +218,20 @@ static uint64_t bcm2835_gpio_read(void *opaque, hwaddr offset,
         return s->lev0;
     case GPLEV1:
         return s->lev1;
-    case GPEDS0:
-    case GPEDS1:
-    case GPREN0:
-    case GPREN1:
-    case GPFEN0:
-    case GPFEN1:
-    case GPHEN0:
-    case GPHEN1:
-    case GPLEN0:
-    case GPLEN1:
-    case GPAREN0:
-    case GPAREN1:
-    case GPAFEN0:
-    case GPAFEN1:
+    case GPEDS0: return s->eds[0];
+    case GPEDS1: return s->eds[1];
+    case GPREN0: return s->ren[0];
+    case GPREN1: return s->ren[1];
+    case GPFEN0: return s->fen[0];
+    case GPFEN1: return s->fen[1];
+    case GPHEN0: return s->hen[0];
+    case GPHEN1: return s->hen[1];
+    case GPLEN0: return s->len[0];
+    case GPLEN1: return s->len[1];
+    case GPAREN0: return s->aren[0];
+    case GPAREN1: return s->aren[1];
+    case GPAFEN0: return s->afen[0];
+    case GPAFEN1: return s->afen[1];
     case GPPUD:
     case GPPUDCLK0:
     case GPPUDCLK1:
@@ -228,19 +277,50 @@ static void bcm2835_gpio_write(void *opaque, hwaddr offset,
         /* Read Only */
         break;
     case GPEDS0:
+        s->eds[0] &= ~(uint32_t)value; bcm2835_gpio_update_irq(s); break;
     case GPEDS1:
+        s->eds[1] &= ~(uint32_t)value; bcm2835_gpio_update_irq(s); break;
     case GPREN0:
+        s->ren[0] = value;
+        goto reeval;
     case GPREN1:
+        s->ren[1] = value;
+        goto reeval;
     case GPFEN0:
+        s->fen[0] = value;
+        goto reeval;
     case GPFEN1:
+        s->fen[1] = value;
+        goto reeval;
     case GPHEN0:
+        s->hen[0] = value;
+        goto reeval;
     case GPHEN1:
+        s->hen[1] = value;
+        goto reeval;
     case GPLEN0:
+        s->len[0] = value;
+        goto reeval;
     case GPLEN1:
+        s->len[1] = value;
+        goto reeval;
     case GPAREN0:
+        s->aren[0] = value;
+        goto reeval;
     case GPAREN1:
+        s->aren[1] = value;
+        goto reeval;
     case GPAFEN0:
+        s->afen[0] = value;
+        goto reeval;
     case GPAFEN1:
+        s->afen[1] = value;
+        goto reeval;
+    reeval:
+        bcm2835_gpio_level_detect(s, 0, s->lev0);
+        bcm2835_gpio_level_detect(s, 1, s->lev1);
+        bcm2835_gpio_update_irq(s);
+        break;
     case GPPUD:
     case GPPUDCLK0:
     case GPPUDCLK1:
@@ -272,6 +352,17 @@ static void bcm2835_gpio_reset(DeviceState *dev)
 
     s->lev0 = 0;
     s->lev1 = 0;
+    s->out_level = 0;
+    bcm2835_gpio_replay_outputs(s);
+
+    memset(s->ren, 0, sizeof(s->ren));
+    memset(s->fen, 0, sizeof(s->fen));
+    memset(s->hen, 0, sizeof(s->hen));
+    memset(s->len, 0, sizeof(s->len));
+    memset(s->aren, 0, sizeof(s->aren));
+    memset(s->afen, 0, sizeof(s->afen));
+    memset(s->eds, 0, sizeof(s->eds));
+    bcm2835_gpio_update_irq(s);
 }
 
 static const MemoryRegionOps bcm2835_gpio_ops = {
@@ -280,15 +371,33 @@ static const MemoryRegionOps bcm2835_gpio_ops = {
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
+static int bcm2835_gpio_post_load(void *opaque, int version_id)
+{
+    BCM2835GpioState *s = opaque;
+
+    bcm2835_gpio_replay_outputs(s);
+    bcm2835_gpio_update_irq(s);
+    return 0;
+}
+
 static const VMStateDescription vmstate_bcm2835_gpio = {
     .name = "bcm2835_gpio",
-    .version_id = 1,
+    .version_id = 3,
     .minimum_version_id = 1,
+    .post_load = bcm2835_gpio_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(fsel, BCM2835GpioState, 54),
         VMSTATE_UINT32(lev0, BCM2835GpioState),
         VMSTATE_UINT32(lev1, BCM2835GpioState),
         VMSTATE_UINT8(sd_fsel, BCM2835GpioState),
+        VMSTATE_UINT32_ARRAY_V(ren, BCM2835GpioState, 2, 2),
+        VMSTATE_UINT32_ARRAY_V(fen, BCM2835GpioState, 2, 2),
+        VMSTATE_UINT32_ARRAY_V(hen, BCM2835GpioState, 2, 2),
+        VMSTATE_UINT32_ARRAY_V(len, BCM2835GpioState, 2, 2),
+        VMSTATE_UINT32_ARRAY_V(aren, BCM2835GpioState, 2, 2),
+        VMSTATE_UINT32_ARRAY_V(afen, BCM2835GpioState, 2, 2),
+        VMSTATE_UINT32_ARRAY_V(eds, BCM2835GpioState, 2, 2),
+        VMSTATE_UINT64_V(out_level, BCM2835GpioState, 3),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -305,6 +414,10 @@ static void bcm2835_gpio_init(Object *obj)
             &bcm2835_gpio_ops, s, "bcm2835_gpio", 0x1000);
     sysbus_init_mmio(sbd, &s->iomem);
     qdev_init_gpio_out(dev, s->out, 54);
+
+    for (int i = 0; i < 3; i++) {
+        sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq[i]);
+    }
 }
 
 static void bcm2835_gpio_realize(DeviceState *dev, Error **errp)

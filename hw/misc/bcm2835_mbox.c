@@ -93,10 +93,24 @@ static void mbox_push(BCM2835Mbox *mb, uint32_t val)
     mbox_update_status(mb);
 }
 
+static void bcm2835_mbox_update_irq(BCM2835MboxState *s)
+{
+    bool set = false;
+
+    s->mbox[0].config &= ~ARM_MC_IHAVEDATAIRQPEND;
+    if (!(s->mbox[0].status & ARM_MS_EMPTY)) {
+        s->mbox[0].config |= ARM_MC_IHAVEDATAIRQPEND;
+        if (s->mbox[0].config & ARM_MC_IHAVEDATAIRQEN) {
+            set = true;
+        }
+    }
+    trace_bcm2835_mbox_irq(set);
+    qemu_set_irq(s->arm_irq, set);
+}
+
 static void bcm2835_mbox_update(BCM2835MboxState *s)
 {
     uint32_t value;
-    bool set;
     int n;
 
     s->mbox_irq_disabled = true;
@@ -117,17 +131,7 @@ static void bcm2835_mbox_update(BCM2835MboxState *s)
     /* Re-enable calls from the IRQ routine */
     s->mbox_irq_disabled = false;
 
-    /* Update ARM IRQ status */
-    set = false;
-    s->mbox[0].config &= ~ARM_MC_IHAVEDATAIRQPEND;
-    if (!(s->mbox[0].status & ARM_MS_EMPTY)) {
-        s->mbox[0].config |= ARM_MC_IHAVEDATAIRQPEND;
-        if (s->mbox[0].config & ARM_MC_IHAVEDATAIRQEN) {
-            set = true;
-        }
-    }
-    trace_bcm2835_mbox_irq(set);
-    qemu_set_irq(s->arm_irq, set);
+    bcm2835_mbox_update_irq(s);
 }
 
 static void bcm2835_mbox_set_irq(void *opaque, int irq, int level)
@@ -252,11 +256,39 @@ static const MemoryRegionOps bcm2835_mbox_ops = {
     .valid.max_access_size = 4,
 };
 
+static int bcm2835_mbox_box_post_load(void *opaque, int version_id)
+{
+    BCM2835Mbox *mb = opaque;
+
+    /*
+     * mbox_pull() shifts reg[] for n < count and mbox_push() asserts
+     * count < MBOX_SIZE, both relying on count being in range. count is
+     * migrated as a bare UINT32, so a corrupt stream could drive an
+     * out-of-bounds access of the MBOX_SIZE-entry reg[]. Reject it, then
+     * recompute the EMPTY/FULL status bits so count and status cannot be
+     * restored inconsistently (which would trip the mbox_push() assert).
+     */
+    if (mb->count > MBOX_SIZE) {
+        return -1;
+    }
+    mbox_update_status(mb);
+    return 0;
+}
+
+static int bcm2835_mbox_post_load(void *opaque, int version_id)
+{
+    BCM2835MboxState *s = opaque;
+
+    bcm2835_mbox_update_irq(s);
+    return 0;
+}
+
 /* vmstate of a single mailbox */
 static const VMStateDescription vmstate_bcm2835_mbox_box = {
     .name = TYPE_BCM2835_MBOX "_box",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = bcm2835_mbox_box_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(reg, BCM2835Mbox, MBOX_SIZE),
         VMSTATE_UINT32(count, BCM2835Mbox),
@@ -271,6 +303,7 @@ static const VMStateDescription vmstate_bcm2835_mbox = {
     .name = TYPE_BCM2835_MBOX,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = bcm2835_mbox_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_BOOL_ARRAY(available, BCM2835MboxState, MBOX_CHAN_COUNT),
         VMSTATE_STRUCT_ARRAY(mbox, BCM2835MboxState, 2, 1,
@@ -301,6 +334,7 @@ static void bcm2835_mbox_reset(DeviceState *dev)
     for (n = 0; n < MBOX_CHAN_COUNT; n++) {
         s->available[n] = false;
     }
+    qemu_set_irq(s->arm_irq, 0);
 }
 
 static void bcm2835_mbox_realize(DeviceState *dev, Error **errp)

@@ -374,10 +374,26 @@ static void bcm2836_control_init(Object *obj)
                   bcm2836_control_local_timer_tick, s);
 }
 
+static int bcm2836_control_post_load(void *opaque, int version_id)
+{
+    BCM2836ControlState *s = opaque;
+
+    /*
+     * bcm2836_control_update() asserts these are in range; they are masked on
+     * the MMIO write path but not on migration, so validate a restored stream.
+     */
+    if (s->route_gpu_irq >= BCM2836_NCORES ||
+        s->route_gpu_fiq >= BCM2836_NCORES) {
+        return -1;
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_bcm2836_control = {
     .name = TYPE_BCM2836_CONTROL,
     .version_id = 2,
     .minimum_version_id = 1,
+    .post_load = bcm2836_control_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(mailboxes, BCM2836ControlState,
                              BCM2836_NCORES * BCM2836_MBPERCORE),

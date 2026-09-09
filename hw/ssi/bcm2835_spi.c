@@ -162,6 +162,9 @@ static void bcm2835_spi_write(void *opaque, hwaddr addr,
             bcm2835_spi_update_tx_flags(s);
         }
 
+        /* CLEAR is a one-shot control field and does not persist in CS. */
+        s->cs &= ~(BCM2835_SPI_CLEAR_RX | BCM2835_SPI_CLEAR_TX);
+
         /* Set Transfer Active */
         if (s->cs & BCM2835_SPI_CS_TA) {
             bcm2835_spi_update_tx_flags(s);
@@ -246,12 +249,33 @@ static void bcm2835_spi_reset(DeviceState *dev)
     s->dlen = 0;
     s->ltoh = 0x1;
     s->dc = 0x30201020;
+    bcm2835_spi_update_int(s);
+}
+
+static int bcm2835_spi_post_load(void *opaque, int version_id)
+{
+    BCM2835SPIState *s = opaque;
+
+    /*
+     * TXD/RXD/RXF/RXR/DONE in cs are status bits derived from the FIFO fill
+     * levels, and the MMIO paths trust them: a FIFO write pushes when CS_TXD
+     * is set and a FIFO read pops when CS_RXD is set. cs is migrated as a bare
+     * UINT32 next to the FIFOs, so an inconsistent incoming stream (CS_TXD set
+     * with a full tx FIFO, or CS_RXD set with an empty rx FIFO) could drive
+     * fifo8_push() or fifo8_pop() past the FIFO bounds and abort QEMU.
+     * Re-derive the status bits from the restored FIFOs so cs matches them.
+     */
+    bcm2835_spi_update_tx_flags(s);
+    bcm2835_spi_update_rx_flags(s);
+    bcm2835_spi_update_int(s);
+    return 0;
 }
 
 static const VMStateDescription vmstate_bcm2835_spi = {
     .name = TYPE_BCM2835_SPI,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = bcm2835_spi_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_FIFO8(tx_fifo, BCM2835SPIState),
         VMSTATE_FIFO8(rx_fifo, BCM2835SPIState),

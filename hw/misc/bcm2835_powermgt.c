@@ -14,6 +14,7 @@
 #include "hw/misc/bcm2835_powermgt.h"
 #include "migration/vmstate.h"
 #include "system/runstate.h"
+#include "qemu/timer.h"
 
 #define PASSWORD 0x5a000000
 #define PASSWORD_MASK 0xff000000
@@ -23,6 +24,8 @@
 #define R_RSTS 0x20
 #define V_RSTS_POWEROFF 0x555 /* Linux uses partition 63 to indicate halt. */
 #define R_WDOG 0x24
+
+#define WDOG_FREQ_HZ 65536
 
 static uint64_t bcm2835_powermgt_read(void *opaque, hwaddr offset,
                                       unsigned size)
@@ -52,6 +55,20 @@ static uint64_t bcm2835_powermgt_read(void *opaque, hwaddr offset,
     return res;
 }
 
+static void bcm2835_powermgt_do_reset(BCM2835PowerMgtState *s)
+{
+    if ((s->rsts & 0xfff) == V_RSTS_POWEROFF) {
+        qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+    } else {
+        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+    }
+}
+
+static void bcm2835_powermgt_wdog_expired(void *opaque)
+{
+    bcm2835_powermgt_do_reset((BCM2835PowerMgtState *)opaque);
+}
+
 static void bcm2835_powermgt_write(void *opaque, hwaddr offset,
                                    uint64_t value, unsigned size)
 {
@@ -71,11 +88,24 @@ static void bcm2835_powermgt_write(void *opaque, hwaddr offset,
     case R_RSTC:
         s->rstc = value;
         if (value & V_RSTC_RESET) {
-            if ((s->rsts & 0xfff) == V_RSTS_POWEROFF) {
-                qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+            uint32_t ticks = s->wdog & 0x000fffff;
+            if (ticks == 0) {
+                /* No countdown programmed: reset immediately. */
+                bcm2835_powermgt_do_reset(s);
             } else {
-                qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+                /*
+                 * Arm the watchdog for the programmed countdown. The restart
+                 * path uses a tiny value (~150us) so this still reboots
+                 * promptly; a real watchdog uses a long value and fires only if
+                 * the guest stops pinging (each ping rewrites RSTC).
+                 */
+                timer_mod_ns(&s->wdog_timer,
+                    qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                    muldiv64(ticks, NANOSECONDS_PER_SECOND, WDOG_FREQ_HZ));
             }
+        } else {
+            /* WRCFG no longer full-reset: disarm (watchdog stop). */
+            timer_del(&s->wdog_timer);
         }
         break;
     case R_RSTS:
@@ -107,12 +137,13 @@ static const MemoryRegionOps bcm2835_powermgt_ops = {
 
 static const VMStateDescription vmstate_bcm2835_powermgt = {
     .name = TYPE_BCM2835_POWERMGT,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(rstc, BCM2835PowerMgtState),
         VMSTATE_UINT32(rsts, BCM2835PowerMgtState),
         VMSTATE_UINT32(wdog, BCM2835PowerMgtState),
+        VMSTATE_TIMER_V(wdog_timer, BCM2835PowerMgtState, 2),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -120,6 +151,9 @@ static const VMStateDescription vmstate_bcm2835_powermgt = {
 static void bcm2835_powermgt_init(Object *obj)
 {
     BCM2835PowerMgtState *s = BCM2835_POWERMGT(obj);
+
+    timer_init_ns(&s->wdog_timer, QEMU_CLOCK_VIRTUAL,
+                  bcm2835_powermgt_wdog_expired, s);
 
     memory_region_init_io(&s->iomem, obj, &bcm2835_powermgt_ops, s,
                           TYPE_BCM2835_POWERMGT, 0x200);
@@ -134,6 +168,7 @@ static void bcm2835_powermgt_reset(DeviceState *dev)
     s->rstc = 0x00000102;
     s->rsts = 0x00001000;
     s->wdog = 0x00000000;
+    timer_del(&s->wdog_timer);
 }
 
 static void bcm2835_powermgt_class_init(ObjectClass *klass, const void *data)

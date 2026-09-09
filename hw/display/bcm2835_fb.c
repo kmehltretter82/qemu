@@ -228,6 +228,14 @@ void bcm2835_fb_validate_config(BCM2835FBConfig *config)
     config->yres_virtual = MIN(config->yres_virtual, YRES_MAX);
 
     /*
+     * Clamp the depth to the maximum the draw path supports (32 bpp). bpp is
+     * guest-set via FRAMEBUFFER_SET_DEPTH and feeds bcm2835_fb_get_pitch()
+     * as xres * (bpp >> 3); an unclamped large value overflows the uint32 pitch
+     * and the size reported to the guest.
+     */
+    config->bpp = MIN(config->bpp, 32);
+
+    /*
      * These are not minima: a 40x40 framebuffer will be accepted.
      * They're only used as defaults if the guest asks for zero size.
      */
@@ -352,10 +360,32 @@ static const MemoryRegionOps bcm2835_fb_ops = {
     .valid.max_access_size = 4,
 };
 
+static int bcm2835_fb_post_load(void *opaque, int version_id)
+{
+    BCM2835FBState *s = opaque;
+
+    /*
+     * fb_update_display() feeds config.xres/yres straight to
+     * framebuffer_update_display(), which writes that many rows and pixels into
+     * the console surface without clipping. The MMIO path keeps this safe by
+     * validating the config (clamping the geometry and depth) and resizing the
+     * surface to match; migration restores the config as bare UINT32 with
+     * neither step. A corrupt or hostile stream could restore an out-of-range
+     * geometry and cause an out-of-bounds write of the host surface on the next
+     * redraw. Re-validate and resize the surface, as the reconfigure path does.
+     */
+    bcm2835_fb_validate_config(&s->config);
+    s->invalidate = true;
+    qemu_console_resize(s->con, s->config.xres, s->config.yres);
+    qemu_set_irq(s->mbox_irq, s->pending);
+    return 0;
+}
+
 static const VMStateDescription vmstate_bcm2835_fb = {
     .name = TYPE_BCM2835_FB,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = bcm2835_fb_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_BOOL(lock, BCM2835FBState),
         VMSTATE_BOOL(invalidate, BCM2835FBState),
@@ -395,6 +425,7 @@ static void bcm2835_fb_reset(DeviceState *dev)
     BCM2835FBState *s = BCM2835_FB(dev);
 
     s->pending = false;
+    qemu_set_irq(s->mbox_irq, 0);
 
     s->config = s->initial_config;
 

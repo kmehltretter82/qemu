@@ -34,6 +34,11 @@ struct BCM2835PropertyState {
     uint32_t addr;
     char *command_line;
     bool pending;
+
+    /* Firmware GPIO expander (raspberrypi,firmware-gpio): lines 128-135 */
+    uint8_t exp_gpio_dir[8];
+    uint8_t exp_gpio_pol[8];
+    uint8_t exp_gpio_state[8];
 };
 
 #endif

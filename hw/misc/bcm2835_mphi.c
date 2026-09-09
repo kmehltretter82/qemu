@@ -28,11 +28,13 @@
 
 static inline void mphi_raise_irq(BCM2835MphiState *s)
 {
+    s->irq_level = true;
     qemu_set_irq(s->irq, 1);
 }
 
 static inline void mphi_lower_irq(BCM2835MphiState *s)
 {
+    s->irq_level = false;
     qemu_set_irq(s->irq, 0);
 }
 
@@ -133,6 +135,7 @@ static void mphi_reset(DeviceState *dev)
     s->ctrl = 0;
     s->intstat = 0;
     s->swirq = 0;
+    mphi_lower_irq(s);
 }
 
 static void mphi_realize(DeviceState *dev, Error **errp)
@@ -152,16 +155,26 @@ static void mphi_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
 }
 
+static int mphi_post_load(void *opaque, int version_id)
+{
+    BCM2835MphiState *s = opaque;
+
+    qemu_set_irq(s->irq, s->irq_level);
+    return 0;
+}
+
 const VMStateDescription vmstate_mphi_state = {
     .name = "mphi",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .post_load = mphi_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(outdda, BCM2835MphiState),
         VMSTATE_UINT32(outddb, BCM2835MphiState),
         VMSTATE_UINT32(ctrl, BCM2835MphiState),
         VMSTATE_UINT32(intstat, BCM2835MphiState),
         VMSTATE_UINT32(swirq, BCM2835MphiState),
+        VMSTATE_BOOL_V(irq_level, BCM2835MphiState, 2),
         VMSTATE_END_OF_LIST()
     }
 };

@@ -258,10 +258,31 @@ static const MemoryRegionOps bcm2835_aux_ops = {
     .valid.max_access_size = 4,
 };
 
+static int bcm2835_aux_post_load(void *opaque, int version_id)
+{
+    BCM2835AuxState *s = opaque;
+
+    /*
+     * The MMIO paths index read_fifo[read_pos] and assert read_count is within
+     * the FIFO, and can_receive() returns FIFO_LEN - read_count. These hold
+     * during normal operation, but read_pos and read_count are migrated as bare
+     * UINT8, so a corrupt stream could drive an out-of-bounds FIFO read or
+     * write and abort QEMU. Reject state that is not within the FIFO.
+     */
+    if (s->read_pos >= BCM2835_AUX_RX_FIFO_LEN ||
+        s->read_count > BCM2835_AUX_RX_FIFO_LEN) {
+        return -1;
+    }
+
+    bcm2835_aux_update(s);
+    return 0;
+}
+
 static const VMStateDescription vmstate_bcm2835_aux = {
     .name = TYPE_BCM2835_AUX,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = bcm2835_aux_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(read_fifo, BCM2835AuxState,
                             BCM2835_AUX_RX_FIFO_LEN),
@@ -284,6 +305,22 @@ static void bcm2835_aux_init(Object *obj)
     sysbus_init_irq(sbd, &s->irq);
 }
 
+static void bcm2835_aux_reset(DeviceState *dev)
+{
+    BCM2835AuxState *s = BCM2835_AUX(dev);
+
+    /*
+     * Clear the RX FIFO and interrupt state on reset. Without this the
+     * mini-UART kept stale received bytes and interrupt-enable bits across a
+     * system reset (guest reboot), unlike the hardware and unlike pl011.
+     */
+    s->read_pos = 0;
+    s->read_count = 0;
+    s->ier = 0;
+    s->iir = 0;
+    bcm2835_aux_update(s);
+}
+
 static void bcm2835_aux_realize(DeviceState *dev, Error **errp)
 {
     BCM2835AuxState *s = BCM2835_AUX(dev);
@@ -301,6 +338,7 @@ static void bcm2835_aux_class_init(ObjectClass *oc, const void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = bcm2835_aux_realize;
+    device_class_set_legacy_reset(dc, bcm2835_aux_reset);
     dc->vmsd = &vmstate_bcm2835_aux;
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
     device_class_set_props(dc, bcm2835_aux_props);

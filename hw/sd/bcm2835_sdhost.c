@@ -262,6 +262,15 @@ static uint64_t bcm2835_sdhost_read(void *opaque, hwaddr offset,
     case SDCMD:
         res = s->cmd;
         break;
+    case SDARG:
+        res = s->cmdarg;
+        break;
+    case SDTOUT:
+        res = s->tout;
+        break;
+    case SDCDIV:
+        res = s->cdiv;
+        break;
     case SDHSTS:
         res = s->status;
         break;
@@ -323,8 +332,10 @@ static void bcm2835_sdhost_write(void *opaque, hwaddr offset,
         }
         break;
     case SDTOUT:
+        s->tout = value;
         break;
     case SDCDIV:
+        s->cdiv = value;
         break;
     case SDHSTS:
         s->status &= ~value;
@@ -374,10 +385,29 @@ static const MemoryRegionOps bcm2835_sdhost_ops = {
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
+static int bcm2835_sdhost_post_load(void *opaque, int version_id)
+{
+    BCM2835SDHostState *s = opaque;
+
+    /*
+     * fifo_pop() indexes s->fifo[fifo_pos] without masking, so a corrupt
+     * migration stream could drive an out-of-bounds read. Reject state that is
+     * not within the FIFO.
+     */
+    if (s->fifo_pos < 0 || s->fifo_pos >= BCM2835_SDHOST_FIFO_LEN ||
+        s->fifo_len < 0 || s->fifo_len > BCM2835_SDHOST_FIFO_LEN) {
+        return -1;
+    }
+
+    bcm2835_sdhost_update_irq(s);
+    return 0;
+}
+
 static const VMStateDescription vmstate_bcm2835_sdhost = {
     .name = TYPE_BCM2835_SDHOST,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = bcm2835_sdhost_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(cmd, BCM2835SDHostState),
         VMSTATE_UINT32(cmdarg, BCM2835SDHostState),
@@ -415,6 +445,9 @@ static void bcm2835_sdhost_reset(DeviceState *dev)
 
     s->cmd = 0;
     s->cmdarg = 0;
+    s->status = 0;
+    s->tout = 0;
+    s->cdiv = 0;
     s->edm = 0x0000c60f;
     trace_bcm2835_sdhost_edm_change("device reset", s->edm);
     s->config = 0;
@@ -423,6 +456,8 @@ static void bcm2835_sdhost_reset(DeviceState *dev)
     s->datacnt = 0;
     s->fifo_pos = 0;
     s->fifo_len = 0;
+    s->vdd = 0;
+    bcm2835_sdhost_update_irq(s);
 }
 
 static void bcm2835_sdhost_class_init(ObjectClass *klass, const void *data)

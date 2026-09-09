@@ -276,6 +276,16 @@ static void clock_mux_update(CprmanClockMuxState *mux)
         return;
     }
 
+    if (src >= CPRMAN_NUM_CLOCK_MUX_SRC) {
+        /*
+         * SRC is a 4-bit field (0-15) but only CPRMAN_NUM_CLOCK_MUX_SRC sources
+         * exist. A guest can select a reserved value; treat it as ground rather
+         * than indexing srcs[] out of bounds.
+         */
+        clock_update(mux->out, 0);
+        return;
+    }
+
     freq = clock_get_hz(mux->srcs[src]);
 
     if (mux->int_bits == 0 && mux->frac_bits == 0) {

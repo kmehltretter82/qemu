@@ -12,8 +12,11 @@
 #include "hw/arm/bcm2835_peripherals.h"
 #include "hw/sd/sdhci.h"
 #include "hw/gpio/bcm2838_gpio.h"
+#include "hw/usb/hcd-xhci-sysbus.h"
 
 /* SPI */
+#define GIC_SPI_INTERRUPT_SYSTIMER0    64
+#define GIC_SPI_INTERRUPT_SPI0         118
 #define GIC_SPI_INTERRUPT_MBOX         33
 #define GIC_SPI_INTERRUPT_MPHI         40
 #define GIC_SPI_INTERRUPT_DWC2         73
@@ -22,7 +25,11 @@
 #define GIC_SPI_INTERRUPT_DMA_7_8      87
 #define GIC_SPI_INTERRUPT_DMA_9_10     88
 #define GIC_SPI_INTERRUPT_AUX_UART1    93
+#define GIC_SPI_INTERRUPT_GPIO0        113
+#define GIC_SPI_INTERRUPT_GPIO1        114
+#define GIC_SPI_INTERRUPT_GPIO2        115
 #define GIC_SPI_INTERRUPT_I2C          117
+#define GIC_SPI_INTERRUPT_XHCI         176
 #define GIC_SPI_INTERRUPT_SDHOST       120
 #define GIC_SPI_INTERRUPT_UART0        121
 #define GIC_SPI_INTERRUPT_RNG200       125
@@ -48,7 +55,7 @@
 #define GPU_INTERRUPT_DMA14     28
 #define GPU_INTERRUPT_DMA15     31
 
-#define BCM2838_MPHI_OFFSET     0xb200
+#define BCM2838_MPHI_OFFSET     0x6000
 #define BCM2838_MPHI_SIZE       0x200
 
 #define TYPE_BCM2838_PERIPHERALS "bcm2838-peripherals"
@@ -66,13 +73,14 @@ struct BCM2838PeripheralState {
 
     SDHCIState emmc2;
     BCM2838GpioState gpio;
+    XHCISysbusState xhci;
 
     OrIRQState mmc_irq_orgate;
     OrIRQState dma_7_8_irq_orgate;
     OrIRQState dma_9_10_irq_orgate;
 
-    UnimplementedDeviceState asb;
-    UnimplementedDeviceState clkisp;
+    MemoryRegion asb;
+    MemoryRegion rpivid_asb;
 };
 
 struct BCM2838PeripheralClass {

@@ -103,6 +103,7 @@ static const char *board_type(uint32_t board_rev)
     static const char *types[] = {
         "A", "B", "A+", "B+", "2B", "Alpha", "CM1", NULL, "3B", "Zero",
         "CM3", NULL, "Zero W", "3B+", "3A+", NULL, "CM3+", "4B",
+        "Zero 2 W", "400",
     };
     assert(FIELD_EX32(board_rev, REV_CODE, STYLE)); /* Only new style */
     int bt = FIELD_EX32(board_rev, REV_CODE, TYPE);
@@ -114,22 +115,32 @@ static const char *board_type(uint32_t board_rev)
 
 static void write_smpboot(ARMCPU *cpu, const struct arm_boot_info *info)
 {
-    static const ARMInsnFixup smpboot[] = {
+    ARMInsnFixup smpboot[] = {
         { 0xe1a0e00f }, /*    mov     lr, pc */
         { 0xe3a0fe00 + (BOARDSETUP_ADDR >> 4) }, /* mov pc, BOARDSETUP_ADDR */
         { 0xee100fb0 }, /*    mrc     p15, 0, r0, c0, c0, 5;get core ID */
         { 0xe7e10050 }, /*    ubfx    r0, r0, #0, #2       ;extract LSB */
-        { 0xe59f5014 }, /*    ldr     r5, =0x400000CC      ;load mbox base */
+        { 0xe59f5014 }, /*    ldr     r5, =mailbox 3 read/clear base */
         { 0xe320f001 }, /* 1: yield */
         { 0xe7953200 }, /*    ldr     r3, [r5, r0, lsl #4] ;read mbox for our core */
         { 0xe3530000 }, /*    cmp     r3, #0               ;spin while zero */
         { 0x0afffffb }, /*    beq     1b */
         { 0xe7853200 }, /*    str     r3, [r5, r0, lsl #4] ;clear mbox */
         { 0xe12fff13 }, /*    bx      r3                   ;jump to target */
-        { 0x400000cc }, /* (constant: mailbox 3 read/clear base) */
+        { 0 },          /* (constant: mailbox 3 read/clear base) */
         { 0, FIXUP_TERMINATOR }
     };
     static const uint32_t fixupcontext[FIXUP_MAX] = { 0 };
+
+    /*
+     * BCM2836/7 expose the local interrupt controller at 0x40000000,
+     * whereas BCM2838 moves it to 0xff800000.  The AArch32 secondary
+     * stub polls mailbox 3 directly, so it must use the SoC's physical
+     * control address (the DT range translation makes Linux use the same
+     * address when it releases a CPU).
+     */
+    smpboot[11].insn = board_processor_id(info->board_id) ==
+                       PROCESSOR_ID_BCM2838 ? 0xff8000cc : 0x400000cc;
 
     /* check that we don't overrun board setup vectors */
     QEMU_BUILD_BUG_ON(SMPBOOT_ADDR + sizeof(smpboot) > MVBAR_ADDR);
@@ -197,7 +208,8 @@ static void setup_boot(MachineState *machine, ARMCPU *cpu,
 
     s->binfo.ram_size = ram_size;
 
-    if (processor_id <= PROCESSOR_ID_BCM2836) {
+    if (processor_id <= PROCESSOR_ID_BCM2836 ||
+        !arm_feature(&cpu->env, ARM_FEATURE_AARCH64)) {
         /*
          * The BCM2835 and BCM2836 require some custom setup code to run
          * in Secure mode before booting a kernel (to set up the SMC vectors
@@ -214,10 +226,10 @@ static void setup_boot(MachineState *machine, ARMCPU *cpu,
     /* BCM2836 and BCM2837 requires SMP setup */
     if (processor_id >= PROCESSOR_ID_BCM2836) {
         s->binfo.smp_loader_start = SMPBOOT_ADDR;
-        if (processor_id == PROCESSOR_ID_BCM2836) {
-            s->binfo.write_secondary_boot = write_smpboot;
-        } else {
+        if (arm_feature(&cpu->env, ARM_FEATURE_AARCH64)) {
             s->binfo.write_secondary_boot = write_smpboot64;
+        } else {
+            s->binfo.write_secondary_boot = write_smpboot;
         }
         s->binfo.secondary_cpu_reset_hook = reset_secondary;
     }

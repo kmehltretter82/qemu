@@ -53,17 +53,36 @@
 
 #define BCM2708_DMA_CS_RW_MASK  0x30ff0001 /* All RW bits in DMA_CS */
 
+/* Upper bound on control blocks processed per activation (loop guard) */
+#define BCM2835_DMA_MAX_CBS     16384
+
 static void bcm2835_dma_update(BCM2835DMAState *s, unsigned c)
 {
     BCM2835DMAChan *ch = &s->chan[c];
     uint32_t data, xlen, xlen_td, ylen;
     int16_t dst_stride, src_stride;
 
+    /*
+     * Bound the number of control blocks processed per activation. A guest can
+     * build a circular control-block chain (nextconbk pointing back into the
+     * chain); real hardware would just keep the DMA engine busy, but here the
+     * whole walk runs synchronously under the BQL, so an unbounded loop hangs
+     * QEMU. This cap is far larger than any legitimate scatter-gather list.
+     */
+    unsigned cb_count = 0;
+
     if (!(s->enable & (1 << c))) {
         return;
     }
 
     while ((s->enable & (1 << c)) && (ch->conblk_ad != 0)) {
+        if (++cb_count > BCM2835_DMA_MAX_CBS) {
+            qemu_log_mask(LOG_GUEST_ERROR, "%s: DMA channel %u control-block "
+                          "chain too long (possible loop); aborting\n",
+                          __func__, c);
+            ch->cs |= BCM2708_DMA_ERR;
+            break;
+        }
         /* CB fetch */
         ch->ti = ldl_le_phys(&s->dma_as, ch->conblk_ad);
         ch->source_ad = ldl_le_phys(&s->dma_as, ch->conblk_ad + 4);
@@ -87,8 +106,12 @@ static void bcm2835_dma_update(BCM2835DMAState *s, unsigned c)
         xlen_td = xlen;
 
         while (ylen != 0) {
-            /* Normal transfer mode */
-            while (xlen != 0) {
+            /*
+             * Normal transfer mode. xlen counts bytes but the engine moves
+             * 32-bit words; use >= 4 so a non-multiple-of-4 length cannot
+             * underflow the counter and loop forever.
+             */
+            while (xlen >= 4) {
                 if (ch->ti & BCM2708_DMA_S_IGNORE) {
                     /* Ignore reads */
                     data = 0;
@@ -325,10 +348,22 @@ static const VMStateDescription vmstate_bcm2835_dma_chan = {
     }
 };
 
+static int bcm2835_dma_post_load(void *opaque, int version_id)
+{
+    BCM2835DMAState *s = opaque;
+    int n;
+
+    for (n = 0; n < BCM2835_DMA_NCHANS; n++) {
+        qemu_set_irq(s->chan[n].irq, s->chan[n].cs & BCM2708_DMA_INT);
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_bcm2835_dma = {
     .name = TYPE_BCM2835_DMA,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = bcm2835_dma_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_STRUCT_ARRAY(chan, BCM2835DMAState, BCM2835_DMA_NCHANS, 1,
                              vmstate_bcm2835_dma_chan, BCM2835DMAChan),
@@ -370,6 +405,7 @@ static void bcm2835_dma_reset(DeviceState *dev)
     s->int_status = 0;
     for (n = 0; n < BCM2835_DMA_NCHANS; n++) {
         bcm2835_dma_chan_reset(&s->chan[n]);
+        qemu_set_irq(s->chan[n].irq, 0);
     }
 }
 

@@ -29,6 +29,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(BCM2835MphiState, BCM2835_MPHI)
 struct BCM2835MphiState {
     SysBusDevice parent_obj;
     qemu_irq irq;
+    bool irq_level;
     MemoryRegion iomem;
 
     uint32_t outdda;

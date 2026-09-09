@@ -40,7 +40,14 @@ static void bcm2835_ic_update(BCM2835ICState *s)
     bool set = false;
 
     if (s->fiq_enable) {
-        if (s->fiq_select >= GPU_IRQS) {
+        if (s->fiq_select >= GPU_IRQS + ARM_IRQS) {
+            /*
+             * Source numbers above the 64 GPU + 8 ARM interrupts are a guest
+             * error; treat them as selecting no FIQ source rather than
+             * indexing out of range (extract32 would assert).
+             */
+            set = false;
+        } else if (s->fiq_select >= GPU_IRQS) {
             /* ARM IRQ */
             set = extract32(s->arm_irq_level, s->fiq_select - GPU_IRQS, 1);
         } else {

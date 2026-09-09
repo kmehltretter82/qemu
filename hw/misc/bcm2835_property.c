@@ -43,7 +43,9 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
 
     /* @(addr + 4) : Buffer response code */
     value = s->addr + 8;
-    while (value + 8 <= s->addr + tot_len) {
+    /* Compute the buffer end in 64-bit so a large tot_len cannot wrap. */
+    uint64_t buf_end = (uint64_t)s->addr + tot_len;
+    while ((uint64_t)value + 8 <= buf_end) {
         uint32_t tag = ldl_le_phys(&s->dma_as, value);
         uint32_t bufsize = ldl_le_phys(&s->dma_as, value + 4);
         /* @(value + 8) : Request/response indicator */
@@ -275,7 +277,8 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
             uint32_t length = ldl_le_phys(&s->dma_as, value + 16);
             int resp;
 
-            if (offset > 255 || length < 1 || length > 256) {
+            if (offset > 255 || length < 1 || length > 256 ||
+                offset + length > 256) {
                 resp = 1; /* invalid request */
             } else {
                 for (uint32_t e = 0; e < length; e++) {
@@ -415,6 +418,70 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
             }
             break;
         }
+        /* Firmware GPIO expander (lines 128..135) */
+
+        case RPI_FWREQ_GET_GPIO_CONFIG:
+        {
+            uint32_t gpio = ldl_le_phys(&s->dma_as, value + 12);
+            uint32_t line = gpio - 128;
+
+            if (line < 8) {
+                /* First word 0 signals success to the driver */
+                stl_le_phys(&s->dma_as, value + 12, 0);
+                stl_le_phys(&s->dma_as, value + 16, s->exp_gpio_dir[line]);
+                stl_le_phys(&s->dma_as, value + 20, s->exp_gpio_pol[line]);
+                stl_le_phys(&s->dma_as, value + 24, 0); /* term_en */
+                stl_le_phys(&s->dma_as, value + 28, 0); /* term_pull_up */
+            } else {
+                stl_le_phys(&s->dma_as, value + 12, gpio); /* error */
+            }
+            resplen = 20;
+            break;
+        }
+        case RPI_FWREQ_SET_GPIO_CONFIG:
+        {
+            uint32_t gpio = ldl_le_phys(&s->dma_as, value + 12);
+            uint32_t line = gpio - 128;
+
+            if (line < 8) {
+                s->exp_gpio_dir[line] = ldl_le_phys(&s->dma_as, value + 16);
+                s->exp_gpio_pol[line] = ldl_le_phys(&s->dma_as, value + 20);
+                s->exp_gpio_state[line] = ldl_le_phys(&s->dma_as, value + 32);
+                stl_le_phys(&s->dma_as, value + 12, 0);
+            } else {
+                stl_le_phys(&s->dma_as, value + 12, gpio);
+            }
+            resplen = 24;
+            break;
+        }
+        case RPI_FWREQ_GET_GPIO_STATE:
+        {
+            uint32_t gpio = ldl_le_phys(&s->dma_as, value + 12);
+            uint32_t line = gpio - 128;
+
+            if (line < 8) {
+                stl_le_phys(&s->dma_as, value + 12, 0);
+                stl_le_phys(&s->dma_as, value + 16, s->exp_gpio_state[line]);
+            } else {
+                stl_le_phys(&s->dma_as, value + 12, gpio);
+            }
+            resplen = 8;
+            break;
+        }
+        case RPI_FWREQ_SET_GPIO_STATE:
+        {
+            uint32_t gpio = ldl_le_phys(&s->dma_as, value + 12);
+            uint32_t line = gpio - 128;
+
+            if (line < 8) {
+                s->exp_gpio_state[line] = ldl_le_phys(&s->dma_as, value + 16);
+                stl_le_phys(&s->dma_as, value + 12, 0);
+            } else {
+                stl_le_phys(&s->dma_as, value + 12, gpio);
+            }
+            resplen = 8;
+            break;
+        }
         default:
             qemu_log_mask(LOG_UNIMP,
                           "bcm2835_property: unhandled tag 0x%08x\n", tag);
@@ -427,6 +494,20 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
         }
 
         stl_le_phys(&s->dma_as, value + 8, (1 << 31) | resplen);
+
+        /*
+         * Advance to the next tag. Guard in 64-bit: a malformed bufsize (e.g.
+         * 0xfffffff4) would otherwise wrap the 32-bit value and re-process the
+         * same tag forever. Stop if the next tag would run past the buffer, or
+         * past the 32-bit address space: the guest controls s->addr (via the
+         * mailbox) and tot_len, so buf_end can exceed 4 GiB, and value is a
+         * uint32_t. Without the UINT32_MAX check the += would wrap back into
+         * low memory and the walk would never terminate.
+         */
+        if ((uint64_t)value + bufsize + 12 > buf_end ||
+            (uint64_t)value + bufsize + 12 > UINT32_MAX) {
+            break;
+        }
         value += bufsize + 12;
     }
 
@@ -494,14 +575,26 @@ static const MemoryRegionOps bcm2835_property_ops = {
     .valid.max_access_size = 4,
 };
 
+static int bcm2835_property_post_load(void *opaque, int version_id)
+{
+    BCM2835PropertyState *s = opaque;
+
+    qemu_set_irq(s->mbox_irq, s->pending);
+    return 0;
+}
+
 static const VMStateDescription vmstate_bcm2835_property = {
     .name = TYPE_BCM2835_PROPERTY,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .post_load = bcm2835_property_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_MACADDR(macaddr, BCM2835PropertyState),
         VMSTATE_UINT32(addr, BCM2835PropertyState),
         VMSTATE_BOOL(pending, BCM2835PropertyState),
+        VMSTATE_UINT8_ARRAY_V(exp_gpio_dir, BCM2835PropertyState, 8, 2),
+        VMSTATE_UINT8_ARRAY_V(exp_gpio_pol, BCM2835PropertyState, 8, 2),
+        VMSTATE_UINT8_ARRAY_V(exp_gpio_state, BCM2835PropertyState, 8, 2),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -528,6 +621,7 @@ static void bcm2835_property_reset(DeviceState *dev)
     BCM2835PropertyState *s = BCM2835_PROPERTY(dev);
 
     s->pending = false;
+    qemu_set_irq(s->mbox_irq, 0);
 }
 
 static void bcm2835_property_realize(DeviceState *dev, Error **errp)
@@ -547,8 +641,6 @@ static void bcm2835_property_realize(DeviceState *dev, Error **errp)
 
     /* TODO: connect to MAC address of USB NIC device, once we emulate it */
     qemu_macaddr_default_if_unset(&s->macaddr);
-
-    bcm2835_property_reset(dev);
 }
 
 static const Property bcm2835_property_props[] = {
@@ -562,6 +654,7 @@ static void bcm2835_property_class_init(ObjectClass *klass, const void *data)
 
     device_class_set_props(dc, bcm2835_property_props);
     dc->realize = bcm2835_property_realize;
+    device_class_set_legacy_reset(dc, bcm2835_property_reset);
     dc->vmsd = &vmstate_bcm2835_property;
 }
 

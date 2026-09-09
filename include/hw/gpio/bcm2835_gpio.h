@@ -32,6 +32,12 @@ struct BCM2835GpioState {
     uint32_t lev0, lev1;
     uint8_t sd_fsel;
     qemu_irq out[54];
+    /* Levels last driven on the individual GPIO output lines. */
+    uint64_t out_level;
+
+    /* Event detection: bank 0 (GPIO 0-31), bank 1 (GPIO 32-53) */
+    uint32_t ren[2], fen[2], hen[2], len[2], aren[2], afen[2], eds[2];
+    qemu_irq irq[3];
 };
 
 #define TYPE_BCM2835_GPIO "bcm2835_gpio"
