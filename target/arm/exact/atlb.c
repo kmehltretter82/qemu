@@ -4,31 +4,33 @@
  * Stock QEMU's softmmu TLB is untagged, so it must be flushed whenever the
  * ASID or VMID changes, and it re-walks the guest page tables far more often
  * than real hardware would. A real ARM64 TLB is tagged by (regime, VMID,
- * ASID) and is only allowed to drop an entry when the guest executes the
- * matching TLBI. The kernel may therefore never rely on an entry disappearing
- * on its own, and any modification of a live translation without the
- * architecturally required invalidation is a bug that only shows up on real
- * silicon.
+ * ASID). Hardware may evict entries, but software cannot rely on eviction.
+ * Retaining entries until a matching TLBI models one allowed behavior.
  *
  * This models that rule as an observer. On every successful page table walk
  * we record the leaf descriptor (its physical address and value) under the
  * architectural key. TLBI operations remove entries with exactly the scope
  * the architecture gives them. If a later walk of the same key finds the
  * descriptor materially changed while our entry was still live, the guest
- * changed a mapping that hardware would still have been caching: that is a
- * missing TLBI, or a break-before-make violation.
+ * changed a mapping that hardware could still have been caching. Reports
+ * identify candidate missing-TLBI or BBM errors; their architectural
+ * preconditions still need checking against the guest's configuration.
  *
  * Changes that hardware is allowed to observe without an invalidation
  * (access flag, dirty state, permissions) are classified separately and not
- * reported.
+ * reported.  This also applies while a hinted contiguous set is being
+ * repainted: Arm rule R_JQQTC permits a complete OA/attributes/permissions
+ * choice consistent with one valid member, not a mixture of members' fields.
  *
- * Limitations of this first version, deliberately chosen so that it cannot
- * produce false positives:
- *  - one global table, and every TLBI is treated as broadcast, so a missing
- *    inner-shareable qualifier is not detected;
+ * Limits (a clean run is not proof of architectural correctness):
+ *  - per-PE shadows observe successful walks, not every hardware TLB lookup;
+ *  - contiguous snapshots are observations, not proof of update completion;
+ *  - no coalesced translations, stale permissions or MTE faults are injected;
+ *  - TLBI completion is synchronous here; DSB completion is not modeled;
  *  - TLBI operations that are not decoded drop everything, which can only
  *    lose detections, never invent them;
- *  - only the EL1&0 and EL2&0 stage 1 regimes are tracked.
+ *  - the contiguous contract is limited to conventional AArch64 stage-1
+ *    descriptors; other layouts are counted as unavailable.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -46,6 +48,7 @@
 #include "cpregs.h"
 #include "mmuidx-internal.h"
 #include "exact.h"
+#include "tlb-rules.h"
 
 bool arm_exact_tlb_enabled;
 
@@ -66,10 +69,8 @@ bool arm_exact_tlb_enabled;
  * change to them alone is not a missing-TLBI bug:
  *   10    AF        set by the hardware access flag update
  *   51    DBM       dirty bit modifier
- *   7:6   AP[2:1]   permissions (a permission *relaxation* needs no TLBI,
- *                   and a restriction is caught by its own use, so treat
- *                   permission changes as benign here and report them only
- *                   under the "perm" class)
+ *   7:6   AP[2:1]   permissions (allow updates with deferred TLBI; this
+ *                   observer does not verify eventual permission revocation)
  *   53,54 PXN/UXN
  *   58:55 software use
  *   62:59 PBHA / ignored
@@ -103,6 +104,29 @@ static uint64_t ex_benign_mask(CPUARMState *env, ARMMMUIdx mmu_idx, int level)
         return EX_BENIGN_MASK;
     }
     return level == 1 ? EX_BENIGN_MASK_V6_L1 : EX_BENIGN_MASK_V6_L2;
+}
+
+static ExLeafPolicy ex_leaf_policy(CPUARMState *env, ARMMMUIdx mmu_idx,
+                                   uint64_t va, int level)
+{
+    ExLeafPolicy p = { .benign_mask = ex_benign_mask(env, mmu_idx, level) };
+    unsigned el = regime_el(mmu_idx);
+
+    if (!regime_is_stage2(mmu_idx) && arm_el_is_aa64(env, el)) {
+        ARMVAParameters param = aa64_va_parameters(env, va, mmu_idx, true,
+                                                   false);
+
+        p.s1_attrs = true;
+        p.mair = env->cp15.mair_el[el];
+        p.mair2 = env->cp15.mair2_el[el];
+        p.aie = param.aie;
+        p.mte = cpu_isar_feature(aa64_mte, env_archcpu(env));
+        /* GP is a guarded-page permission, not a cacheability change. */
+        if (cpu_isar_feature(aa64_bti, env_archcpu(env))) {
+            p.benign_mask |= EX_DESC_GP;
+        }
+    }
+    return p;
 }
 
 typedef struct ExKey {
@@ -140,6 +164,7 @@ typedef struct ExDesc {
     ExKey key;                  /* what this descriptor last translated */
     uint64_t desc_pa;           /* where it lives, to tell hierarchies apart */
     bool have_key;
+    ExLeafPolicy policy;
 } ExDesc;
 
 typedef struct ExPending {
@@ -153,6 +178,7 @@ static GHashTable *ex_desc;         /* ram_addr_t -> ExDesc */
 static GHashTable *ex_pt_pages;     /* set of page numbers holding descriptors */
 static ExPending ex_pending[EX_MAX_CPUS];
 static uint64_t ex_stat_pt_pages, ex_stat_desc_stores, ex_stat_bbm;
+static uint64_t ex_stat_bbm_accepted;
 
 static QemuMutex ex_lock;
 /*
@@ -166,6 +192,7 @@ static unsigned ex_ncpus;
 static uint64_t ex_stat_fills, ex_stat_hits, ex_stat_benign, ex_stat_violations;
 static uint64_t ex_tlbi_seq, ex_stat_removed, ex_stat_contig_checked;
 static uint64_t ex_stat_broadcast, ex_stat_local, ex_stat_table_fills;
+static uint64_t ex_stat_contig[EX_CONTIG_STATES], ex_stat_contig_partial;
 static bool ex_capped;
 static GHashTable *ex_sites;        /* distinct report sites, with counts */
 
@@ -263,16 +290,22 @@ static GHashTable *ex_tab_of(unsigned cpu)
 /* ---------------------------------------------------------------- lookup */
 
 /*
- * A 32-bit guest keeps its PC in r15, not in env->pc, so every arm32 TLB
- * report attributed the offending access to pc=0x0. This is the third model
- * to have had it (icache.c, then dcache.c), which is why it was found by
- * auditing all of them for env->pc rather than waiting for the next report.
+ * Eight bytes for a long descriptor, four for a short one. The descriptor
+ * watch reads back what a store changed, and reading a pair of short
+ * descriptors as one long one reports a break-before-make violation against an
+ * entry that never moved.
  */
 static unsigned ex_desc_size(CPUARMState *env, ARMMMUIdx mmu_idx)
 {
     return regime_using_lpae_format(env, mmu_idx) ? 8 : 4;
 }
 
+/*
+ * A 32-bit guest keeps its PC in r15, not in env->pc, so every arm32 TLB
+ * report attributed the offending access to pc=0x0. This is the third model
+ * to have had it (icache.c, then dcache.c), which is why it was found by
+ * auditing all of them for env->pc rather than waiting for the next report.
+ */
 static uint64_t ex_pc(CPUARMState *env)
 {
     return is_a64(env) ? env->pc : env->regs[15];
@@ -402,9 +435,8 @@ static void ex_report(CPUARMState *env, const char *cls, const ExEntry *old,
  * Watching the stores themselves, rather than only comparing descriptors at
  * walk time, is what makes a break-before-make violation visible. A kernel
  * that clears a descriptor and writes it again without an invalidation in
- * between leaves a window in which hardware may still be using the old
- * translation, and the final value may differ only in permission bits, which
- * is indistinguishable at walk time from a legal in-place permission change.
+ * between matters when the replacement changes something requiring BBM.
+ * A clear/remake that changes only permissions is not itself a violation.
  *
  * Pages holding descriptors we have walked are marked with QEMU's existing
  * code-page protection, so every store to them takes the slow path. That
@@ -457,8 +489,14 @@ static void ex_resolve_locked(CPUState *cs)
      * tagged "(contiguous block)" because bit 52 landed inside the neighbour.
      * A long-descriptor table has nothing at the odd four-byte offsets, so
      * the extra lookups simply miss.
+     *
+     * Start from the eight-byte boundary even though the step is four: a store
+     * that begins in the middle of a long descriptor - a memset or memcpy over
+     * a page-table page, say - still overwrites the descriptor that starts
+     * before it, and rounding down only to four would step straight past it.
+     * Rounding down to eight and stepping by four covers both formats.
      */
-    for (a = p->ram_addr & ~3ULL; a < end; a += 4) {
+    for (a = p->ram_addr & ~7ULL; a < end; a += 4) {
         ExDesc *d = g_hash_table_lookup(ex_desc, GUINT_TO_POINTER(a));
         uint64_t newv, old;
 
@@ -491,14 +529,18 @@ static void ex_resolve_locked(CPUState *cs)
              * a legal idiom for a permission change: the architecture does
              * not require break-before-make for those, and Linux uses it in
              * ptep_modify_prot_start()/commit() with the flush deferred to
-             * the mmu_gather. It is only a violation if the mapping really
-             * changed, or if it is part of a contiguous block, where
-             * hardware may hold one entry covering the whole block.
+             * the mmu_gather. R_JQQTC makes the same transition permissible
+             * for a hinted contiguous set: while members differ, a lookup may
+             * use one member's complete tuple. A difference outside the
+             * modeled permission/attribute exceptions is checked separately.
              */
-            if (d->broke_seq && d->broke_seq == ex_tlbi_seq + 1 &&
-                (((d->broke_val ^ newv) & ~EX_BENIGN_MASK) ||
-                 (d->size == 8 &&
-                  ((d->broke_val | newv) & (1ULL << 52))))) {
+            bool pending_break = d->broke_seq &&
+                                 d->broke_seq == ex_tlbi_seq + 1;
+
+            if (pending_break &&
+                ex_leaf_change_benign(d->policy, d->broke_val, newv)) {
+                ex_stat_bbm_accepted++;
+            } else if (pending_break) {
                 ex_stat_bbm++;
                 ex_stat_violations++;
                 if (!ex_site_seen(1, d->broke_pc, p->pc)) {
@@ -509,12 +551,9 @@ static void ex_resolve_locked(CPUState *cs)
                         "valid again by cpu=%d pc=0x%" PRIx64
                         " with no TLBI in between\n"
                         "exact-tlb:   0x%016" PRIx64 " -> 0 -> 0x%016" PRIx64
-                        "%s\n",
+                        "\n",
                         (uint64_t)a, d->broke_cpu, d->broke_pc,
-                        cs->cpu_index, p->pc, d->broke_val, newv,
-                        (d->size == 8 &&
-                         ((d->broke_val | newv) & (1ULL << 52)))
-                        ? " (contiguous block)" : "");
+                        cs->cpu_index, p->pc, d->broke_val, newv);
                 }
             }
             d->broke_seq = 0;
@@ -525,7 +564,8 @@ static void ex_resolve_locked(CPUState *cs)
 
 /* remember a descriptor we have walked, and make stores to its page trap */
 static ram_addr_t ex_desc_note(void *host, uint64_t val, const ExKey *key,
-                               uint64_t desc_pa, unsigned size)
+                               uint64_t desc_pa, unsigned size,
+                               ExLeafPolicy policy)
 {
     MemoryRegion *mr;
     ram_addr_t offset, ra;
@@ -547,6 +587,7 @@ static ram_addr_t ex_desc_note(void *host, uint64_t val, const ExKey *key,
         d->key = *key;
         d->desc_pa = desc_pa;
         d->have_key = true;
+        d->policy = policy;
         return ra;
     }
     d = g_new0(ExDesc, 1);
@@ -556,6 +597,7 @@ static ram_addr_t ex_desc_note(void *host, uint64_t val, const ExKey *key,
     d->key = *key;
     d->desc_pa = desc_pa;
     d->have_key = true;
+    d->policy = policy;
     g_hash_table_insert(ex_desc, GUINT_TO_POINTER(ra), d);
 
     if (!g_hash_table_contains(ex_pt_pages,
@@ -603,99 +645,66 @@ void arm_exact_ptwatch_write(CPUState *cs, uint64_t ram_addr, unsigned size,
 /* ------------------------------------------------------------ contiguous */
 
 /*
- * A leaf with the contiguous hint (bit 52) tells the CPU it may cache one TLB
- * entry covering the whole aligned block. The architecture then requires every
- * descriptor of that block to be consistent: same attributes, consecutive
- * output addresses, and the hint set throughout. Linux maintains this by
- * unfolding a block (clear every entry, invalidate, then rewrite) before
- * changing any single entry, so a block that is fully valid but internally
- * inconsistent is a bug of the contpte/hugetlb kind.
- *
- * Blocks containing an invalid entry are skipped: that is the legitimate
- * transient state in the middle of contpte_convert(), where entries are
- * cleared one at a time before the invalidation.
+ * R_JQQTC bounds the choices when CONT is consistent, even while other
+ * fields differ. I_PGVGZ excludes invalid descriptors, not the entire set.
+ * Read all members and classify the observed set. A multi-load snapshot
+ * cannot establish that a guest update has completed, nor prove missing
+ * BBM by itself. Keep observations out of the VIOLATION count.
  */
-#define EX_CONTIG_MAX     128       /* the largest block: 16K granule, level 3 */
 #define EX_CONTIG_SAMPLE  64        /* re-walks between block re-checks */
 
-/*
- * How many descriptors a contiguous block covers (DDI0487 D8.6). It depends on
- * the translation granule, which the walk does not hand us directly - but the
- * leaf's page size does: at level 3 it *is* the granule, and a level-2 block is
- * granule + (granule - 3) address bits wide, so lg = 2g - 3.
- *
- *   granule   level 3   level 2
- *      4K       16        16
- *     16K      128        32
- *     64K       32        32
- */
-static unsigned ex_contig_entries(int level, int lg_page_size)
+static void ex_check_contig(CPUARMState *env, ARMMMUIdx mmu_idx,
+                            const ExKey *key, uint64_t desc_pa,
+                            int level, int lg_page_size)
 {
-    int g = level == 3 ? lg_page_size : (lg_page_size + 3) / 2;
-
-    switch (g) {
-    case 12: return 16;
-    case 14: return level == 3 ? 128 : 32;
-    case 16: return 32;
-    default: return 0;          /* not a granule we know: do not guess */
-    }
-}
-
-static void ex_check_contig(CPUARMState *env, const ExKey *key, uint64_t desc_pa,
-                            uint64_t desc_val, int level, int lg_page_size)
-{
-    uint64_t oa_mask = MAKE_64BIT_MASK(lg_page_size, 48 - lg_page_size);
-    uint64_t attr_mask = ~(oa_mask | (1ULL << 10) | (1ULL << 51) | (3ULL << 6));
-    unsigned entries = ex_contig_entries(level, lg_page_size);
-    uint64_t base_pa, d[EX_CONTIG_MAX], base_oa;
+    ExContigGeometry g = ex_contig_geometry(level, lg_page_size);
+    ExContigSummary s;
+    ARMVAParameters param;
+    uint64_t base_pa, d[EX_CONTIG_MAX];
     unsigned i;
 
-    if (!entries) {
+    ex_stat_contig_checked++;
+    if (!g.entries || regime_is_stage2(mmu_idx) ||
+        !arm_el_is_aa64(env, regime_el(mmu_idx)) ||
+        key->space != ARMSS_NonSecure) {
+        ex_stat_contig[EX_CONTIG_UNAVAILABLE]++;
         return;
     }
-    base_pa = desc_pa & ~(uint64_t)((entries * 8) - 1);
+    param = aa64_va_parameters(env, key->va, mmu_idx, true, false);
+    if (param.ds || param.ps > 5 || param.aie || param.pie ||
+        (regime_sctlr(env, mmu_idx) & SCTLR_EE)) {
+        ex_stat_contig[EX_CONTIG_UNAVAILABLE]++;
+        return;
+    }
+    base_pa = desc_pa & ~(uint64_t)((g.entries * 8) - 1);
 
-    ex_stat_contig_checked++;
-
-    for (i = 0; i < entries; i++) {
+    for (i = 0; i < g.entries; i++) {
         MemTxResult res;
 
         d[i] = address_space_ldq(&address_space_memory, base_pa + i * 8,
                                  MEMTXATTRS_UNSPECIFIED, &res);
         if (res != MEMTX_OK) {
+            ex_stat_contig[EX_CONTIG_UNAVAILABLE]++;
             return;
-        }
-        if (!(d[i] & 1)) {
-            return;             /* mid-unfold, not a bug */
         }
     }
-
-    base_oa = d[0] & oa_mask;
-    for (i = 0; i < entries; i++) {
-        const char *why = NULL;
-
-        if (!(d[i] & (1ULL << 52))) {
-            why = "contiguous hint missing on a member";
-        } else if ((d[i] & attr_mask) != (d[0] & attr_mask)) {
-            why = "attributes differ inside the block";
-        } else if ((d[i] & oa_mask) !=
-                   base_oa + ((uint64_t)i << lg_page_size)) {
-            why = "output addresses not consecutive";
-        }
-        if (why) {
-            if (!ex_site_seen(2, ex_pc(env), key->va)) {
-                qemu_log_mask(LOG_EXACT,
-                    "exact-tlb: VIOLATION contiguous block inconsistent (%s) "
-                    "cpu=%d pc=0x%" PRIx64 " va=0x%" PRIx64 " regime=%s\n"
-                    "exact-tlb:   block at PA 0x%" PRIx64 ", entry %u of %u is "
-                    "0x%016" PRIx64 ", entry 0 is 0x%016" PRIx64 "\n",
-                    why, env_cpu(env)->cpu_index, ex_pc(env),
-                    key->va, ex_regime_name(key->regime), base_pa, i,
-                    entries, d[i], d[0]);
-            }
-            ex_stat_violations++;
-            return;
-        }
+    s = ex_contig_analyze(d, g);
+    ex_stat_contig[s.state]++;
+    if (s.valid && s.invalid) {
+        ex_stat_contig_partial++;
+    }
+    if ((s.state == EX_CONTIG_MIXED_HINT ||
+         s.state == EX_CONTIG_OA_UNRESOLVED) &&
+        !ex_site_seen(2, ex_pc(env), key->va)) {
+        qemu_log_mask(LOG_EXACT,
+            "exact-tlb: OBSERVATION contiguous snapshot rule=%s "
+            "cpu=%d pc=0x%" PRIx64 " va=0x%" PRIx64 " regime=%s "
+            "block_pa=0x%" PRIx64 " valid=%u invalid=%u; "
+            "update completion and cached outcomes not observed\n",
+            s.state == EX_CONTIG_MIXED_HINT ? "R_NGLXZ(mixed-hint)" :
+                                            "R_JQQTC(oa-unresolved)",
+            env_cpu(env)->cpu_index, ex_pc(env), key->va,
+            ex_regime_name(key->regime), base_pa, s.valid, s.invalid);
     }
 }
 
@@ -736,7 +745,11 @@ void arm_exact_tlb_table(CPUARMState *env, ARMMMUIdx mmu_idx,
 
     qemu_mutex_lock(&ex_lock);
     ex_resolve_locked(env_cpu(env));
-    ra_desc = ex_desc_note(host, desc_val, &key, desc_pa, ex_desc_size(env, mmu_idx));
+    ra_desc = ex_desc_note(host, desc_val, &key, desc_pa,
+                          ex_desc_size(env, mmu_idx), (ExLeafPolicy) {
+                              .benign_mask = ex_benign_mask(env, mmu_idx,
+                                                           level),
+                          });
     tab = ex_tab_of(env_cpu(env)->cpu_index);
     if (!tab) {
         qemu_mutex_unlock(&ex_lock);
@@ -805,6 +818,7 @@ void arm_exact_tlb_leaf(CPUARMState *env, ARMMMUIdx mmu_idx,
     ExKey key;
     ExEntry *e;
     GHashTable *ex_tab;
+    ExLeafPolicy policy;
 
     if (!arm_exact_tlb_enabled || !ex_ncpus || !ex_tracked(mmu_idx)) {
         return;
@@ -817,10 +831,12 @@ void arm_exact_tlb_leaf(CPUARMState *env, ARMMMUIdx mmu_idx,
     key.regime = ex_regime_of(mmu_idx);
     key.space = space;
     key.level = level;
+    policy = ex_leaf_policy(env, mmu_idx, va, level);
 
     qemu_mutex_lock(&ex_lock);
     ex_resolve_locked(env_cpu(env));
-    ex_desc_note(host, desc_val, &key, desc_pa, ex_desc_size(env, mmu_idx));
+    ex_desc_note(host, desc_val, &key, desc_pa,
+                 ex_desc_size(env, mmu_idx), policy);
     ex_tab = ex_tab_of(env_cpu(env)->cpu_index);
     if (!ex_tab) {
         qemu_mutex_unlock(&ex_lock);
@@ -830,9 +846,7 @@ void arm_exact_tlb_leaf(CPUARMState *env, ARMMMUIdx mmu_idx,
     if (e) {
         ex_stat_hits++;
         if (e->desc_pa == desc_pa && e->desc_val != desc_val) {
-            uint64_t diff = e->desc_val ^ desc_val;
-
-            if (diff & ~ex_benign_mask(env, mmu_idx, level)) {
+            if (!ex_leaf_change_benign(policy, e->desc_val, desc_val)) {
                 ex_stat_violations++;
                 ex_report(env, (desc_val & 1) && (e->desc_val & 1)
                           ? "live translation changed without invalidation"
@@ -845,14 +859,12 @@ void arm_exact_tlb_leaf(CPUARMState *env, ARMMMUIdx mmu_idx,
         }
         /*
          * Re-walks are sampled rather than checked every time: the block is
-         * 16 extra guest loads, and a corruption introduced through a member
+         * up to 128 extra guest loads, and a change through a member
          * we never walk would otherwise stay invisible.
          */
-        if ((desc_val & (1ULL << 52)) &&
-            ex_contig_entries(level, lg_page_size) &&
-            key.space == ARMSS_NonSecure && e->contig_countdown-- == 0) {
+        if ((desc_val & EX_DESC_CONT) && e->contig_countdown-- == 0) {
             e->contig_countdown = EX_CONTIG_SAMPLE;
-            ex_check_contig(env, &key, desc_pa, desc_val, level, lg_page_size);
+            ex_check_contig(env, mmu_idx, &key, desc_pa, level, lg_page_size);
         }
         e->desc_pa = desc_pa;
         e->desc_val = desc_val;
@@ -874,10 +886,8 @@ void arm_exact_tlb_leaf(CPUARMState *env, ARMMMUIdx mmu_idx,
         e->fill_tlbi_seq = ex_tlbi_seq;
         g_hash_table_insert(ex_tab, nk, e);
         ex_stat_fills++;
-        if ((desc_val & (1ULL << 52)) &&
-            ex_contig_entries(level, lg_page_size) &&
-            key.space == ARMSS_NonSecure) {
-            ex_check_contig(env, &key, desc_pa, desc_val, level, lg_page_size);
+        if (desc_val & EX_DESC_CONT) {
+            ex_check_contig(env, mmu_idx, &key, desc_pa, level, lg_page_size);
         }
     } else if (!ex_capped) {
         ex_capped = true;
@@ -1343,7 +1353,8 @@ void arm_exact_tlb_dump(void)
                   ", walk cache entries filled=%" PRIu64 "\n"
                   "exact-tlb: page table pages watched: %" PRIu64
                   ", descriptor stores seen: %" PRIu64
-                  ", break-before-make violations: %" PRIu64 "\n",
+                  ", break-before-make violations: %" PRIu64
+                  ", benign break-remakes: %" PRIu64 "\n",
                   live, ex_stat_fills, ex_stat_hits,
                   ex_stat_benign, ex_stat_violations, ex_tlbi_seq,
                   ex_stat_removed,
@@ -1351,5 +1362,17 @@ void arm_exact_tlb_dump(void)
                   ex_tlbi_by_kind[EX_K_ASID], ex_tlbi_by_kind[EX_K_VA],
                   ex_tlbi_by_kind[EX_K_RANGE], ex_stat_contig_checked,
                   ex_stat_broadcast, ex_stat_local, ex_stat_table_fills,
-                  ex_stat_pt_pages, ex_stat_desc_stores, ex_stat_bbm);
+                  ex_stat_pt_pages, ex_stat_desc_stores, ex_stat_bbm,
+                  ex_stat_bbm_accepted);
+    qemu_log_mask(LOG_EXACT,
+        "exact-tlb: contiguous contracts: uniform=%" PRIu64
+        " bounded=%" PRIu64 " partial=%" PRIu64 " empty=%" PRIu64
+        " unhinted=%" PRIu64 " mixed-hint=%" PRIu64
+        " oa-unresolved=%" PRIu64 " unavailable=%" PRIu64 "\n",
+        ex_stat_contig[EX_CONTIG_UNIFORM], ex_stat_contig[EX_CONTIG_BOUNDED],
+        ex_stat_contig_partial, ex_stat_contig[EX_CONTIG_EMPTY],
+        ex_stat_contig[EX_CONTIG_UNHINTED],
+        ex_stat_contig[EX_CONTIG_MIXED_HINT],
+        ex_stat_contig[EX_CONTIG_OA_UNRESOLVED],
+        ex_stat_contig[EX_CONTIG_UNAVAILABLE]);
 }

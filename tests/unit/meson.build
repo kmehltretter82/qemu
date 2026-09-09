@@ -40,6 +40,7 @@ tests = {
   'test-qtree': [],
   'test-bitops': [],
   'test-bitcnt': [],
+  'test-exact-tlb': [],
   'test-qgraph': ['../qtest/libqos/qgraph.c'],
   'check-qom-interface': [qom],
   'check-qom-proplist': [qom],
