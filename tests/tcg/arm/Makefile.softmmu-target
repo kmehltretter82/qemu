@@ -20,6 +20,20 @@ run-test-armv6m-undef: QEMU_OPTS=-semihosting-config enable=on,target=native,cha
 
 ARM_TESTS+=test-armv6m-undef
 
+arm11mpcore-sgi: arm11mpcore-sgi.S arm11mpcore-sgi.ld
+	$(CC) -march=armv6k -marm -ffreestanding -nostdlib -static \
+		-Wl,--build-id=none -x assembler-with-cpp \
+		$< -o $@ -T $(ARM_SRC)/$@.ld
+
+run-arm11mpcore-sgi: QEMU_OPTS=-M realview-eb-mpcore -smp 4 \
+	-serial none \
+	-semihosting-config enable=on,target=native,chardev=output \
+	-device loader,addr=0x10000,cpu-num=1 \
+	-device loader,addr=0x10000,cpu-num=2 \
+	-device loader,addr=0x10000,cpu-num=3 -kernel
+
+ARM_TESTS+=arm11mpcore-sgi
+
 # These objects provide the basic boot code and helper functions for all tests
 CRT_OBJS=boot.o
 
