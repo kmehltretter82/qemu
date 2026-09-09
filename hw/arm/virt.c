@@ -408,23 +408,6 @@ static void virt_fdt_dma_coherent(void *fdt, const char *node)
     }
 }
 
-static void virt_poison_region(MemoryRegion *mr, uint8_t byte, uint64_t seed)
-{
-    uint64_t size = memory_region_size(mr);
-    uint8_t *p = memory_region_get_ram_ptr(mr);
-
-    if (!seed) {
-        memset(p, byte, size);
-        return;
-    }
-    for (uint64_t off = 0; off + 8 <= size; off += 8) {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        stq_p(p + off, seed);
-    }
-}
-
 /*
  * qemu-exact: -machine virt,x-exact-poison=on fills RAM (and MTE tag RAM)
  * with a pattern (x-poison-byte) or seeded random data (x-poison-seed) at
@@ -438,11 +421,13 @@ static void virt_machine_reset(MachineState *ms, ResetType type)
     if (vms->exact_poison) {
         Object *tag;
 
-        virt_poison_region(ms->ram, vms->poison_byte, vms->poison_seed);
+        arm_exact_poison_region(ms->ram, vms->poison_byte,
+                                vms->poison_seed);
         tag = object_resolve_path_type("mach-virt.tag", TYPE_MEMORY_REGION, NULL);
         if (tag) {
-            virt_poison_region(MEMORY_REGION(tag), vms->poison_byte,
-                               vms->poison_seed ? vms->poison_seed ^ 0x5555 : 1);
+            arm_exact_poison_region(MEMORY_REGION(tag), vms->poison_byte,
+                                    vms->poison_seed ?
+                                    vms->poison_seed ^ 0x5555 : 1);
         }
     }
     qemu_devices_reset(type);

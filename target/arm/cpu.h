@@ -2739,8 +2739,11 @@ extern const uint64_t pred_esz_masks[5];
 #define TAG_GRANULE      (1 << LOG2_TAG_GRANULE)
 
 /* qemu-exact: reset-state poisoning (target/arm/exact/poison.c) */
+struct MemoryRegion;
 extern bool arm_exact_poison_regs;
 extern uint64_t arm_exact_poison_seed;
+void arm_exact_poison_region(struct MemoryRegion *mr, uint8_t byte,
+                             uint64_t seed);
 void arm_exact_poison_cpu(ARMCPU *cpu, bool primary);
 
 #endif

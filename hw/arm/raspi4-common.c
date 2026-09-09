@@ -16,6 +16,7 @@
 #include "qemu/cutils.h"
 #include "qemu/module.h"
 #include "qapi/error.h"
+#include "qapi/visitor.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/bcm2838.h"
 #include "hw/arm/raspi4_platform.h"
@@ -24,6 +25,8 @@
 #include "hw/core/boards.h"
 #include "hw/core/loader.h"
 #include "qom/object.h"
+#include "system/reset.h"
+#include "target/arm/cpu.h"
 
 #define SMPBOOT_ADDR    0x300
 #define FIRMWARE_ADDR   0x80000
@@ -92,7 +95,66 @@ static void setup_boot(MachineState *machine, ARMCPU *cpu, size_t ram_size)
         s->binfo.firmware_loaded = true;
     }
 
+    arm_exact_poison_regs = s->exact_poison;
+    arm_exact_poison_seed = s->poison_seed;
     arm_load_kernel(cpu, machine, &s->binfo);
+}
+
+static void raspi4_machine_reset(MachineState *machine, ResetType type)
+{
+    Raspi4BaseMachineState *s = RASPI4_BASE_MACHINE(machine);
+
+    if (s->exact_poison) {
+        arm_exact_poison_region(machine->ram, s->poison_byte,
+                                s->poison_seed);
+    }
+    qemu_devices_reset(type);
+}
+
+static bool raspi4_get_exact_poison(Object *obj, Error **errp)
+{
+    return RASPI4_BASE_MACHINE(obj)->exact_poison;
+}
+
+static void raspi4_set_exact_poison(Object *obj, bool value, Error **errp)
+{
+    RASPI4_BASE_MACHINE(obj)->exact_poison = value;
+}
+
+static void raspi4_get_poison_byte(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    uint8_t value = RASPI4_BASE_MACHINE(obj)->poison_byte;
+
+    visit_type_uint8(v, name, &value, errp);
+}
+
+static void raspi4_set_poison_byte(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    uint8_t value;
+
+    if (visit_type_uint8(v, name, &value, errp)) {
+        RASPI4_BASE_MACHINE(obj)->poison_byte = value;
+    }
+}
+
+static void raspi4_get_poison_seed(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    uint64_t value = RASPI4_BASE_MACHINE(obj)->poison_seed;
+
+    visit_type_uint64(v, name, &value, errp);
+}
+
+static void raspi4_set_poison_seed(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    uint64_t value;
+
+    if (visit_type_uint64(v, name, &value, errp)) {
+        RASPI4_BASE_MACHINE(obj)->poison_seed = value;
+    }
 }
 
 void raspi4_common_machine_init(MachineState *machine, BCM2838State *soc)
@@ -162,11 +224,41 @@ void raspi4_common_machine_class_init(MachineClass *mc, uint32_t board_rev,
     mc->default_ram_id = "ram";
 }
 
+static void raspi4_base_machine_init(Object *obj)
+{
+    Raspi4BaseMachineState *s = RASPI4_BASE_MACHINE(obj);
+
+    s->exact_poison = false;
+    s->poison_byte = 0xdf;
+    s->poison_seed = 0;
+}
+
+static void raspi4_base_machine_class_init(ObjectClass *oc, const void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+
+    mc->reset = raspi4_machine_reset;
+    object_class_property_add_bool(oc, "x-exact-poison",
+                                   raspi4_get_exact_poison,
+                                   raspi4_set_exact_poison);
+    object_class_property_set_description(oc, "x-exact-poison",
+                                          "qemu-exact: poison RAM and UNKNOWN "
+                                          "registers at reset");
+    object_class_property_add(oc, "x-poison-byte", "uint8",
+                              raspi4_get_poison_byte, raspi4_set_poison_byte,
+                              NULL, NULL);
+    object_class_property_add(oc, "x-poison-seed", "uint64",
+                              raspi4_get_poison_seed, raspi4_set_poison_seed,
+                              NULL, NULL);
+}
+
 static const TypeInfo raspi4_base_machine_type = {
     .name           = TYPE_RASPI4_BASE_MACHINE,
     .parent         = TYPE_MACHINE,
     .instance_size  = sizeof(Raspi4BaseMachineState),
+    .instance_init  = raspi4_base_machine_init,
     .class_size     = sizeof(Raspi4BaseMachineClass),
+    .class_init     = raspi4_base_machine_class_init,
     .abstract       = true,
 };
 

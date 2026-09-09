@@ -31,6 +31,9 @@ struct Raspi4BaseMachineState {
     /*< public >*/
     struct arm_boot_info binfo;
     BCM2838State soc;
+    bool exact_poison;
+    uint8_t poison_byte;
+    uint64_t poison_seed;
 };
 
 struct Raspi4BaseMachineClass {

@@ -12,6 +12,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "internals.h"
+#include "system/memory.h"
 
 bool arm_exact_poison_regs;
 uint64_t arm_exact_poison_seed;
@@ -25,6 +26,20 @@ static uint64_t xs64(uint64_t *s)
     x ^= x << 17;
     *s = x;
     return x;
+}
+
+void arm_exact_poison_region(MemoryRegion *mr, uint8_t byte, uint64_t seed)
+{
+    uint64_t size = memory_region_size(mr);
+    uint8_t *p = memory_region_get_ram_ptr(mr);
+
+    if (!seed) {
+        memset(p, byte, size);
+        return;
+    }
+    for (uint64_t off = 0; off + 8 <= size; off += 8) {
+        stq_p(p + off, xs64(&seed));
+    }
 }
 
 /* SCTLR_EL1 RES1 bits (ARMv8 without extensions): 29, 28, 23, 22, 20, 11 */
