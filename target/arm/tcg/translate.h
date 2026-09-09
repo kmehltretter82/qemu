@@ -209,10 +209,11 @@ typedef struct DisasContext {
     uint32_t nv2_redirect_offset;
     /*
      * qemu-exact: LDXR/STXR forward-progress checking (DDI0487 B2.12.5).
-     * ldex_active is set by gen_load_exclusive() and cleared by
-     * gen_store_exclusive(); while it is set, every instruction translated in
-     * between is classified, and the first one the architecture does not allow
-     * there is remembered so the store can name it.
+     * ldex_active is set by gen_load_exclusive() and cleared by a matching
+     * gen_store_exclusive() in the same translation block.  While it is set,
+     * every instruction translated in between is classified, and the first
+     * one the architecture does not allow there is remembered so the store can
+     * name it.  State is deliberately not inferred across block boundaries.
      */
     bool ldex_active;
     uint64_t ldex_pc;

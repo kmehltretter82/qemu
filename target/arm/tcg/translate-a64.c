@@ -11277,36 +11277,6 @@ static void aarch64_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
 
-    /*
-     * An LDXR still open when the block ends. The instruction that ended the
-     * block is usually the reason - a BL into an instrumented atomic, an
-     * indirect branch, an exception-generating instruction - and it is exactly
-     * the case the STXR-side report cannot see, because the STXR is in the
-     * next block. What was found is still a forbidden instruction after an
-     * LDXR in program order, which is the hazard; the matching STXR is
-     * reported as 0 to say the block ended before it was reached.
-     */
-    if (unlikely(dc->ldex_active)) {
-        dc->ldex_active = false;
-        /*
-         * Only a branch that *ended* the block, and only when it is the last
-         * instruction in it. That is the single case this report exists for:
-         * a BL or indirect branch between the pair terminates translation, so
-         * the pair-form report at the STXR never runs.
-         *
-         * Requiring a branch matters. An unpaired load-exclusive - arm32's
-         * atomic64_read() is a bare LDREXD with no STREXD, and AArch64 has the
-         * same shape - leaves the pair open, and "is it the last instruction"
-         * alone does not exclude the next ordinary store, because a block
-         * ending at a page boundary or the insn limit can end on exactly that.
-         */
-        if (dc->ldex_bad_what && dc->ldex_bad_pc == dc->pc_curr &&
-            arm_exact_llsc_is_branch(dc->ldex_bad_what)) {
-            arm_exact_llsc_pair(dc->ldex_pc, 0, dc->ldex_bad_pc,
-                                dc->ldex_bad_what);
-        }
-    }
-
     if (unlikely(dc->ss_active)) {
         /* Note that this means single stepping WFI doesn't halt the CPU.
          * For conditional branch insns this is harmless unreachable code as
