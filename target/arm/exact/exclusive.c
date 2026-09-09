@@ -205,7 +205,9 @@ void arm_exact_exclusive_exception(CPUARMState *env)
  * translation time and costs nothing at run time. Classification is by the
  * top-level A64 encoding (DDI0487 C4.1), which is exact: no decode tables and
  * nothing to keep in step with new instructions, because the groups below are
- * architecturally fixed.
+ * architecturally fixed. Only a pair completed in one translation block is
+ * reported. An LDXR followed by a block-ending branch does not prove that any
+ * STXR exists, so inferring a cross-block pair would be unsound.
  */
 const char *arm_exact_llsc_forbidden_a64(uint32_t insn)
 {
@@ -241,9 +243,9 @@ const char *arm_exact_llsc_forbidden_a64(uint32_t insn)
 }
 
 /*
- * One call per LDXR/STXR pair *translated*, not executed, so the cost is a
- * hash lookup once per code site. Counting the safe pairs too is the point:
- * "0 unsafe" only means something next to "N pairs looked at".
+ * One call per within-TB LDXR/STXR pair *translated*, not executed, so the
+ * cost is a hash lookup once per code site. Counting the safe pairs too is the
+ * point: "0 unsafe" only means something next to "N pairs looked at".
  */
 void arm_exact_llsc_pair(uint64_t ldex_pc, uint64_t stex_pc, uint64_t bad_pc,
                          const char *what)
@@ -264,32 +266,12 @@ void arm_exact_llsc_pair(uint64_t ldex_pc, uint64_t stex_pc, uint64_t bad_pc,
     }
 
     ex_stat_llsc_unsafe++;
-    if (stex_pc) {
-        qemu_log_mask(LOG_EXACT,
-                      "exact-llsc: no forward-progress guarantee: ldxr at 0x%"
-                      PRIx64 " and stxr at 0x%" PRIx64 " have %s at 0x%" PRIx64
-                      " between them (DDI0487 B2.12.5)\n",
-                      ldex_pc, stex_pc, what, bad_pc);
-    } else {
-        qemu_log_mask(LOG_EXACT,
-                      "exact-llsc: no forward-progress guarantee: ldxr at 0x%"
-                      PRIx64 " is followed by %s at 0x%" PRIx64
-                      " (DDI0487 B2.12.5)\n", ldex_pc, what, bad_pc);
-    }
-}
-
-/*
- * Is this classification one of the branches? The cross-block report is only
- * sound for those: a branch ends the translation block and so hides the
- * pair-form report, whereas any other instruction merely happens to be last,
- * which a page boundary or the instruction limit can arrange for anything.
- * Comparing the text keeps the classifiers returning plain strings; there are
- * two callers and two values, so a table would cost more than it saves.
- */
-bool arm_exact_llsc_is_branch(const char *what)
-{
-    return what && (!strcmp(what, "a branch with link") ||
-                    !strcmp(what, "an indirect branch"));
+    qemu_log_mask(LOG_EXACT,
+                  "exact-llsc: VIOLATION no forward-progress guarantee: "
+                  "ldxr at 0x%" PRIx64 " and stxr at 0x%" PRIx64
+                  " have %s at 0x%" PRIx64
+                  " between them (DDI0487 B2.12.5)\n",
+                  ldex_pc, stex_pc, what, bad_pc);
 }
 
 /*

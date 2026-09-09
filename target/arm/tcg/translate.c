@@ -6836,28 +6836,6 @@ static void arm_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
 
-    /* An LDREX still open when the block ends - see aarch64_tr_tb_stop(). */
-    if (unlikely(dc->ldex_active)) {
-        dc->ldex_active = false;
-        /*
-         * Only a branch that *ended* the block, and only when it is the last
-         * instruction in it. That is the single case this report exists for:
-         * a BL or indirect branch between the pair terminates translation, so
-         * the pair-form report at the STREX never runs.
-         *
-         * Requiring a branch matters. arm32's atomic64_read() is a bare LDREXD
-         * with no STREXD at all, so the pair never closes and the compiler's
-         * next stack spill sat there looking like a hazard - and "is it the
-         * last instruction" alone does not exclude it, because a block ending
-         * at a page boundary or the insn limit can end on exactly that spill.
-         */
-        if (dc->ldex_bad_what && dc->ldex_bad_pc == dc->pc_curr &&
-            arm_exact_llsc_is_branch(dc->ldex_bad_what)) {
-            arm_exact_llsc_pair(dc->ldex_pc, 0, dc->ldex_bad_pc,
-                                dc->ldex_bad_what);
-        }
-    }
-
     /* At this stage dc->condjmp will only be set when the skipped
        instruction was a conditional branch or trap, and the PC has
        already been written.  */
