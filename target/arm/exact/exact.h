@@ -73,6 +73,7 @@ void arm_exact_exclusive_exception(CPUARMState *env);
 void arm_exact_exclusive_dump(void);
 const char *arm_exact_llsc_forbidden_a64(uint32_t insn);
 const char *arm_exact_llsc_forbidden_a32(uint32_t insn);
+bool arm_exact_llsc_is_branch(const char *what);
 void arm_exact_llsc_pair(uint64_t ldex_pc, uint64_t stex_pc, uint64_t bad_pc,
                          const char *what);
 void arm_exact_llsc_dump(void);
