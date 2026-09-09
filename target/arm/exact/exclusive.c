@@ -279,6 +279,20 @@ void arm_exact_llsc_pair(uint64_t ldex_pc, uint64_t stex_pc, uint64_t bad_pc,
 }
 
 /*
+ * Is this classification one of the branches? The cross-block report is only
+ * sound for those: a branch ends the translation block and so hides the
+ * pair-form report, whereas any other instruction merely happens to be last,
+ * which a page boundary or the instruction limit can arrange for anything.
+ * Comparing the text keeps the classifiers returning plain strings; there are
+ * two callers and two values, so a table would cost more than it saves.
+ */
+bool arm_exact_llsc_is_branch(const char *what)
+{
+    return what && (!strcmp(what, "a branch with link") ||
+                    !strcmp(what, "an indirect branch"));
+}
+
+/*
  * The A32 half. Deliberately conservative: every encoding below is one whose
  * meaning is unambiguous from these bits alone, and anything doubtful is left
  * out. A check that misses a hazard costs a report; a check that invents one
@@ -313,8 +327,13 @@ const char *arm_exact_llsc_forbidden_a32(uint32_t insn)
             return "a software prefetch";
         }
         /*
-         * Everything else here - DMB, DSB, CPS, SETEND, NEON/VFP data
-         * processing - is either permitted or not something to guess about.
+         * Everything else here is permitted (DMB, DSB, CPS, SETEND, NEON and
+         * VFP data processing) or a deliberate miss. The misses are the NEON
+         * element load/stores, VLD1 and friends: those *are* memory accesses
+         * and do break the guarantee, but decoding them apart from the data
+         * processing in the same space is fiddly and no kernel puts one
+         * between LDREX and STREX. Missing a hazard costs a report; inventing
+         * one costs the reader's trust in every other line of the run.
          */
         return NULL;
     }

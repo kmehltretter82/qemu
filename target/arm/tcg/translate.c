@@ -6840,15 +6840,19 @@ static void arm_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
     if (unlikely(dc->ldex_active)) {
         dc->ldex_active = false;
         /*
-         * Only when the offending instruction *ended* the block. That is the
-         * case this report exists for - a BL or indirect branch between the
-         * pair, which terminates translation and hides the pair-form report.
-         * An instruction merely following the load is not evidence of
-         * anything: arm32's atomic64_read() is a bare LDREXD with no STREXD
-         * at all, so the pair never closes and the compiler's next stack
-         * spill was being reported as an unsafe LL/SC loop.
+         * Only a branch that *ended* the block, and only when it is the last
+         * instruction in it. That is the single case this report exists for:
+         * a BL or indirect branch between the pair terminates translation, so
+         * the pair-form report at the STREX never runs.
+         *
+         * Requiring a branch matters. arm32's atomic64_read() is a bare LDREXD
+         * with no STREXD at all, so the pair never closes and the compiler's
+         * next stack spill sat there looking like a hazard - and "is it the
+         * last instruction" alone does not exclude it, because a block ending
+         * at a page boundary or the insn limit can end on exactly that spill.
          */
-        if (dc->ldex_bad_what && dc->ldex_bad_pc == dc->pc_curr) {
+        if (dc->ldex_bad_what && dc->ldex_bad_pc == dc->pc_curr &&
+            arm_exact_llsc_is_branch(dc->ldex_bad_what)) {
             arm_exact_llsc_pair(dc->ldex_pc, 0, dc->ldex_bad_pc,
                                 dc->ldex_bad_what);
         }
