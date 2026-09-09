@@ -20,6 +20,8 @@
  *   CLEAN          cleaned to the PoC, no CPU store since
  *   DIRTY          a cacheable CPU store since the last clean (writer kept)
  *   DMA_WRITTEN    a device wrote it, and the CPU has not invalidated since
+ *   DROPPED        an invalidate discarded a dirty line, but no observer has
+ *                  needed the discarded bytes yet
  *
  * Reports:
  *   device reads DIRTY or DIRTY_DEFAULT   data the device cannot see
@@ -28,7 +30,14 @@
  *                                         (cache line sharing)
  *   CPU cacheable load of DMA_WRITTEN     stale read, no invalidate
  *   CPU cacheable store to DMA_WRITTEN    write-allocate pulls stale bytes in
- *   DC IVAC on DIRTY                      the invalidate discards CPU data
+ *   load/device read after DIRTY -> IVAC  discarded CPU data was observable
+ *
+ * Reporting the invalidate itself is too early.  Some ARM page clear/copy
+ * routines intentionally invalidate an old line and then overwrite every
+ * byte.  Retain a byte interval that was definitely dirty, remove bytes that
+ * the CPU or device overwrites, and report only a later read of what remains.
+ * Disjoint intervals are under-approximated so uncertainty loses detections
+ * rather than inventing them.
  *
  * Only cacheable Normal memory accesses count; the kernel maps coherent
  * allocations Normal-NC on non-coherent platforms and those bypass the cache.
@@ -45,6 +54,7 @@
 #include "cpu.h"
 #include "internals.h"
 #include "exact.h"
+#include "dcache-rules.h"
 #include "exec/cputlb.h"
 #include "hw/core/cpu.h"
 
@@ -58,8 +68,6 @@ unsigned arm_exact_dcache_line = 64;
 #define DC_LINE arm_exact_dcache_line
 #define DC_LINES_PER_PAGE_MAX 1024      /* 64K pages */
 
-enum { DC_DIRTY_DEFAULT = 0, DC_CLEAN, DC_DIRTY, DC_DMA_WRITTEN };
-
 typedef struct DcLine {
     uint64_t writer_pc, writer_lr;
     uint16_t writer_cpu;
@@ -71,6 +79,8 @@ typedef struct DcLine {
     uint8_t inflight;   /* device-writable buffers mapped over this line right
                          * now (address_space_map .. address_space_unmap) */
     bool inflight_reported;
+    /* One definitely dirty (DIRTY) or discarded (DROPPED) byte interval. */
+    ExByteRange tracked;
 } DcLine;
 
 typedef struct DcPage {
@@ -102,7 +112,8 @@ static uint64_t dc_stat_dma_rd, dc_stat_dma_wr, dc_stat_cpu_ld, dc_stat_cpu_st;
 static uint64_t dc_stat_clean, dc_stat_inval, dc_stat_joins, dc_stat_reports;
 static uint64_t dc_stat_nc_skipped;
 /* State of the line just before each device access, for diagnosing misses. */
-static uint64_t dc_stat_dev_wr_state[4], dc_stat_dev_rd_state[4];
+static uint64_t dc_stat_dev_wr_state[DC_NR_STATES];
+static uint64_t dc_stat_dev_rd_state[DC_NR_STATES];
 static uint64_t dc_stat_dev_wr_stored, dc_stat_exposed_reports;
 
 /*
@@ -187,9 +198,9 @@ bool arm_exact_dcache_track_page(CPUState *cs, CPUTLBEntryFull *full,
          * without LPAE - never fills in cacheattrs, because short descriptors
          * carry the memory type in TEX[2:0]/C/B (through PRRR/NMRR when
          * SCTLR.TRE is set) and nothing else in QEMU needs it decoded. So
-         * pte_attrs is 0, which reads as Device, and every CPU access is
-         * skipped: a classic-arm32 run recorded 13 loads and 2 stores where
-         * the LPAE one recorded 259 million.
+         * pte_attrs is 0, which reads as Device, and accesses made while that
+         * format is active are skipped. An LPAE kernel can encounter this
+         * during early boot before switching translation formats.
          *
          * Skipping is the safe direction - the model reports nothing rather
          * than the wrong thing - but silence here looks exactly like a clean
@@ -201,11 +212,12 @@ bool arm_exact_dcache_track_page(CPUState *cs, CPUTLBEntryFull *full,
             if (!regime_using_lpae_format(env, arm_mmu_idx(env))) {
                 dc_shortdesc_warned = true;
                 qemu_log_mask(LOG_EXACT,
-                    "exact-dcache: this guest uses short descriptors, whose "
-                    "memory attributes QEMU does not decode (cacheattrs is "
-                    "never set by get_phys_addr_v6). Every CPU access looks "
-                    "like Device memory and is skipped, so D-cache results on "
-                    "a non-LPAE arm32 kernel mean nothing.\n");
+                    "exact-dcache: observed a watched CPU access while short "
+                    "descriptors were active. QEMU does not decode their "
+                    "memory attributes, so this access is skipped. Results "
+                    "cover only accesses made after decoded attributes become "
+                    "available; a workload that remains non-LPAE has no "
+                    "meaningful D-cache result.\n");
             }
         }
         return false;
@@ -268,8 +280,42 @@ static const char *dc_state_name(int s)
     case DC_CLEAN:        return "clean";
     case DC_DIRTY:        return "dirty (CPU stored, not cleaned)";
     case DC_DMA_WRITTEN:  return "device-written, not invalidated";
+    case DC_DROPPED:      return "dirty data discarded, not yet observed";
     default:              return "never cleaned since first seen";
     }
+}
+
+/* caller holds dc_lock */
+static void dc_report_dropped(CPUState *cs, DcLine *l, ram_addr_t a,
+                              const char *observer)
+{
+    CPUARMState *env = cs ? cpu_env(cs) : NULL;
+    uint64_t observer_pc = env ? dc_pc(env) : 0;
+    int observer_cpu = cs ? cs->cpu_index : -1;
+
+    if (l->reported) {
+        return;
+    }
+    l->reported = true;
+    dc_stat_reports++;
+    if (!dc_site_seen(7, l->writer_lr, observer_pc)) {
+        qemu_log_mask(LOG_EXACT,
+            "exact-dcache: VIOLATION %s observes a line after DC IVAC "
+            "discarded dirty CPU data\n"
+            "exact-dcache:   line ram 0x%" PRIx64 " observed by cpu=%d "
+            "pc=0x%" PRIx64 "; invalidated at pc=0x%" PRIx64
+            "; prior CPU store pc=0x%" PRIx64
+            "; known discarded offsets [%u,%u)\n",
+            observer, (uint64_t)a, observer_cpu, observer_pc,
+            l->writer_lr, l->writer_pc, l->tracked.lo, l->tracked.hi);
+    }
+}
+
+static void dc_access_offsets(ram_addr_t line, ram_addr_t start,
+                              ram_addr_t end, unsigned *lo, unsigned *hi)
+{
+    *lo = MAX(start, line) - line;
+    *hi = MIN(end, line + DC_LINE) - line;
 }
 
 /*
@@ -288,10 +334,13 @@ void arm_exact_dcache_dma(uint64_t ram_addr, uint64_t len, bool is_write,
     for (a = ram_addr & ~(ram_addr_t)(DC_LINE - 1); a < end; a += DC_LINE) {
         DcPage *p = dc_page(a, true);
         DcLine *l = dc_line(p, a);
+        unsigned lo, hi;
+
+        dc_access_offsets(a, ram_addr, end, &lo, &hi);
 
         if (is_write) {
             dc_stat_dma_wr++;
-            dc_stat_dev_wr_state[l->state & 3]++;
+            dc_stat_dev_wr_state[l->state]++;
             dc_stat_dev_wr_stored += l->ever_stored;
             if (l->ever_stored) {
                 dc_last_shared = a;
@@ -300,6 +349,15 @@ void arm_exact_dcache_dma(uint64_t ram_addr, uint64_t len, bool is_write,
                 dc_note(a, 'W', 0, l->state);
             }
             l->ever_devwr = true;
+            if (l->state == DC_DROPPED) {
+                ex_byte_range_remove(&l->tracked, lo, hi);
+                if (ex_byte_range_empty(l->tracked)) {
+                    /* IVAC left no cached copy for this write to stale. */
+                    l->state = DC_CLEAN;
+                    l->reported = false;
+                }
+                continue;
+            }
             if (l->state == DC_DIRTY_DEFAULT && !l->reported) {
                 /*
                  * The page joined the watched set at this very access, so we
@@ -337,15 +395,20 @@ void arm_exact_dcache_dma(uint64_t ram_addr, uint64_t len, bool is_write,
                 }
             }
             l->state = DC_DMA_WRITTEN;
+            ex_byte_range_reset(&l->tracked);
             l->reported = false;
         } else {
             dc_stat_dma_rd++;
-            dc_stat_dev_rd_state[l->state & 3]++;
+            dc_stat_dev_rd_state[l->state]++;
             if (l->ever_stored || l->ever_devwr) {
                 dc_note(a, 'R', 0, l->state);
             }
             l->ever_devrd = true;
-            if ((l->state == DC_DIRTY || l->state == DC_DIRTY_DEFAULT) &&
+            if (l->state == DC_DROPPED &&
+                ex_byte_range_overlaps(l->tracked, lo, hi)) {
+                dc_report_dropped(NULL, l, a, "device read");
+            } else if ((l->state == DC_DIRTY ||
+                        l->state == DC_DIRTY_DEFAULT) &&
                 !l->reported) {
                 l->reported = true;
                 dc_stat_reports++;
@@ -384,11 +447,13 @@ void arm_exact_dcache_cpu(CPUState *cs, uint64_t ram_addr, unsigned size,
     for (a = ram_addr & ~(ram_addr_t)(DC_LINE - 1); a < end; a += DC_LINE) {
         DcPage *p = dc_page(a, false);
         DcLine *l;
+        unsigned lo, hi;
 
         if (!p) {
             continue;
         }
         l = dc_line(p, a);
+        dc_access_offsets(a, ram_addr, end, &lo, &hi);
         if (is_store) {
             dc_stat_cpu_st++;
             if (l->state == DC_DMA_WRITTEN && !l->reported) {
@@ -425,15 +490,28 @@ void arm_exact_dcache_cpu(CPUState *cs, uint64_t ram_addr, unsigned size,
                         dc_lr(env));
                 }
             }
-            l->state = DC_DIRTY;
             l->ever_stored = true;
-            l->writer_pc = dc_pc(env);
-            l->writer_lr = dc_lr(env);
-            l->writer_cpu = cs->cpu_index;
-            l->reported = false;
+            if (l->state == DC_DROPPED) {
+                ex_byte_range_remove(&l->tracked, lo, hi);
+            }
+            if (l->state != DC_DROPPED ||
+                ex_byte_range_empty(l->tracked)) {
+                if (l->state != DC_DIRTY) {
+                    ex_byte_range_reset(&l->tracked);
+                }
+                ex_byte_range_add(&l->tracked, lo, hi);
+                l->state = DC_DIRTY;
+                l->writer_pc = dc_pc(env);
+                l->writer_lr = dc_lr(env);
+                l->writer_cpu = cs->cpu_index;
+                l->reported = false;
+            }
         } else {
             dc_stat_cpu_ld++;
-            if (l->state == DC_DMA_WRITTEN && !l->reported) {
+            if (l->state == DC_DROPPED &&
+                ex_byte_range_overlaps(l->tracked, lo, hi)) {
+                dc_report_dropped(cs, l, a, "CPU load");
+            } else if (l->state == DC_DMA_WRITTEN && !l->reported) {
                 l->reported = true;
                 dc_stat_reports++;
                 if (!dc_site_seen(4, dc_pc(env), 0)) {
@@ -480,8 +558,22 @@ void arm_exact_dcache_maint(CPUState *cs, uint64_t ram_addr, bool all,
         while (g_hash_table_iter_next(&it, &k, &v)) {
             p = v;
             for (i = 0; i < TARGET_PAGE_SIZE / DC_LINE; i++) {
-                if (kind != 'i' || p->line[i].state == DC_DMA_WRITTEN) {
-                    p->line[i].state = DC_CLEAN;
+                l = &p->line[i];
+                /*
+                 * This callback represents one set/way instruction, not a
+                 * completed sweep.  Exact does not model cache geometry, so
+                 * it cannot know which physical line an invalidate selected.
+                 * Treating it as if it discarded every dirty tracked line
+                 * invents losses, notably when a secondary CPU invalidates
+                 * its undefined L1 before enabling it.  Ignore dirty lines;
+                 * this deliberately loses detections in the uncertain case.
+                 *
+                 * Invalidating DMA_WRITTEN lines early is also conservative:
+                 * it can only suppress a later stale-read report.
+                 */
+                if (ex_dcache_uncertain_setway(&l->state, &l->tracked,
+                                               kind)) {
+                    l->reported = false;
                 }
             }
         }
@@ -506,27 +598,27 @@ void arm_exact_dcache_maint(CPUState *cs, uint64_t ram_addr, bool all,
         dc_note(ram_addr & ~(ram_addr_t)(DC_LINE - 1), kind, dc_pc(env), l->state);
     }
     if (kind == 'i') {
+        bool became_dropped;
+        bool was_dropped = l->state == DC_DROPPED;
+
         dc_stat_inval++;
-        if (l->state == DC_DIRTY) {
-            dc_stat_reports++;
-            if (!dc_site_seen(5, dc_pc(env), l->writer_lr)) {
-                qemu_log_mask(LOG_EXACT,
-                    "exact-dcache: VIOLATION DC IVAC on a line with CPU data "
-                    "that was never cleaned: the invalidate discards the "
-                    "store\n"
-                    "exact-dcache:   line ram 0x%" PRIx64 " invalidated by "
-                    "cpu=%d pc=0x%" PRIx64 "; the store was by cpu=%u pc=0x%"
-                    PRIx64 " (called from 0x%" PRIx64 ")\n",
-                    (uint64_t)ram_addr, cs->cpu_index, (uint64_t)dc_pc(env),
-                    (unsigned)l->writer_cpu, l->writer_pc, l->writer_lr);
-            }
+        became_dropped = ex_dcache_by_va_invalidate(&l->state,
+                                                     &l->tracked);
+        if (became_dropped) {
+            /* Save the invalidator in writer_lr while loss is pending. */
+            l->writer_lr = dc_pc(env);
         }
-        l->state = DC_CLEAN;
+        if (!was_dropped) {
+            l->reported = false;
+        }
     } else {
         dc_stat_clean++;
-        l->state = DC_CLEAN;
+        if (l->state != DC_DROPPED) {
+            l->state = DC_CLEAN;
+            ex_byte_range_reset(&l->tracked);
+        }
+        l->reported = false;
     }
-    l->reported = false;
     qemu_mutex_unlock(&dc_lock);
 }
 
@@ -606,17 +698,20 @@ void arm_exact_dcache_dump(void)
     qemu_log_mask(LOG_EXACT,
                   "exact-dcache: line state at device write: %" PRIu64
                   " never-cleaned, %" PRIu64 " clean, %" PRIu64 " dirty, %"
-                  PRIu64 " device-written; at device read: %" PRIu64
+                  PRIu64 " device-written, %" PRIu64
+                  " pending-discard; at device read: %" PRIu64
                   " never-cleaned, %" PRIu64 " clean, %" PRIu64 " dirty, %"
-                  PRIu64 " device-written\n",
+                  PRIu64 " device-written, %" PRIu64 " pending-discard\n",
                   dc_stat_dev_wr_state[DC_DIRTY_DEFAULT],
                   dc_stat_dev_wr_state[DC_CLEAN],
                   dc_stat_dev_wr_state[DC_DIRTY],
                   dc_stat_dev_wr_state[DC_DMA_WRITTEN],
+                  dc_stat_dev_wr_state[DC_DROPPED],
                   dc_stat_dev_rd_state[DC_DIRTY_DEFAULT],
                   dc_stat_dev_rd_state[DC_CLEAN],
                   dc_stat_dev_rd_state[DC_DIRTY],
-                  dc_stat_dev_rd_state[DC_DMA_WRITTEN]);
+                  dc_stat_dev_rd_state[DC_DMA_WRITTEN],
+                  dc_stat_dev_rd_state[DC_DROPPED]);
     qemu_log_mask(LOG_EXACT,
                   "exact-dcache: %" PRIu64 " device writes landed in a line the"
                   " CPU had stored into at some point; %" PRIu64 " CPU stores "
