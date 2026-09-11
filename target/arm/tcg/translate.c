@@ -32,6 +32,7 @@
 #include "helper.h"
 #include "helper-mve.h"
 
+#define ENABLE_ARCH_4     arm_dc_feature(s, ARM_FEATURE_V4)
 #define ENABLE_ARCH_4T    arm_dc_feature(s, ARM_FEATURE_V4T)
 #define ENABLE_ARCH_5     arm_dc_feature(s, ARM_FEATURE_V5)
 /* currently all emulated v5 cores are also v5TE, so don't bother */
@@ -3763,6 +3764,37 @@ static void gen_aa32_st_i32_legacy(DisasContext *s, TCGv_i32 val,
     }
 }
 
+/*
+ * Before Armv6, LDM and STM ignore address<1:0> for the memory
+ * transfers when alignment checking is disabled.  Unlike LDR, LDM does
+ * not rotate the loaded words.  Keep the original address for writeback.
+ */
+static void gen_aa32_ld_i32_legacy_block(DisasContext *s, TCGv_i32 val,
+                                         TCGv_i32 addr, int mem_idx)
+{
+    if (!ENABLE_ARCH_6 && !s->align_mem) {
+        TCGv_i32 aligned = tcg_temp_new_i32();
+
+        tcg_gen_andi_i32(aligned, addr, ~3);
+        gen_aa32_ld_i32(s, val, aligned, mem_idx, MO_UL | MO_ALIGN);
+    } else {
+        gen_aa32_ld_i32(s, val, addr, mem_idx, MO_UL | MO_ALIGN);
+    }
+}
+
+static void gen_aa32_st_i32_legacy_block(DisasContext *s, TCGv_i32 val,
+                                         TCGv_i32 addr, int mem_idx)
+{
+    if (!ENABLE_ARCH_6 && !s->align_mem) {
+        TCGv_i32 aligned = tcg_temp_new_i32();
+
+        tcg_gen_andi_i32(aligned, addr, ~3);
+        gen_aa32_st_i32(s, val, aligned, mem_idx, MO_UL | MO_ALIGN);
+    } else {
+        gen_aa32_st_i32(s, val, addr, mem_idx, MO_UL | MO_ALIGN);
+    }
+}
+
 static bool op_load_rr(DisasContext *s, arg_ldst_rr *a,
                        MemOp mop, int mem_idx)
 {
@@ -4090,17 +4122,49 @@ static bool trans_##NAME##T_rr(DisasContext *s, arg_ldst_rr *a)       \
     return op_##WHICH##_rr(s, a, MEMOP, get_a32_user_mem_index(s));   \
 }
 
+/* ARMv4 added the halfword and signed-byte transfer encodings. */
+#define DO_LDST_V4(NAME, WHICH, MEMOP) \
+static bool trans_##NAME##_ri(DisasContext *s, arg_ldst_ri *a)        \
+{                                                                     \
+    if (!ENABLE_ARCH_4) {                                              \
+        return false;                                                  \
+    }                                                                 \
+    return op_##WHICH##_ri(s, a, MEMOP, get_mem_index(s));            \
+}                                                                     \
+static bool trans_##NAME##T_ri(DisasContext *s, arg_ldst_ri *a)       \
+{                                                                     \
+    if (!ENABLE_ARCH_4) {                                              \
+        return false;                                                  \
+    }                                                                 \
+    return op_##WHICH##_ri(s, a, MEMOP, get_a32_user_mem_index(s));   \
+}                                                                     \
+static bool trans_##NAME##_rr(DisasContext *s, arg_ldst_rr *a)        \
+{                                                                     \
+    if (!ENABLE_ARCH_4) {                                              \
+        return false;                                                  \
+    }                                                                 \
+    return op_##WHICH##_rr(s, a, MEMOP, get_mem_index(s));            \
+}                                                                     \
+static bool trans_##NAME##T_rr(DisasContext *s, arg_ldst_rr *a)       \
+{                                                                     \
+    if (!ENABLE_ARCH_4) {                                              \
+        return false;                                                  \
+    }                                                                 \
+    return op_##WHICH##_rr(s, a, MEMOP, get_a32_user_mem_index(s));   \
+}
+
 DO_LDST(LDR, load, MO_UL)
 DO_LDST(LDRB, load, MO_UB)
-DO_LDST(LDRH, load, MO_UW)
-DO_LDST(LDRSB, load, MO_SB)
-DO_LDST(LDRSH, load, MO_SW)
+DO_LDST_V4(LDRH, load, MO_UW)
+DO_LDST_V4(LDRSB, load, MO_SB)
+DO_LDST_V4(LDRSH, load, MO_SW)
 
 DO_LDST(STR, store, MO_UL)
 DO_LDST(STRB, store, MO_UB)
-DO_LDST(STRH, store, MO_UW)
+DO_LDST_V4(STRH, store, MO_UW)
 
 #undef DO_LDST
+#undef DO_LDST_V4
 
 /*
  * Synchronization primitives
@@ -5189,7 +5253,7 @@ static bool op_stm(DisasContext *s, arg_ldst_block *a)
         } else {
             tmp = load_reg(s, i);
         }
-        gen_aa32_st_i32(s, tmp, addr, mem_idx, MO_UL | MO_ALIGN);
+        gen_aa32_st_i32_legacy_block(s, tmp, addr, mem_idx);
 
         /* No need to add after the last transfer.  */
         if (++j != n) {
@@ -5271,7 +5335,7 @@ static bool do_ldm(DisasContext *s, arg_ldst_block *a)
         }
 
         tmp = tcg_temp_new_i32();
-        gen_aa32_ld_i32(s, tmp, addr, mem_idx, MO_UL | MO_ALIGN);
+        gen_aa32_ld_i32_legacy_block(s, tmp, addr, mem_idx);
         if (user) {
             gen_helper_set_user_reg(tcg_env, tcg_constant_i32(i), tmp);
         } else if (i == a->rn) {

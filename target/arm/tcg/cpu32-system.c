@@ -726,11 +726,29 @@ static void sa110_initfn(Object *obj)
     ARMCPU *cpu = ARM_CPU(obj);
 
     cpu->dtb_compatible = "intel,sa110";
+    set_feature(&cpu->env, ARM_FEATURE_V4);
     set_feature(&cpu->env, ARM_FEATURE_STRONGARM);
     set_feature(&cpu->env, ARM_FEATURE_DUMMY_C15_REGS);
     cpu->midr = 0x4401A102;
     cpu->reset_sctlr = 0x00000070;
     define_arm_cp_regs(cpu, sa110_undecoded_opc2_cp_reginfo);
+}
+
+/*
+ * The ARM610 is the original ARMv3 processor option for the Acorn RiscPC.
+ * It has CP15 and the ARMv3 instruction set, but no ARMv4 halfword transfer
+ * instructions, BX, or Thumb state.  Keep it separate from StrongARM: the
+ * latter is ARMv4 and has implementation-specific CP15 behaviour.
+ */
+static void arm610_initfn(Object *obj)
+{
+    ARMCPU *cpu = ARM_CPU(obj);
+
+    cpu->dtb_compatible = "arm,arm610";
+    set_feature(&cpu->env, ARM_FEATURE_ARM610);
+    /* ARM610's pre-ARM7 CP15 ID format, as used by its Linux proc table. */
+    cpu->midr = 0x41560610;
+    cpu->reset_sctlr = 0x00000070;
 }
 
 static void sa1100_initfn(Object *obj)
@@ -774,6 +792,7 @@ static const ARMCPUInfo arm_tcg_cpus[] = {
     { .name = "cortex-r5f",  .initfn = cortex_r5f_initfn },
     { .name = "cortex-r52",  .initfn = cortex_r52_initfn },
     { .name = "ti925t",      .initfn = ti925t_initfn },
+    { .name = "arm610",      .initfn = arm610_initfn },
     { .name = "sa110",       .initfn = sa110_initfn },
     { .name = "sa1100",      .initfn = sa1100_initfn },
     { .name = "sa1110",      .initfn = sa1110_initfn },

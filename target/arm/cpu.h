@@ -2178,6 +2178,14 @@ enum arm_features {
      * CPU types added in future.
      */
     ARM_FEATURE_BACKCOMPAT_CNTFRQ, /* 62.5MHz timer default */
+    /*
+     * ARMv4 baseline.  This is separate from ARM_FEATURE_V4T because
+     * StrongARM implements ARMv4, including the halfword load/store
+     * instructions, but does not implement Thumb or BX.
+     */
+    ARM_FEATURE_V4,
+    /* ARM610's pre-ARMv4 CP15 register layout. */
+    ARM_FEATURE_ARM610,
 };
 
 static inline int arm_feature(const CPUARMState *env, int feature)

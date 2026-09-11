@@ -13,6 +13,7 @@
 #include "internals.h"
 #include "cpu-features.h"
 #include "exec/page-protection.h"
+#include "exec/target_page.h"
 #include "exec/mmap-lock.h"
 #include "qemu/main-loop.h"
 #include "qemu/timer.h"
@@ -2923,6 +2924,53 @@ static const ARMCPRegInfo vmsa_cp_reginfo[] = {
       .raw_writefn = raw_write,
       .bank_fieldoffsets = { offsetoflow32(CPUARMState, cp15.tcr_el[3]),
                              offsetoflow32(CPUARMState, cp15.tcr_el[1])} },
+};
+
+/*
+ * ARM610 uses the same c5/c6 encodings for reading the fault status/address
+ * registers as later VMSA processors, but their write meanings are different:
+ * c5 flushes the unified TLB and c6 purges the 4 KiB entry selected by its
+ * address (ignoring VA[11:0]).
+ *
+ * Keep the normal field-backed reads so an abort handler can read FSR/FAR,
+ * while overriding only guest writes.  The generic VMSA definitions are added
+ * first during CPU realization; these definitions deliberately replace them
+ * for ARM610 only.
+ */
+static void arm610_tlb_flush_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                                   uint64_t value)
+{
+    tlb_flush(env_cpu(env));
+}
+
+static void arm610_tlb_purge_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                                   uint64_t value)
+{
+    CPUState *cs = env_cpu(env);
+    vaddr page = value & ~0xfffULL;
+
+    /*
+     * QEMU may use TLB slots smaller than an ARM610 4 KiB page.  Flush every
+     * such slot so that c6 retains its architectural granularity.
+     */
+    for (vaddr offset = 0; offset < 0x1000; offset += TARGET_PAGE_SIZE) {
+        tlb_flush_page(cs, page + offset);
+    }
+}
+
+static const ARMCPRegInfo arm610_cp_reginfo[] = {
+    { .name = "ARM610_FSR_TLBFlush",
+      .cp = 15, .crn = 5, .crm = 0, .opc1 = 0, .opc2 = 0,
+      .access = PL1_RW, .type = ARM_CP_OVERRIDE,
+      .bank_fieldoffsets = { offsetoflow32(CPUARMState, cp15.dfsr_s),
+                             offsetoflow32(CPUARMState, cp15.dfsr_ns) },
+      .writefn = arm610_tlb_flush_write },
+    { .name = "ARM610_FAR_TLBPurge",
+      .cp = 15, .crn = 6, .crm = 0, .opc1 = 0, .opc2 = 0,
+      .access = PL1_RW, .type = ARM_CP_OVERRIDE,
+      .bank_fieldoffsets = { offsetof(CPUARMState, cp15.dfar_s),
+                             offsetof(CPUARMState, cp15.dfar_ns) },
+      .writefn = arm610_tlb_purge_write },
 };
 
 /*
@@ -7091,6 +7139,9 @@ void register_cp_regs_for_features(ARMCPU *cpu)
     } else {
         define_arm_cp_regs(cpu, vmsa_pmsa_cp_reginfo);
         define_arm_cp_regs(cpu, vmsa_cp_reginfo);
+        if (arm_feature(env, ARM_FEATURE_ARM610)) {
+            define_arm_cp_regs(cpu, arm610_cp_reginfo);
+        }
         /* TTCBR2 is introduced with ARMv8.2-AA32HPD.  */
         if (cpu_isar_feature(aa32_hpd, cpu)) {
             define_one_arm_cp_reg(cpu, &ttbcr2_reginfo);

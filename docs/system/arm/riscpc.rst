@@ -9,6 +9,8 @@ controller, VIDC20 video, and the onboard SuperIO devices.
 Emulated hardware:
 
 - StrongARM SA-110 CPU (ARMv4)
+- original ARM610 processor-card option (ARMv3; select with
+  ``-cpu arm610``)
 - Acorn IOMD: interrupt controller (banks A/B, DMA requests, FIQ),
   two 2 MHz IOC-style 16-bit timers, KART PS/2 keyboard link,
   quadrature mouse and video DMA
@@ -28,6 +30,19 @@ Booting a kernel built from ``rpc_defconfig``::
   qemu-system-arm -M riscpc -kernel zImage -initrd rootfs.cpio.gz \
       -append 'console=ttyS0 rdinit=/init' \
       -display none -serial stdio
+
+Booting a RISC OS ROM image::
+
+  qemu-system-arm -M riscpc -m 128M -bios riscos \
+      -display gtk -serial none
+
+Raw 2, 4, 6 and 8 MiB ROM images are accepted.  A ROM image and a
+directly loaded kernel cannot be used together.
+
+The default CPU is a StrongARM SA-110.  ``-cpu arm610`` selects the original
+ARM610 RiscPC processor card.  It implements ARMv3, so ARMv4 halfword and
+signed transfers and ARMv4T ``BX`` instructions take an undefined-instruction
+exception as they would on the original processor.
 
 Note that mainline restricts ``ARCH_RPC`` to GCC 6 through 8: newer
 compilers emit ``strh`` instructions that the real RiscPC's bus
