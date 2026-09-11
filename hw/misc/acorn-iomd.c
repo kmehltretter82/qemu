@@ -22,7 +22,9 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/host-utils.h"
 #include "qemu/log.h"
+#include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
@@ -82,8 +84,14 @@
  * open() to enable the port.
  */
 #define KCTRL_ENABLE    (1 << 3)
+#define KCTRL_RXPARITY  (1 << 2)
+#define KCTRL_DATAIN     (1 << 1)
+#define KCTRL_CLOCKIN    (1 << 0)
 #define KCTRL_RXFULL    (1 << 5)
 #define KCTRL_TXEMPTY   (1 << 7)
+
+#define IRQB_KBDRX      (1 << (ACORN_IOMD_IRQ_KBDRX - 8))
+#define IRQB_KBDTX      (1 << (ACORN_IOMD_IRQ_KBDTX - 8))
 
 /*
  * Video DMA state for the VIDC20 model.  The video registers (0x1c0..0x1e0)
@@ -175,6 +183,37 @@ static void iomd_set_irq(void *opaque, int line, int level)
     iomd_update(s);
 }
 
+/*
+ * A KART receive register holds one serial byte.  QEMU's PS/2 core has a
+ * FIFO and reasserts its IRQ synchronously while ps2_read_data() is popping
+ * a multi-byte scan sequence.  Expose the next FIFO byte via a bottom half
+ * instead: RISC OS expects the receive IRQ to drop between serial bytes.
+ */
+static void iomd_kbd_bh(void *opaque)
+{
+    AcornIOMDState *s = opaque;
+
+    if (s->kbd_ps2_irq) {
+        iomd_set_irq(s, ACORN_IOMD_IRQ_KBDRX, 1);
+    }
+}
+
+static void iomd_kbd_irq(void *opaque, int line, int level)
+{
+    AcornIOMDState *s = opaque;
+
+    s->kbd_ps2_irq = level;
+    if (!level) {
+        if (!s->kbd_reading) {
+            iomd_set_irq(s, ACORN_IOMD_IRQ_KBDRX, 0);
+        }
+    } else if (s->kbd_reading) {
+        qemu_bh_schedule(s->kbd_bh);
+    } else {
+        iomd_set_irq(s, ACORN_IOMD_IRQ_KBDRX, 1);
+    }
+}
+
 static void iomd_timer_tick(void *opaque)
 {
     AcornIOMDTimer *t = opaque;
@@ -190,14 +229,40 @@ static uint64_t iomd_read(void *opaque, hwaddr offset, unsigned size)
 
     switch (offset) {
     case IOMD_KARTRX:
-        return ps2_read_data(PS2_DEVICE(&s->kbd));
+    {
+        uint32_t data;
+
+        s->kbd_reading = true;
+        data = ps2_read_data(PS2_DEVICE(&s->kbd));
+        s->kbd_reading = false;
+        iomd_set_irq(s, ACORN_IOMD_IRQ_KBDRX, 0);
+        return data;
+    }
     case IOMD_KCTRL:
+    {
+        PS2State *kbd = PS2_DEVICE(&s->kbd);
+        uint32_t status = s->kctrl | KCTRL_TXEMPTY;
+
+        /* PS/2 clock and data are open-collector signals, high at idle. */
+        if (s->kctrl & KCTRL_ENABLE) {
+            status |= KCTRL_DATAIN | KCTRL_CLOCKIN;
+        }
+
         /*
          * Transmit is instantaneous here, so TXEMPTY is always set.
          * RXFULL tracks the ps2 queue: rpckbd_rx() loops on it.
+         * KART exposes the received odd-parity bit as RXPARITY.
          */
-        return s->kctrl | KCTRL_TXEMPTY |
-               (ps2_queue_empty(PS2_DEVICE(&s->kbd)) ? 0 : KCTRL_RXFULL);
+        if (s->irqb_level & IRQB_KBDRX) {
+            uint8_t data = kbd->queue.data[kbd->queue.rptr];
+
+            status |= KCTRL_RXFULL;
+            if (!(ctpop8(data) & 1)) {
+                status |= KCTRL_RXPARITY;
+            }
+        }
+        return status;
+    }
 
     case IOMD_IRQSTATA:
         return s->irqa_latch;
@@ -292,6 +357,11 @@ static void iomd_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case IOMD_KCTRL:
         s->kctrl = value & KCTRL_ENABLE;
+        if (s->kctrl) {
+            s->irqb_level |= IRQB_KBDTX;
+        } else {
+            s->irqb_level &= ~IRQB_KBDTX;
+        }
         break;
 
     case IOMD_IRQREQA:  /* IRQCLRA */
@@ -425,6 +495,9 @@ static void iomd_reset_hold(Object *obj, ResetType type)
     s->dma_level = 0;
     s->dma_mask = 0;
     s->kctrl = 0;
+    s->kbd_ps2_irq = false;
+    s->kbd_reading = false;
+    qemu_bh_cancel(s->kbd_bh);
     s->mouse_x = 0;
     s->mouse_y = 0;
     s->mouse_buttons = 0;
@@ -455,6 +528,8 @@ static void iomd_init(Object *obj)
                           "acorn-iomd-mouse", 4);
     sysbus_init_mmio(sbd, &s->mouse_iomem);
     object_initialize_child(obj, "kbd", &s->kbd, TYPE_PS2_KBD_DEVICE);
+    s->kbd_irq = qemu_allocate_irq(iomd_kbd_irq, s, 0);
+    s->kbd_bh = qemu_bh_new(iomd_kbd_bh, s);
     sysbus_init_irq(sbd, &s->irq);
     sysbus_init_irq(sbd, &s->fiq);
     qdev_init_gpio_in(DEVICE(obj), iomd_set_irq, 32);
@@ -478,8 +553,7 @@ static void iomd_realize(DeviceState *dev, Error **errp)
         return;
     }
     /* The KART receive interrupt is bank B bit 7 (Linux IRQ_KEYBOARDRX). */
-    qdev_connect_gpio_out(DEVICE(&s->kbd), PS2_DEVICE_IRQ,
-                          qdev_get_gpio_in(dev, ACORN_IOMD_IRQ_KBDRX));
+    qdev_connect_gpio_out(DEVICE(&s->kbd), PS2_DEVICE_IRQ, s->kbd_irq);
 
     s->mouse_handler = qemu_input_handler_register(dev,
                                                   &iomd_mouse_handler);

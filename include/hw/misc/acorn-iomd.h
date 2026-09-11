@@ -57,6 +57,10 @@ struct AcornIOMDState {
      */
     PS2KbdState kbd;
     uint32_t kctrl;
+    qemu_irq kbd_irq;
+    QEMUBH *kbd_bh;
+    bool kbd_ps2_irq;
+    bool kbd_reading;
 
     /*
      * Quadrature mouse: free-running 16-bit position counters that the

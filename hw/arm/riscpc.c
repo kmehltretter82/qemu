@@ -19,10 +19,13 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/datadir.h"
+#include "qemu/error-report.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/boards.h"
+#include "hw/core/loader.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/machines-qom.h"
 #include "hw/arm/acorn32-boot.h"
@@ -43,6 +46,7 @@ void rpc_fb_start(void);
 #include "qom/object.h"
 
 #define RISCPC_RAM_BASE     0x10000000
+#define RISCPC_ROM_SIZE     (8 * MiB)
 #define RISCPC_IOMD_BASE    0x03200000
 #define RISCPC_VIDC_BASE    0x03400000
 #define RISCPC_SERIAL_BASE  0x03010fe0
@@ -58,6 +62,7 @@ struct RiscPCMachineState {
 
     ARMCPU *cpu;
     AcornIOMDState *iomd;
+    MemoryRegion rom;
     bool old_param;
     bool floppy;
     hwaddr netbsd_entry;
@@ -91,6 +96,43 @@ static const MemoryRegionOps riscpc_bus_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+static bool riscpc_load_firmware(RiscPCMachineState *rms,
+                                 MachineState *machine)
+{
+    const char *bios_name = machine->firmware;
+    g_autofree char *filename = NULL;
+    int64_t image_size;
+
+    if (!bios_name) {
+        return false;
+    }
+
+    filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, bios_name);
+    if (!filename) {
+        error_report("Could not find RiscPC ROM image '%s'", bios_name);
+        exit(1);
+    }
+
+    image_size = get_image_size(filename, &error_fatal);
+    if (image_size != 2 * MiB && image_size != 4 * MiB &&
+        image_size != 6 * MiB && image_size != RISCPC_ROM_SIZE) {
+        error_report("RiscPC ROM image '%s' has invalid size %" PRId64
+                     " bytes (expected 2, 4, 6 or 8 MiB)",
+                     bios_name, image_size);
+        exit(1);
+    }
+
+    memory_region_init_rom(&rms->rom, NULL, "riscpc.rom",
+                           RISCPC_ROM_SIZE, &error_fatal);
+    memory_region_add_subregion(get_system_memory(), 0, &rms->rom);
+    if (load_image_mr(filename, &rms->rom) != image_size) {
+        error_report("Could not load RiscPC ROM image '%s'", bios_name);
+        exit(1);
+    }
+
+    return true;
+}
+
 /*
  * The NetBSD entry stub runs from RAM with translation off, so the CPU
  * just needs its PC pointed at it out of reset.
@@ -110,11 +152,20 @@ static void riscpc_init(MachineState *machine)
     DriveInfo *fds[MAX_FD];
     MemoryRegion *iobus = g_new(MemoryRegion, 1);
     MemoryRegion *podule = g_new(MemoryRegion, 1);
+    bool firmware_loaded;
+
+    if (machine->firmware && machine->kernel_filename) {
+        error_report("The RiscPC machine cannot load a ROM image and a "
+                     "kernel at the same time");
+        exit(1);
+    }
 
     fds[0] = drive_get(IF_FLOPPY, 0, 0);
     fds[1] = drive_get(IF_FLOPPY, 0, 1);
 
     rms->cpu = ARM_CPU(cpu_create(machine->cpu_type));
+
+    firmware_loaded = riscpc_load_firmware(rms, machine);
 
     memory_region_add_subregion(get_system_memory(), RISCPC_RAM_BASE,
                                 machine->ram);
@@ -217,6 +268,7 @@ static void riscpc_init(MachineState *machine)
 
     riscpc_binfo.ram_size = machine->ram_size;
     riscpc_binfo.old_param = rms->old_param;
+    riscpc_binfo.firmware_loaded = firmware_loaded;
     arm_load_kernel(rms->cpu, machine, &riscpc_binfo);
 }
 
@@ -249,6 +301,7 @@ static void riscpc_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
     static const char * const valid_cpu_types[] = {
+        ARM_CPU_TYPE_NAME("arm610"),
         ARM_CPU_TYPE_NAME("sa110"),
         NULL
     };
