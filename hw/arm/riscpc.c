@@ -325,7 +325,12 @@ static void riscpc_set_floppy(Object *obj, bool value, Error **errp)
 static void riscpc_machine_instance_init(Object *obj)
 {
     RISCPC_MACHINE(obj)->floppy = true;
-    RISCPC_MACHINE(obj)->broken_halfword = true;
+    /*
+     * The hardware limitation is a bus-cycle issue, not a CPU ISA issue.
+     * QEMU does not yet model StrongARM cache hits and write-buffer traffic,
+     * so its deliberately broad diagnostic mode must not be the default.
+     */
+    RISCPC_MACHINE(obj)->broken_halfword = false;
 }
 
 static void riscpc_machine_class_init(ObjectClass *oc, const void *data)
@@ -361,7 +366,7 @@ static void riscpc_machine_class_init(ObjectClass *oc, const void *data)
                                    riscpc_set_broken_halfword);
     object_class_property_set_description(oc, "broken-halfword",
         "Model the RiscPC StrongARM LDRH/STRH hardware defect "
-        "(enabled by default; use off only for software diagnosis)");
+        "as broad unpredictable transfers (diagnostic mode; off by default)");
 }
 
 static const TypeInfo riscpc_machine_typeinfo = {
