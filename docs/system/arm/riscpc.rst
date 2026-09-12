@@ -44,6 +44,10 @@ ARM610 RiscPC processor card.  It implements ARMv3, so ARMv4 halfword and
 signed transfers and ARMv4T ``BX`` instructions take an undefined-instruction
 exception as they would on the original processor.
 
+The ARM610 model also preserves its early writeback state when a writeback
+``LDM`` or ``STM`` takes a data abort.  This is needed by the historical ARM610
+Linux data-abort handler when it retries a faulting copy-on-write stack access.
+
 Note that mainline restricts ``ARCH_RPC`` to GCC 6 through 8: newer
 compilers emit ``strh`` instructions that the real RiscPC's bus
 cannot execute, so kernels must be built with such a toolchain.

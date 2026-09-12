@@ -5212,7 +5212,9 @@ static bool op_stm(DisasContext *s, arg_ldst_block *a)
 {
     int i, j, n, list, mem_idx;
     bool user = a->u;
+    bool arm610_early_writeback;
     TCGv_i32 addr, tmp;
+    TCGv_i32 base_before_writeback = NULL;
 
     if (user) {
         /* STM (user) */
@@ -5242,12 +5244,31 @@ static bool op_stm(DisasContext *s, arg_ldst_block *a)
     addr = op_addr_block_pre(s, a, n);
     mem_idx = get_mem_index(s);
 
+    /*
+     * ARM610 performs writeback before completing a faulting LDM/STM.  Its
+     * Linux data-abort handler compensates for that state before retrying
+     * the instruction.  Preserve the original base for the STM source if
+     * it is also present in the register list.
+     */
+    arm610_early_writeback = a->w &&
+        arm_dc_feature(s, ARM_FEATURE_ARM610);
+    if (arm610_early_writeback) {
+        TCGv_i32 writeback = tcg_temp_new_i32();
+
+        base_before_writeback = load_reg(s, a->rn);
+        tcg_gen_addi_i32(writeback, base_before_writeback,
+                         a->i ? n * 4 : -n * 4);
+        store_reg(s, a->rn, writeback);
+    }
+
     for (i = j = 0; i < 16; i++) {
         if (!(list & (1 << i))) {
             continue;
         }
 
-        if (user && i != 15) {
+        if (i == a->rn && base_before_writeback) {
+            tmp = base_before_writeback;
+        } else if (user && i != 15) {
             tmp = tcg_temp_new_i32();
             gen_helper_get_user_reg(tmp, tcg_env, tcg_constant_i32(i));
         } else {
@@ -5261,7 +5282,9 @@ static bool op_stm(DisasContext *s, arg_ldst_block *a)
         }
     }
 
-    op_addr_block_post(s, a, addr, n);
+    if (!arm610_early_writeback) {
+        op_addr_block_post(s, a, addr, n);
+    }
     clear_eci_state(s);
     return true;
 }
@@ -5287,6 +5310,7 @@ static bool do_ldm(DisasContext *s, arg_ldst_block *a)
     bool loaded_base;
     bool user = a->u;
     bool exc_return = false;
+    bool arm610_early_writeback;
     TCGv_i32 addr, tmp, loaded_var;
 
     if (user) {
@@ -5326,6 +5350,17 @@ static bool do_ldm(DisasContext *s, arg_ldst_block *a)
 
     addr = op_addr_block_pre(s, a, n);
     mem_idx = get_mem_index(s);
+
+    /* See op_stm(): the ARM610 exposes writeback at data-abort time. */
+    arm610_early_writeback = a->w &&
+        arm_dc_feature(s, ARM_FEATURE_ARM610);
+    if (arm610_early_writeback) {
+        TCGv_i32 base = load_reg(s, a->rn);
+        TCGv_i32 writeback = tcg_temp_new_i32();
+
+        tcg_gen_addi_i32(writeback, base, a->i ? n * 4 : -n * 4);
+        store_reg(s, a->rn, writeback);
+    }
     loaded_base = false;
     loaded_var = NULL;
 
@@ -5353,7 +5388,9 @@ static bool do_ldm(DisasContext *s, arg_ldst_block *a)
         }
     }
 
-    op_addr_block_post(s, a, addr, n);
+    if (!arm610_early_writeback) {
+        op_addr_block_post(s, a, addr, n);
+    }
 
     if (loaded_base) {
         /* Note that we reject base == pc above.  */
