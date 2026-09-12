@@ -42,7 +42,7 @@ void rpc_fb_start(void);
 #include "system/blockdev.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
-#include "target/arm/cpu-qom.h"
+#include "target/arm/cpu.h"
 #include "qom/object.h"
 
 #define RISCPC_RAM_BASE     0x10000000
@@ -65,6 +65,7 @@ struct RiscPCMachineState {
     MemoryRegion rom;
     bool old_param;
     bool floppy;
+    bool broken_halfword;
     hwaddr netbsd_entry;
 };
 
@@ -163,7 +164,25 @@ static void riscpc_init(MachineState *machine)
     fds[0] = drive_get(IF_FLOPPY, 0, 0);
     fds[1] = drive_get(IF_FLOPPY, 0, 1);
 
-    rms->cpu = ARM_CPU(cpu_create(machine->cpu_type));
+    /*
+     * The RiscPC's StrongARM processor card has a board-level defect in
+     * ARMv4 LDRH/STRH transfers.  Keep it a RiscPC CPU feature rather than
+     * changing the generic SA-110 model: the NetWinder also uses an SA-110
+     * but does not have this defect.
+     *
+     * cpu_create() realizes the CPU immediately, so create and configure it
+     * explicitly before realization.  The ARM translator snapshots feature
+     * bits into each TB.
+     */
+    {
+        Object *cpuobj = object_new(machine->cpu_type);
+
+        rms->cpu = ARM_CPU(cpuobj);
+        if (rms->broken_halfword) {
+            set_feature(&rms->cpu->env, ARM_FEATURE_RISCPC_BROKEN_HWORD);
+        }
+        qdev_realize(DEVICE(cpuobj), NULL, &error_fatal);
+    }
 
     firmware_loaded = riscpc_load_firmware(rms, machine);
 
@@ -282,6 +301,17 @@ static void riscpc_set_old_param(Object *obj, bool value, Error **errp)
     RISCPC_MACHINE(obj)->old_param = value;
 }
 
+static bool riscpc_get_broken_halfword(Object *obj, Error **errp)
+{
+    return RISCPC_MACHINE(obj)->broken_halfword;
+}
+
+static void riscpc_set_broken_halfword(Object *obj, bool value,
+                                        Error **errp)
+{
+    RISCPC_MACHINE(obj)->broken_halfword = value;
+}
+
 static bool riscpc_get_floppy(Object *obj, Error **errp)
 {
     return RISCPC_MACHINE(obj)->floppy;
@@ -295,6 +325,7 @@ static void riscpc_set_floppy(Object *obj, bool value, Error **errp)
 static void riscpc_machine_instance_init(Object *obj)
 {
     RISCPC_MACHINE(obj)->floppy = true;
+    RISCPC_MACHINE(obj)->broken_halfword = true;
 }
 
 static void riscpc_machine_class_init(ObjectClass *oc, const void *data)
@@ -325,6 +356,12 @@ static void riscpc_machine_class_init(ObjectClass *oc, const void *data)
                                    riscpc_set_floppy);
     object_class_property_set_description(oc, "floppy",
         "Enable the onboard SuperIO floppy controller");
+    object_class_property_add_bool(oc, "broken-halfword",
+                                   riscpc_get_broken_halfword,
+                                   riscpc_set_broken_halfword);
+    object_class_property_set_description(oc, "broken-halfword",
+        "Model the RiscPC StrongARM LDRH/STRH hardware defect "
+        "(enabled by default; use off only for software diagnosis)");
 }
 
 static const TypeInfo riscpc_machine_typeinfo = {

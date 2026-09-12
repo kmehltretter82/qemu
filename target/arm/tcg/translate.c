@@ -4045,6 +4045,98 @@ static bool op_store_ri(DisasContext *s, arg_ldst_ri *a,
     return true;
 }
 
+/*
+ * RiscPC StrongARM processor cards do not reliably execute the ARMv4
+ * halfword transfer instructions.  Preserve the transfer's address/fault
+ * semantics, but replace its data with a deliberately unpredictable value.
+ * The execution-time helper also makes accidental use visible under
+ * ``-d guest_errors``.
+ */
+static bool op_riscpc_broken_hword_load_ri(DisasContext *s, arg_ldst_ri *a,
+                                           int mem_idx)
+{
+    ISSInfo issinfo = make_issinfo(s, a->rt, a->p, a->w);
+    TCGv_i32 addr = op_addr_ri_pre(s, a);
+    TCGv_i32 ignored = tcg_temp_new_i32();
+    TCGv_i32 value = tcg_temp_new_i32();
+
+    gen_aa32_ld_i32_legacy(s, ignored, addr, mem_idx, MO_UW);
+    disas_set_da_iss(s, MO_UW, issinfo);
+    gen_helper_riscpc_broken_hword(value, tcg_env,
+                                   tcg_constant_i32(s->pc_curr),
+                                   tcg_constant_i32(0));
+
+    /* Match op_load_ri() for a load whose base and result overlap. */
+    op_addr_ri_post(s, a, addr);
+    store_reg_from_load(s, a->rt, value);
+    return true;
+}
+
+static bool op_riscpc_broken_hword_store_ri(DisasContext *s, arg_ldst_ri *a,
+                                            int mem_idx)
+{
+    ISSInfo issinfo = make_issinfo(s, a->rt, a->p, a->w) | ISSIsWrite;
+    TCGv_i32 addr;
+    TCGv_i32 value;
+
+    if (s->thumb && a->rn == 15) {
+        return false;
+    }
+
+    addr = op_addr_ri_pre(s, a);
+    value = tcg_temp_new_i32();
+    gen_helper_riscpc_broken_hword(value, tcg_env,
+                                   tcg_constant_i32(s->pc_curr),
+                                   tcg_constant_i32(1));
+    gen_aa32_st_i32_legacy(s, value, addr, mem_idx, MO_UW);
+    disas_set_da_iss(s, MO_UW, issinfo);
+
+    op_addr_ri_post(s, a, addr);
+    return true;
+}
+
+static bool op_riscpc_broken_hword_load_rr(DisasContext *s, arg_ldst_rr *a,
+                                           int mem_idx)
+{
+    ISSInfo issinfo = make_issinfo(s, a->rt, a->p, a->w);
+    TCGv_i32 addr = op_addr_rr_pre(s, a);
+    TCGv_i32 ignored = tcg_temp_new_i32();
+    TCGv_i32 value = tcg_temp_new_i32();
+
+    gen_aa32_ld_i32_legacy(s, ignored, addr, mem_idx, MO_UW);
+    disas_set_da_iss(s, MO_UW, issinfo);
+    gen_helper_riscpc_broken_hword(value, tcg_env,
+                                   tcg_constant_i32(s->pc_curr),
+                                   tcg_constant_i32(0));
+
+    op_addr_rr_post(s, a, addr);
+    store_reg_from_load(s, a->rt, value);
+    return true;
+}
+
+static bool op_riscpc_broken_hword_store_rr(DisasContext *s, arg_ldst_rr *a,
+                                            int mem_idx)
+{
+    ISSInfo issinfo = make_issinfo(s, a->rt, a->p, a->w) | ISSIsWrite;
+    TCGv_i32 addr;
+    TCGv_i32 value;
+
+    if (s->thumb && a->rn == 15) {
+        return false;
+    }
+
+    addr = op_addr_rr_pre(s, a);
+    value = tcg_temp_new_i32();
+    gen_helper_riscpc_broken_hword(value, tcg_env,
+                                   tcg_constant_i32(s->pc_curr),
+                                   tcg_constant_i32(1));
+    gen_aa32_st_i32_legacy(s, value, addr, mem_idx, MO_UW);
+    disas_set_da_iss(s, MO_UW, issinfo);
+
+    op_addr_rr_post(s, a, addr);
+    return true;
+}
+
 static bool op_ldrd_ri(DisasContext *s, arg_ldst_ri *a, int rt2)
 {
     TCGv_i32 addr;
@@ -4155,13 +4247,101 @@ static bool trans_##NAME##T_rr(DisasContext *s, arg_ldst_rr *a)       \
 
 DO_LDST(LDR, load, MO_UL)
 DO_LDST(LDRB, load, MO_UB)
-DO_LDST_V4(LDRH, load, MO_UW)
+static bool trans_LDRH_ri(DisasContext *s, arg_ldst_ri *a)
+{
+    if (!ENABLE_ARCH_4) {
+        return false;
+    }
+    if (arm_dc_feature(s, ARM_FEATURE_RISCPC_BROKEN_HWORD)) {
+        return op_riscpc_broken_hword_load_ri(s, a, get_mem_index(s));
+    }
+    return op_load_ri(s, a, MO_UW, get_mem_index(s));
+}
+
+static bool trans_LDRHT_ri(DisasContext *s, arg_ldst_ri *a)
+{
+    if (!ENABLE_ARCH_4) {
+        return false;
+    }
+    if (arm_dc_feature(s, ARM_FEATURE_RISCPC_BROKEN_HWORD)) {
+        return op_riscpc_broken_hword_load_ri(s, a,
+                                               get_a32_user_mem_index(s));
+    }
+    return op_load_ri(s, a, MO_UW, get_a32_user_mem_index(s));
+}
+
+static bool trans_LDRH_rr(DisasContext *s, arg_ldst_rr *a)
+{
+    if (!ENABLE_ARCH_4) {
+        return false;
+    }
+    if (arm_dc_feature(s, ARM_FEATURE_RISCPC_BROKEN_HWORD)) {
+        return op_riscpc_broken_hword_load_rr(s, a, get_mem_index(s));
+    }
+    return op_load_rr(s, a, MO_UW, get_mem_index(s));
+}
+
+static bool trans_LDRHT_rr(DisasContext *s, arg_ldst_rr *a)
+{
+    if (!ENABLE_ARCH_4) {
+        return false;
+    }
+    if (arm_dc_feature(s, ARM_FEATURE_RISCPC_BROKEN_HWORD)) {
+        return op_riscpc_broken_hword_load_rr(s, a,
+                                               get_a32_user_mem_index(s));
+    }
+    return op_load_rr(s, a, MO_UW, get_a32_user_mem_index(s));
+}
 DO_LDST_V4(LDRSB, load, MO_SB)
 DO_LDST_V4(LDRSH, load, MO_SW)
 
 DO_LDST(STR, store, MO_UL)
 DO_LDST(STRB, store, MO_UB)
-DO_LDST_V4(STRH, store, MO_UW)
+static bool trans_STRH_ri(DisasContext *s, arg_ldst_ri *a)
+{
+    if (!ENABLE_ARCH_4) {
+        return false;
+    }
+    if (arm_dc_feature(s, ARM_FEATURE_RISCPC_BROKEN_HWORD)) {
+        return op_riscpc_broken_hword_store_ri(s, a, get_mem_index(s));
+    }
+    return op_store_ri(s, a, MO_UW, get_mem_index(s));
+}
+
+static bool trans_STRHT_ri(DisasContext *s, arg_ldst_ri *a)
+{
+    if (!ENABLE_ARCH_4) {
+        return false;
+    }
+    if (arm_dc_feature(s, ARM_FEATURE_RISCPC_BROKEN_HWORD)) {
+        return op_riscpc_broken_hword_store_ri(s, a,
+                                                get_a32_user_mem_index(s));
+    }
+    return op_store_ri(s, a, MO_UW, get_a32_user_mem_index(s));
+}
+
+static bool trans_STRH_rr(DisasContext *s, arg_ldst_rr *a)
+{
+    if (!ENABLE_ARCH_4) {
+        return false;
+    }
+    if (arm_dc_feature(s, ARM_FEATURE_RISCPC_BROKEN_HWORD)) {
+        return op_riscpc_broken_hword_store_rr(s, a, get_mem_index(s));
+    }
+    return op_store_rr(s, a, MO_UW, get_mem_index(s));
+}
+
+static bool trans_STRHT_rr(DisasContext *s, arg_ldst_rr *a)
+{
+    if (!ENABLE_ARCH_4) {
+        return false;
+    }
+    if (arm_dc_feature(s, ARM_FEATURE_RISCPC_BROKEN_HWORD)) {
+        return op_riscpc_broken_hword_store_rr(s, a,
+                                                get_a32_user_mem_index(s));
+    }
+    return op_store_rr(s, a, MO_UW, get_a32_user_mem_index(s));
+}
 
 #undef DO_LDST
 #undef DO_LDST_V4

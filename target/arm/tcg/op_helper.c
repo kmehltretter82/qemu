@@ -17,7 +17,10 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "qemu/osdep.h"
+#include "qemu/guest-random.h"
+#include "qemu/log.h"
 #include "qemu/main-loop.h"
+#include "qapi/error.h"
 #include "cpu.h"
 #include "exec/target_page.h"
 #include "helper.h"
@@ -29,6 +32,42 @@
 
 #define SIGNBIT (uint32_t)0x80000000
 #define SIGNBIT64 ((uint64_t)1 << 63)
+
+/*
+ * The StrongARM card used by a RiscPC has a hardware defect in ARMv4
+ * halfword transfers.  Its exact silicon behaviour has not yet been pinned
+ * down, so model the result as architecturally unpredictable rather than
+ * accidentally making software depend on QEMU's normal LDRH/STRH path.
+ *
+ * The translator still performs the memory operation, preserving address
+ * faults and writeback timing.  This helper supplies the data value and logs
+ * at execution time; enable ``-d guest_errors`` to see the diagnostic.
+ */
+uint32_t HELPER(riscpc_broken_hword)(CPUARMState *env, uint32_t pc,
+                                     uint32_t is_store)
+{
+    Error *err = NULL;
+    uint16_t value;
+
+    (void)env;
+
+    if (qemu_guest_getrandom(&value, sizeof(value), &err) < 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "RiscPC StrongARM: unable to generate an "
+                      "unpredictable %s value at 0x%08x: %s\\n",
+                      is_store ? "STRH" : "LDRH", pc,
+                      error_get_pretty(err));
+        error_free(err);
+        value = 0xa5a5;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "RiscPC StrongARM: broken %s executed at 0x%08x; "
+                  "%s unpredictable value 0x%04x\\n",
+                  is_store ? "STRH" : "LDRH", pc,
+                  is_store ? "storing" : "returning", value);
+    return value;
+}
 
 int exception_target_el(CPUARMState *env)
 {

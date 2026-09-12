@@ -2974,6 +2974,19 @@ static const ARMCPRegInfo arm610_cp_reginfo[] = {
 };
 
 /*
+ * ARM610 CP15 c1 is write-only.  In particular, a later MRC must not reveal
+ * the value written by the MCR that enabled the MMU.  The architectural value
+ * is unpredictable; RAZ is deterministic and deliberately exposes kernels
+ * that incorrectly use c1 as a readable control register.
+ */
+static uint64_t arm610_sctlr_read(CPUARMState *env, const ARMCPRegInfo *ri)
+{
+    (void)env;
+    (void)ri;
+    return 0;
+}
+
+/*
  * Note that unlike TTBCR, writing to TTBCR2 does not require flushing
  * qemu tlbs nor adjusting cached masks.
  */
@@ -7546,6 +7559,10 @@ void register_cp_regs_for_features(ARMCPU *cpu)
             .writefn = sctlr_write, .resetvalue = cpu->reset_sctlr,
             .raw_writefn = raw_write,
         };
+
+        if (arm_feature(env, ARM_FEATURE_ARM610)) {
+            sctlr.readfn = arm610_sctlr_read;
+        }
         define_one_arm_cp_reg(cpu, &sctlr);
 
         if (arm_feature(env, ARM_FEATURE_PMSA) &&

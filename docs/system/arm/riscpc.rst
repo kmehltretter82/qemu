@@ -47,6 +47,15 @@ exception as they would on the original processor.
 The ARM610 model also preserves its early writeback state when a writeback
 ``LDM`` or ``STM`` takes a data abort.  This is needed by the historical ARM610
 Linux data-abort handler when it retries a faulting copy-on-write stack access.
+Its CP15 c1 control register is write-only, as on ARMv3 hardware; reads return
+zero rather than the value most recently written.
+
+RiscPC StrongARM processor cards have a separate defect in ARMv4 ``LDRH`` and
+``STRH`` transfers.  QEMU preserves their address-fault behaviour but supplies
+an unpredictable data value and logs each execution with ``-d guest_errors``.
+This is RiscPC-only: an SA-110 in another machine such as the NetWinder keeps
+normal ARMv4 halfword transfers.  The quirk is enabled by default and can be
+temporarily disabled for software diagnosis with ``-M riscpc,broken-halfword=off``.
 
 Note that mainline restricts ``ARCH_RPC`` to GCC 6 through 8: newer
 compilers emit ``strh`` instructions that the real RiscPC's bus

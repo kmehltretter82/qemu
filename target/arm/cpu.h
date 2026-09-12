@@ -2186,6 +2186,8 @@ enum arm_features {
     ARM_FEATURE_V4,
     /* ARM610's pre-ARMv4 CP15 register layout. */
     ARM_FEATURE_ARM610,
+    /* RiscPC StrongARM processor-card halfword-transfer erratum. */
+    ARM_FEATURE_RISCPC_BROKEN_HWORD,
 };
 
 static inline int arm_feature(const CPUARMState *env, int feature)
