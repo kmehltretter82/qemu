@@ -1534,6 +1534,9 @@ static void arm_cpu_propagate_feature_implications(ARMCPU *cpu)
     if (arm_feature(env, ARM_FEATURE_V4T)) {
         set_feature(env, ARM_FEATURE_V4);
     }
+    if (arm_feature(env, ARM_FEATURE_V4)) {
+        set_feature(env, ARM_FEATURE_V3M);
+    }
     if (arm_feature(env, ARM_FEATURE_LPAE)) {
         set_feature(env, ARM_FEATURE_V7MP);
     }

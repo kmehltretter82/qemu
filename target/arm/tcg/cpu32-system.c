@@ -736,9 +736,10 @@ static void sa110_initfn(Object *obj)
 
 /*
  * The ARM610 is the original ARMv3 processor option for the Acorn RiscPC.
- * It has CP15 and the ARMv3 instruction set, but no ARMv4 halfword transfer
- * instructions, BX, or Thumb state.  Keep it separate from StrongARM: the
- * latter is ARMv4 and has implementation-specific CP15 behaviour.
+ * It has CP15 and the plain ARMv3 instruction set, but not ARMv3M long
+ * multiply, ARMv4 halfword transfer instructions, BX, or Thumb state.  Keep
+ * it separate from StrongARM: the latter is ARMv4 and has
+ * implementation-specific CP15 behaviour.
  */
 static void arm610_initfn(Object *obj)
 {

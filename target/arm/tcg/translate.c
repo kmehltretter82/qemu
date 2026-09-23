@@ -32,6 +32,7 @@
 #include "helper.h"
 #include "helper-mve.h"
 
+#define ENABLE_ARCH_3M    arm_dc_feature(s, ARM_FEATURE_V3M)
 #define ENABLE_ARCH_4     arm_dc_feature(s, ARM_FEATURE_V4)
 #define ENABLE_ARCH_4T    arm_dc_feature(s, ARM_FEATURE_V4T)
 #define ENABLE_ARCH_5     arm_dc_feature(s, ARM_FEATURE_V5)
@@ -3012,6 +3013,10 @@ static bool trans_MLS(DisasContext *s, arg_MLS *a)
 static bool op_mlal(DisasContext *s, arg_s_rrrr *a, bool uns, bool add)
 {
     TCGv_i32 t0, t1, t2, t3;
+
+    if (!ENABLE_ARCH_3M) {
+        return false;
+    }
 
     t0 = load_reg(s, a->rm);
     t1 = load_reg(s, a->rn);

@@ -2178,6 +2178,8 @@ enum arm_features {
      * CPU types added in future.
      */
     ARM_FEATURE_BACKCOMPAT_CNTFRQ, /* 62.5MHz timer default */
+    /* ARMv3M long multiply extension (UMULL/UMLAL/SMULL/SMLAL). */
+    ARM_FEATURE_V3M,
     /*
      * ARMv4 baseline.  This is separate from ARM_FEATURE_V4T because
      * StrongARM implements ARMv4, including the halfword load/store

@@ -40,9 +40,10 @@ Raw 2, 4, 6 and 8 MiB ROM images are accepted.  A ROM image and a
 directly loaded kernel cannot be used together.
 
 The default CPU is a StrongARM SA-110.  ``-cpu arm610`` selects the original
-ARM610 RiscPC processor card.  It implements ARMv3, so ARMv4 halfword and
-signed transfers and ARMv4T ``BX`` instructions take an undefined-instruction
-exception as they would on the original processor.
+ARM610 RiscPC processor card.  It implements plain ARMv3, so ARMv3M long
+multiply instructions, ARMv4 halfword and signed transfers, and ARMv4T ``BX``
+instructions take an undefined-instruction exception as they would on the
+original processor.
 
 The ARM610 model also preserves its early writeback state when a writeback
 ``LDM`` or ``STM`` takes a data abort.  This is needed by the historical ARM610
