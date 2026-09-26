@@ -31,6 +31,7 @@
 #include "hw/core/boards.h"
 #include "hw/core/loader.h"
 #include "exec/tswap.h"
+#include "elf.h"
 #include "hw/block/flash.h"
 #include "system/blockdev.h"
 #include "hw/sh4/sh.h"
@@ -64,6 +65,12 @@ typedef struct {
 typedef struct {
     MemoryRegion area2, area3;
 } LCRMemory;
+
+/* vmlinux is linked at P1 addresses; P1 maps to the 29-bit address */
+static uint64_t sh7785lcr_elf_to_phys(void *opaque, uint64_t addr)
+{
+    return addr & 0x1fffffff;
+}
 
 static void sh7785lcr_areasel(void *opaque, int areasel)
 {
@@ -134,6 +141,8 @@ static void sh7785lcr_init(MachineState *machine)
     ResetData *reset_info;
     DriveInfo *dinfo;
     LCRMemory *mem;
+    bool elf_kernel = false;
+    void *params;
 
     if (machine->ram_size != SDRAM_SIZE) {
         error_report("sh7785lcr has %d MiB of RAM", (int)(SDRAM_SIZE / MiB));
@@ -177,15 +186,28 @@ static void sh7785lcr_init(MachineState *machine)
 
     memset(&boot_params, 0, sizeof(boot_params));
     if (machine->kernel_filename) {
-        if (load_image_targphys(machine->kernel_filename,
-                                SDRAM_BASE + LINUX_LOAD_OFFSET,
-                                INITRD_LOAD_OFFSET - LINUX_LOAD_OFFSET,
-                                NULL) < 0) {
+        uint64_t entry;
+
+        /*
+         * An ELF vmlinux is loaded where it is linked (P1 addresses mapped
+         * to 29-bit physical), which avoids the zImage decompressor's size
+         * limit. Anything else is a zImage, run from BOOT_LINK_OFFSET.
+         */
+        elf_kernel = load_elf(machine->kernel_filename, NULL,
+                              sh7785lcr_elf_to_phys, NULL, &entry, NULL,
+                              NULL, NULL, ELFDATA2LSB, EM_SH, 0, 0) > 0;
+        if (elf_kernel) {
+            reset_info->vector = entry;
+        } else if (load_image_targphys(machine->kernel_filename,
+                                       SDRAM_BASE + LINUX_LOAD_OFFSET,
+                                       INITRD_LOAD_OFFSET - LINUX_LOAD_OFFSET,
+                                       NULL) < 0) {
             error_report("could not load kernel '%s'",
                          machine->kernel_filename);
             exit(1);
+        } else {
+            reset_info->vector = (SDRAM_BASE + LINUX_LOAD_OFFSET) | 0xa0000000;
         }
-        reset_info->vector = (SDRAM_BASE + LINUX_LOAD_OFFSET) | 0xa0000000;
         /* what the boot firmware leaves behind */
         sh7785_preset_mmselr(soc, 2);
     }
@@ -207,8 +229,19 @@ static void sh7785lcr_init(MachineState *machine)
         strncpy(boot_params.kernel_cmdline, machine->kernel_cmdline,
                 sizeof(boot_params.kernel_cmdline));
     }
-    rom_add_blob_fixed("boot_params", &boot_params, sizeof(boot_params),
-                       SDRAM_BASE + ZERO_PAGE_OFFSET);
+    /*
+     * The zero page is part of an ELF kernel image, so write the boot
+     * parameters into the loaded image instead of adding an overlapping
+     * ROM blob.
+     */
+    params = elf_kernel ? rom_ptr(SDRAM_BASE + ZERO_PAGE_OFFSET,
+                                  sizeof(boot_params)) : NULL;
+    if (params) {
+        memcpy(params, &boot_params, sizeof(boot_params));
+    } else {
+        rom_add_blob_fixed("boot_params", &boot_params, sizeof(boot_params),
+                           SDRAM_BASE + ZERO_PAGE_OFFSET);
+    }
 }
 
 static void sh7785lcr_machine_init(MachineClass *mc)

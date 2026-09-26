@@ -41,6 +41,7 @@
 #include "hw/ide/mmio.h"
 #include "hw/core/irq.h"
 #include "hw/core/loader.h"
+#include "elf.h"
 #include "hw/usb/usb.h"
 #include "hw/block/flash.h"
 #include "exec/tswap.h"
@@ -204,6 +205,12 @@ static r2d_fpga_t *r2d_fpga_init(MemoryRegion *sysmem,
     return s;
 }
 
+/* vmlinux is linked at P1 addresses; P1 maps to the 29-bit address */
+static uint64_t r2d_elf_to_phys(void *opaque, uint64_t addr)
+{
+    return addr & 0x1fffffff;
+}
+
 typedef struct ResetData {
     SuperHCPU *cpu;
     uint32_t vector;
@@ -238,6 +245,8 @@ static void r2d_init(MachineState *machine)
     const char *kernel_cmdline = machine->kernel_cmdline;
     const char *initrd_filename = machine->initrd_filename;
     MachineClass *mc = MACHINE_GET_CLASS(machine);
+    bool elf_kernel = false;
+    void *params;
     SuperHCPU *cpu;
     ResetData *reset_info;
     struct SH7750State *s;
@@ -326,11 +335,21 @@ static void r2d_init(MachineState *machine)
 
     if (kernel_filename) {
         int kernel_size;
+        uint64_t entry;
 
-        kernel_size = load_image_targphys(kernel_filename,
-                                        SDRAM_BASE + LINUX_LOAD_OFFSET,
-                                        INITRD_LOAD_OFFSET - LINUX_LOAD_OFFSET,
-                                        NULL);
+        /*
+         * An ELF vmlinux is loaded where it is linked (P1 addresses mapped
+         * to 29-bit physical), which avoids the zImage decompressor's size
+         * limit. Anything else is a zImage, run from BOOT_LINK_OFFSET.
+         */
+        elf_kernel = load_elf(kernel_filename, NULL, r2d_elf_to_phys, NULL,
+                              &entry, NULL, NULL, NULL, ELFDATA2LSB, EM_SH,
+                              0, 0) > 0;
+        kernel_size = elf_kernel ? 0 :
+            load_image_targphys(kernel_filename,
+                                SDRAM_BASE + LINUX_LOAD_OFFSET,
+                                INITRD_LOAD_OFFSET - LINUX_LOAD_OFFSET,
+                                NULL);
         if (kernel_size < 0) {
             error_report("qemu: could not load kernel '%s'", kernel_filename);
             exit(1);
@@ -341,8 +360,9 @@ static void r2d_init(MachineState *machine)
                           MEMTXATTRS_UNSPECIFIED, NULL); /* cs3 SDRAM */
         address_space_stw(&address_space_memory, SH7750_BCR2, 3 << (3 * 2),
                           MEMTXATTRS_UNSPECIFIED, NULL); /* cs3 32bit */
-        /* Start from P2 area */
-        reset_info->vector = (SDRAM_BASE + LINUX_LOAD_OFFSET) | 0xa0000000;
+        /* Start from P2 area, or at the ELF entry point */
+        reset_info->vector = elf_kernel ? entry :
+            (SDRAM_BASE + LINUX_LOAD_OFFSET) | 0xa0000000;
     }
 
     if (initrd_filename) {
@@ -373,8 +393,18 @@ static void r2d_init(MachineState *machine)
                 sizeof(boot_params.kernel_cmdline));
     }
 
-    rom_add_blob_fixed("boot_params", &boot_params, sizeof(boot_params),
-                       SDRAM_BASE + BOOT_PARAMS_OFFSET);
+    /*
+     * The zero page is part of an ELF kernel image: write the boot
+     * parameters into the loaded image instead of an overlapping blob.
+     */
+    params = elf_kernel ? rom_ptr(SDRAM_BASE + BOOT_PARAMS_OFFSET,
+                                  sizeof(boot_params)) : NULL;
+    if (params) {
+        memcpy(params, &boot_params, sizeof(boot_params));
+    } else {
+        rom_add_blob_fixed("boot_params", &boot_params, sizeof(boot_params),
+                           SDRAM_BASE + BOOT_PARAMS_OFFSET);
+    }
 }
 
 static void r2d_machine_init(MachineClass *mc)
