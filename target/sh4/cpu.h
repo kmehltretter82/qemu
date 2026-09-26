@@ -201,6 +201,8 @@ typedef struct CPUArchState {
     uint32_t features;
 
     void *intc_handle;
+    /* If set, used instead of sh_intc: INTEVT code to take, or -1 */
+    int (*intc_get_vector)(void *opaque, int imask);
     int in_sleep;               /* SR_BL ignored during sleep */
     memory_content *movcal_backup;
     memory_content **movcal_backup_tail;

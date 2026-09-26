@@ -88,8 +88,10 @@ void superh_cpu_do_interrupt(CPUState *cs)
     env->in_sleep = 0;
 
     if (do_irq) {
-        irq_vector = sh_intc_get_pending_vector(env->intc_handle,
-                                                (env->sr >> 4) & 0xf);
+        irq_vector = env->intc_get_vector ?
+            env->intc_get_vector(env->intc_handle, (env->sr >> 4) & 0xf) :
+            sh_intc_get_pending_vector(env->intc_handle,
+                                       (env->sr >> 4) & 0xf);
         if (irq_vector == -1) {
             return; /* masked */
         }
