@@ -1,3 +1,7 @@
 # sh7750.c
 sh7750_porta(uint16_t prev, uint16_t cur, uint16_t pdtr, uint16_t pctr) "porta changed from 0x%04x to 0x%04x (pdtra=0x%04x, pctra=0x%08x)"
 sh7750_portb(uint16_t prev, uint16_t cur, uint16_t pdtr, uint16_t pctr) "portb changed from 0x%04x to 0x%04x (pdtrb=0x%04x, pctrb=0x%08x)"
+
+# sh7785.c
+sh7785_reg_read(const char *name, uint32_t addr, unsigned size, uint64_t val) "%s @0x%08x size %u -> 0x%" PRIx64
+sh7785_reg_write(const char *name, uint32_t addr, unsigned size, uint64_t val) "%s @0x%08x size %u <- 0x%" PRIx64

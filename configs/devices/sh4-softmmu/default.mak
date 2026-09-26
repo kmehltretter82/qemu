@@ -7,3 +7,4 @@
 
 # Boards are selected by default, uncomment to keep out of the build.
 # CONFIG_R2D=n
+# CONFIG_SH7785LCR=n
