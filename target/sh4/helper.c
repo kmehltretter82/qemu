@@ -644,6 +644,8 @@ void cpu_sh4_write_mmaped_utlb_addr(CPUSH4State *s, hwaddr addr,
     int use_asid = !(s->mmucr & MMUCR_SV) || !(s->sr & (1u << SR_MD));
 
     if (associate) {
+        /* The compare uses PTEH.ASID, not the ASID in the data field. */
+        uint8_t pteh_asid = s->pteh & PTEH_ASID_MASK;
         int i;
         tlb_t * utlb_match_entry = NULL;
 
@@ -653,7 +655,7 @@ void cpu_sh4_write_mmaped_utlb_addr(CPUSH4State *s, hwaddr addr,
             if (!entry->v)
                 continue;
 
-            if (tlb_entry_covers(entry, vpn << 10, use_asid, asid)) {
+            if (tlb_entry_covers(entry, vpn << 10, use_asid, pteh_asid)) {
                 if (utlb_match_entry) {
                     CPUState *cs = env_cpu(s);
 
@@ -673,7 +675,7 @@ void cpu_sh4_write_mmaped_utlb_addr(CPUSH4State *s, hwaddr addr,
         /* search ITLB */
         for (i = 0; i < ITLB_SIZE; i++) {
             tlb_t * entry = &s->itlb[i];
-            if (tlb_entry_covers(entry, vpn << 10, use_asid, asid)) {
+            if (tlb_entry_covers(entry, vpn << 10, use_asid, pteh_asid)) {
                 flush_tlb_entry(s, entry);
                 if (utlb_match_entry)
                     *entry = *utlb_match_entry;
