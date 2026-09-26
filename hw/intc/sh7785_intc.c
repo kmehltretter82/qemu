@@ -297,8 +297,10 @@ static void sh7785_intc_write(void *opaque, hwaddr addr, uint64_t val,
 
     switch (addr) {
     case ICR0:
-        if (val & 0x00c00000) {
-            qemu_log_mask(LOG_UNIMP, "sh7785-intc: IRL mode not modelled\n");
+        /* IRLM0/IRLM1 = 1 select IRQ mode for IRQ3-0 / IRQ7-4 (10.3.1) */
+        if ((val & 0x00c00000) != 0x00c00000) {
+            qemu_log_mask(LOG_UNIMP, "sh7785-intc: IRL mode (ICR0.IRLMn = 0)"
+                          " not modelled\n");
         }
         s->icr0 = val;
         return;
