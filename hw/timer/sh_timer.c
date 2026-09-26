@@ -241,10 +241,13 @@ static void *sh_timer_init(uint32_t freq, int feat, qemu_irq irq)
 
     s->timer = ptimer_init(sh_timer_tick, s, PTIMER_POLICY_LEGACY);
 
-    sh_timer_write(s, OFFSET_TCOR >> 2, s->tcor);
-    sh_timer_write(s, OFFSET_TCNT >> 2, s->tcnt);
-    sh_timer_write(s, OFFSET_TCPR >> 2, s->tcpr);
-    sh_timer_write(s, OFFSET_TCR  >> 2, s->tcpr);
+    /* OFFSET_* are register indices, sh_timer_write() takes byte offsets */
+    sh_timer_write(s, OFFSET_TCOR << 2, s->tcor);
+    sh_timer_write(s, OFFSET_TCNT << 2, s->tcnt);
+    if (feat & TIMER_FEAT_CAPT) {
+        sh_timer_write(s, OFFSET_TCPR << 2, s->tcpr);
+    }
+    sh_timer_write(s, OFFSET_TCR << 2, s->tcr);
     /* ??? Save/restore.  */
     return s;
 }
