@@ -362,7 +362,7 @@ static int find_utlb_entry(CPUSH4State *env, vaddr address, int use_asid)
    MMU_IADDR_ERROR, MMU_DADDR_ERROR_READ, MMU_DADDR_ERROR_WRITE.
 */
 static int get_mmu_address(CPUSH4State *env, hwaddr *physical,
-                           int *prot, vaddr address,
+                           int *prot, uint32_t *page_size, vaddr address,
                            MMUAccessType access_type)
 {
     int use_asid, n;
@@ -424,14 +424,17 @@ static int get_mmu_address(CPUSH4State *env, hwaddr *physical,
         n = MMU_OK;
         *physical = ((matching->ppn << 10) & ~(matching->size - 1))
                     | (address & (matching->size - 1));
+        *page_size = matching->size;
     }
     return n;
 }
 
 static int get_physical_address(CPUSH4State *env, hwaddr* physical,
-                                int *prot, vaddr address,
+                                int *prot, uint32_t *page_size, vaddr address,
                                 MMUAccessType access_type)
 {
+    *page_size = TARGET_PAGE_SIZE;
+
     /* P1, P2 and P4 areas do not use translation */
     if ((address >= 0x80000000 && address < 0xc0000000) || address >= 0xe0000000) {
         if (!(env->sr & (1u << SR_MD))
@@ -464,16 +467,18 @@ static int get_physical_address(CPUSH4State *env, hwaddr* physical,
     }
 
     /* We need to resort to the MMU */
-    return get_mmu_address(env, physical, prot, address, access_type);
+    return get_mmu_address(env, physical, prot, page_size, address,
+                           access_type);
 }
 
 hwaddr superh_cpu_get_phys_addr_debug(CPUState *cs, vaddr addr)
 {
     hwaddr physical;
     int prot;
+    uint32_t page_size;
 
-    if (get_physical_address(cpu_env(cs), &physical, &prot, addr, MMU_DATA_LOAD)
-            == MMU_OK) {
+    if (get_physical_address(cpu_env(cs), &physical, &prot, &page_size, addr,
+                             MMU_DATA_LOAD) == MMU_OK) {
         return physical;
     }
 
@@ -824,13 +829,29 @@ bool superh_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
     hwaddr physical;
     int prot;
+    uint32_t page_size;
 
-    ret = get_physical_address(env, &physical, &prot, address, access_type);
+    ret = get_physical_address(env, &physical, &prot, &page_size, address,
+                               access_type);
 
     if (ret == MMU_OK) {
+        /*
+         * A 1 KiB page is smaller than TARGET_PAGE_SIZE. Passing its size
+         * makes the softmmu check every access again, so neighbouring
+         * 1 KiB pages still miss or fault. The access itself uses the
+         * TARGET_PAGE_SIZE frame, which is only right if the virtual and
+         * physical address agree above the 1 KiB offset.
+         */
+        if ((address ^ physical) & ~(hwaddr)(page_size - 1) &
+            ~TARGET_PAGE_MASK) {
+            qemu_log_mask(LOG_UNIMP, "sh4: 1 KiB page at 0x%" VADDR_PRIx
+                          " maps to 0x%" HWADDR_PRIx ", which differs in bits"
+                          " [11:10]; accesses will use the wrong address\n",
+                          address, physical);
+        }
         address &= TARGET_PAGE_MASK;
         physical &= TARGET_PAGE_MASK;
-        tlb_set_page(cs, address, physical, prot, mmu_idx, TARGET_PAGE_SIZE);
+        tlb_set_page(cs, address, physical, prot, mmu_idx, page_size);
         return true;
     }
     if (probe) {
