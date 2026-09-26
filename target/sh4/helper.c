@@ -236,16 +236,20 @@ static int itlb_replacement(CPUSH4State * env)
 /* MMU indexes used by this target: 0 (privileged) and MMU_USER_IDX. */
 #define SH4_MMUIDX_ALL ((1 << 0) | (1 << MMU_USER_IDX))
 
-/* First virtual address covered by a TLB entry; VPN bits below the page
-   size are ignored by the hardware compare. */
+/*
+ * First virtual address covered by a TLB entry; VPN bits below the page
+ * size are ignored by the hardware compare.
+ */
 static vaddr tlb_entry_start(const tlb_t *entry)
 {
     return (entry->vpn << 10) & ~(vaddr)(entry->size - 1);
 }
 
-/* Drop every softmmu mapping that a (valid) SH TLB entry may have created.
-   Entries can be up to 1 MiB, so flushing only the first page would leave
-   stale translations for the rest of the entry. */
+/*
+ * Drop every softmmu mapping that a (valid) SH TLB entry may have created.
+ * Entries can be up to 1 MiB, so flushing only the first page would leave
+ * stale translations for the rest of the entry.
+ */
 static void flush_tlb_entry(CPUSH4State *env, const tlb_t *entry)
 {
     vaddr start = tlb_entry_start(entry) & TARGET_PAGE_MASK;
