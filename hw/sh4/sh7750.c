@@ -370,6 +370,12 @@ static void sh7750_mem_writel(void *opaque, hwaddr addr,
     case SH7750_MMUCR_A7:
         if (mem_value & MMUCR_TI) {
             cpu_sh4_invalidate_tlb(&s->cpu->env);
+        } else if ((s->cpu->env.mmucr ^ mem_value) & (MMUCR_AT | MMUCR_SV)) {
+            /*
+             * Softmmu entries made with the old AT or SV setting are stale;
+             * the UTLB and ITLB themselves stay valid.
+             */
+            tlb_flush(CPU(s->cpu));
         }
         s->cpu->env.mmucr = mem_value & ~MMUCR_TI;
         return;
