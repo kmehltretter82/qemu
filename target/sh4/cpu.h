@@ -119,6 +119,8 @@ typedef struct tlb_t {
     uint8_t wt:1;        /* write through */
     uint8_t sa:3;        /* space attribute (PCMCIA) */
     uint8_t tc:1;        /* timing control */
+    uint8_t epr;         /* SH-4A extended mode: protection bits EPR[5:0] */
+    uint8_t esz;         /* SH-4A extended mode: page size code ESZ[3:0] */
 } tlb_t;
 
 #define UTLB_SIZE 64
@@ -288,6 +290,7 @@ void cpu_load_tlb(CPUSH4State * env);
 #define MMUCR_AT (1<<0)
 #define MMUCR_TI (1<<2)
 #define MMUCR_SV (1<<8)
+#define MMUCR_ME (1<<7)   /* SH-4A: TLB extended mode */
 #define MMUCR_URC_BITS (6)
 #define MMUCR_URC_OFFSET (10)
 #define MMUCR_URC_SIZE (1 << MMUCR_URC_BITS)

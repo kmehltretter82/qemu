@@ -18,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
 
 #include "cpu.h"
 #include "exec/cputlb.h"
@@ -275,6 +276,100 @@ static bool tlb_entry_covers(const tlb_t *entry, vaddr address, int use_asid,
     return address >= start && address <= start + entry->size - 1;
 }
 
+/*
+ * SH-4A TLB extended mode (MMUCR.ME = 1): page size from ESZ[3:0] and
+ * access rights from EPR[5:0] (SH-4A Extended Functions Software Manual
+ * R01US0060EJ0200, 7.4). SH-4 has no ME bit.
+ */
+static bool tlb_extended_mode(CPUSH4State *env)
+{
+    return (env->features & SH_FEATURE_SH4A) && (env->mmucr & MMUCR_ME);
+}
+
+/* ESZ page size codes (7.4.1); 0 for codes the manual does not define. */
+static uint32_t esz_to_size(uint8_t esz)
+{
+    switch (esz) {
+    case 0x0:
+        return 1 * KiB;
+    case 0x1:
+        return 4 * KiB;
+    case 0x2:
+        return 8 * KiB;
+    case 0x4:
+        return 64 * KiB;
+    case 0x5:
+        return 256 * KiB;
+    case 0x7:
+        return 1 * MiB;
+    case 0x8:
+        return 4 * MiB;
+    case 0xc:
+        return 64 * MiB;
+    default:
+        return 0;
+    }
+}
+
+/* Set esz and size of an extended-mode entry. */
+static void tlb_entry_set_esz(CPUSH4State *env, tlb_t *entry, uint8_t esz)
+{
+    entry->esz = esz;
+    entry->size = esz_to_size(esz);
+    if (!entry->size) {
+        qemu_log_mask(LOG_GUEST_ERROR, "sh4: TLB entry with undefined ESZ "
+                      "0x%x (operation not guaranteed), using 4 KiB\n", esz);
+        entry->size = 4 * KiB;
+    }
+}
+
+/* Set sz and size of a compatible-mode entry: 1K, 4K, 64K or 1M. */
+static void tlb_entry_set_sz(tlb_t *entry, uint8_t sz)
+{
+    static const uint32_t sizes[4] = { 1 * KiB, 4 * KiB, 64 * KiB, 1 * MiB };
+
+    entry->sz = sz & 3;
+    entry->size = sizes[entry->sz];
+}
+
+/* EPR bit numbers (7.4.1) */
+#define EPR_PRIV_READ   5
+#define EPR_PRIV_WRITE  4
+#define EPR_PRIV_EXEC   3
+#define EPR_USER_READ   2
+#define EPR_USER_WRITE  1
+#define EPR_USER_EXEC   0
+
+/*
+ * Does the entry allow this access? In compatible mode PR[1] grants user
+ * access and PR[0] grants writes; in extended mode each of privileged and
+ * user read, write and execute has its own EPR bit.
+ */
+static bool tlb_entry_allows(CPUSH4State *env, const tlb_t *entry,
+                             MMUAccessType access_type, bool user)
+{
+    if (tlb_extended_mode(env)) {
+        int bit;
+
+        switch (access_type) {
+        case MMU_INST_FETCH:
+            bit = user ? EPR_USER_EXEC : EPR_PRIV_EXEC;
+            break;
+        case MMU_DATA_STORE:
+            bit = user ? EPR_USER_WRITE : EPR_PRIV_WRITE;
+            break;
+        default:
+            bit = user ? EPR_USER_READ : EPR_PRIV_READ;
+            break;
+        }
+        return entry->epr & (1 << bit);
+    }
+    if (user && !(entry->pr & 2)) {
+        return false;
+    }
+    return access_type != MMU_DATA_STORE || (entry->pr & 1);
+}
+
 /* Find the corresponding entry in the right TLB
    Return entry, MMU_DTLB_MISS or MMU_DTLB_MULTIPLE
 */
@@ -371,14 +466,15 @@ static int get_mmu_address(CPUSH4State *env, hwaddr *physical,
 {
     int use_asid, n;
     tlb_t *matching = NULL;
+    bool user = !(env->sr & (1u << SR_MD));
 
-    use_asid = !(env->mmucr & MMUCR_SV) || !(env->sr & (1u << SR_MD));
+    use_asid = !(env->mmucr & MMUCR_SV) || user;
 
     if (access_type == MMU_INST_FETCH) {
         n = find_itlb_entry(env, address, use_asid);
         if (n >= 0) {
             matching = &env->itlb[n];
-            if (!(env->sr & (1u << SR_MD)) && !(matching->pr & 2)) {
+            if (!tlb_entry_allows(env, matching, MMU_INST_FETCH, user)) {
                 n = MMU_ITLB_VIOLATION;
             } else {
                 *prot = PAGE_EXEC;
@@ -388,11 +484,15 @@ static int get_mmu_address(CPUSH4State *env, hwaddr *physical,
             if (n >= 0) {
                 n = copy_utlb_entry_itlb(env, n);
                 matching = &env->itlb[n];
-                if (!(env->sr & (1u << SR_MD)) && !(matching->pr & 2)) {
+                if (!tlb_entry_allows(env, matching, MMU_INST_FETCH, user)) {
                     n = MMU_ITLB_VIOLATION;
                 } else {
-                    *prot = PAGE_READ | PAGE_EXEC;
-                    if ((matching->pr & 1) && matching->d) {
+                    *prot = PAGE_EXEC;
+                    if (tlb_entry_allows(env, matching, MMU_DATA_LOAD, user)) {
+                        *prot |= PAGE_READ;
+                    }
+                    if (tlb_entry_allows(env, matching, MMU_DATA_STORE, user)
+                        && matching->d) {
                         *prot |= PAGE_WRITE;
                     }
                 }
@@ -406,16 +506,18 @@ static int get_mmu_address(CPUSH4State *env, hwaddr *physical,
         n = find_utlb_entry(env, address, use_asid);
         if (n >= 0) {
             matching = &env->utlb[n];
-            if (!(env->sr & (1u << SR_MD)) && !(matching->pr & 2)) {
+            if (!tlb_entry_allows(env, matching, access_type, user)) {
                 n = (access_type == MMU_DATA_STORE)
                     ? MMU_DTLB_VIOLATION_WRITE : MMU_DTLB_VIOLATION_READ;
-            } else if ((access_type == MMU_DATA_STORE) && !(matching->pr & 1)) {
-                n = MMU_DTLB_VIOLATION_WRITE;
             } else if ((access_type == MMU_DATA_STORE) && !matching->d) {
                 n = MMU_DTLB_INITIAL_WRITE;
             } else {
-                *prot = PAGE_READ;
-                if ((matching->pr & 1) && matching->d) {
+                *prot = 0;
+                if (tlb_entry_allows(env, matching, MMU_DATA_LOAD, user)) {
+                    *prot |= PAGE_READ;
+                }
+                if (tlb_entry_allows(env, matching, MMU_DATA_STORE, user)
+                    && matching->d) {
                     *prot |= PAGE_WRITE;
                 }
             }
@@ -491,7 +593,6 @@ hwaddr superh_cpu_get_phys_addr_debug(CPUState *cs, vaddr addr)
 
 void cpu_load_tlb(CPUSH4State * env)
 {
-    CPUState *cs = env_cpu(env);
     int n = cpu_mmucr_urc(env->mmucr);
     tlb_t * entry = &env->utlb[n];
 
@@ -505,31 +606,24 @@ void cpu_load_tlb(CPUSH4State * env)
     entry->vpn  = cpu_pteh_vpn(env->pteh);
     entry->v    = (uint8_t)cpu_ptel_v(env->ptel);
     entry->ppn  = cpu_ptel_ppn(env->ptel);
-    entry->sz   = (uint8_t)cpu_ptel_sz(env->ptel);
-    switch (entry->sz) {
-    case 0: /* 00 */
-        entry->size = 1024; /* 1K */
-        break;
-    case 1: /* 01 */
-        entry->size = 1024 * 4; /* 4K */
-        break;
-    case 2: /* 10 */
-        entry->size = 1024 * 64; /* 64K */
-        break;
-    case 3: /* 11 */
-        entry->size = 1024 * 1024; /* 1M */
-        break;
-    default:
-        cpu_abort(cs, "Unhandled load_tlb");
-        break;
+    if (tlb_extended_mode(env)) {
+        /* 7.5.3: PTEA supplies EPR[13:8] and ESZ[7:4]; PTEL SZ/PR unused */
+        entry->sz = 0;
+        entry->pr = 0;
+        entry->epr = (env->ptea >> 8) & 0x3f;
+        tlb_entry_set_esz(env, entry, (env->ptea >> 4) & 0xf);
+    } else {
+        tlb_entry_set_sz(entry, cpu_ptel_sz(env->ptel));
+        entry->pr = (uint8_t)cpu_ptel_pr(env->ptel);
     }
     entry->sh   = (uint8_t)cpu_ptel_sh(env->ptel);
     entry->c    = (uint8_t)cpu_ptel_c(env->ptel);
-    entry->pr   = (uint8_t)cpu_ptel_pr(env->ptel);
     entry->d    = (uint8_t)cpu_ptel_d(env->ptel);
     entry->wt   = (uint8_t)cpu_ptel_wt(env->ptel);
-    entry->sa   = (uint8_t)cpu_ptea_sa(env->ptea);
-    entry->tc   = (uint8_t)cpu_ptea_tc(env->ptea);
+    if (!(env->features & SH_FEATURE_SH4A)) {
+        entry->sa   = (uint8_t)cpu_ptea_sa(env->ptea);
+        entry->tc   = (uint8_t)cpu_ptea_tc(env->ptea);
+    }
 }
 
  void cpu_sh4_invalidate_tlb(CPUSH4State *s)
@@ -587,14 +681,26 @@ uint32_t cpu_sh4_read_mmaped_itlb_data(CPUSH4State *s,
     tlb_t * entry = &s->itlb[index];
 
     if (array == 0) {
-        /* ITLB Data Array 1 */
-        return (entry->ppn << 10) |
-               (entry->v   <<  8) |
-               (entry->pr  <<  5) |
-               ((entry->sz & 1) <<  6) |
-               ((entry->sz & 2) <<  4) |
-               (entry->c   <<  3) |
-               (entry->sh  <<  1);
+        /* ITLB Data Array 1; PR and SZ are reserved in extended mode */
+        uint32_t ret = (entry->ppn << 10) |
+                       (entry->v   <<  8) |
+                       (entry->c   <<  3) |
+                       (entry->sh  <<  1);
+
+        if (!tlb_extended_mode(s)) {
+            ret |= (entry->pr  <<  5) |
+                   ((entry->sz & 1) <<  6) |
+                   ((entry->sz & 2) <<  4);
+        }
+        return ret;
+    } else if (s->features & SH_FEATURE_SH4A) {
+        /* SH-4A ITLB Data Array 2 (7.7.3): EPR[5,3,2,0] and ESZ */
+        if (!tlb_extended_mode(s)) {
+            qemu_log_mask(LOG_GUEST_ERROR, "sh4: ITLB data array 2 read in "
+                          "TLB compatible mode\n");
+            return 0;
+        }
+        return (entry->epr & 0x2d) << 8 | entry->esz << 4;
     } else {
         /* ITLB Data Array 2 */
         return (entry->tc << 1) |
@@ -617,11 +723,25 @@ void cpu_sh4_write_mmaped_itlb_data(CPUSH4State *s, hwaddr addr,
         }
         entry->ppn = (mem_value & 0x1ffffc00) >> 10;
         entry->v   = (mem_value & 0x00000100) >> 8;
-        entry->sz  = (mem_value & 0x00000080) >> 6 |
-                     (mem_value & 0x00000010) >> 4;
-        entry->pr  = (mem_value & 0x00000040) >> 5;
+        if (!tlb_extended_mode(s)) {
+            tlb_entry_set_sz(entry, (mem_value & 0x00000080) >> 6 |
+                                    (mem_value & 0x00000010) >> 4);
+            entry->pr  = (mem_value & 0x00000040) >> 5;
+        }
         entry->c   = (mem_value & 0x00000008) >> 3;
         entry->sh  = (mem_value & 0x00000002) >> 1;
+    } else if (s->features & SH_FEATURE_SH4A) {
+        /* SH-4A ITLB Data Array 2 (7.7.3): EPR[5,3,2,0] and ESZ */
+        if (!tlb_extended_mode(s)) {
+            qemu_log_mask(LOG_GUEST_ERROR, "sh4: ITLB data array 2 write in "
+                          "TLB compatible mode\n");
+            return;
+        }
+        if (entry->v) {
+            flush_tlb_entry(s, entry);
+        }
+        entry->epr = (mem_value >> 8) & 0x2d;
+        tlb_entry_set_esz(s, entry, (mem_value >> 4) & 0xf);
     } else {
         /* ITLB Data Array 2 */
         entry->tc  = (mem_value & 0x00000008) >> 3;
@@ -719,18 +839,30 @@ uint32_t cpu_sh4_read_mmaped_utlb_data(CPUSH4State *s,
     increment_urc(s); /* per utlb access */
 
     if (array == 0) {
-        /* ITLB Data Array 1 */
-        return (entry->ppn << 10) |
-               (entry->v   <<  8) |
-               (entry->pr  <<  5) |
-               ((entry->sz & 1) <<  6) |
-               ((entry->sz & 2) <<  4) |
-               (entry->c   <<  3) |
-               (entry->d   <<  2) |
-               (entry->sh  <<  1) |
-               (entry->wt);
+        /* UTLB Data Array 1; PR and SZ are reserved in extended mode */
+        uint32_t ret = (entry->ppn << 10) |
+                       (entry->v   <<  8) |
+                       (entry->c   <<  3) |
+                       (entry->d   <<  2) |
+                       (entry->sh  <<  1) |
+                       (entry->wt);
+
+        if (!tlb_extended_mode(s)) {
+            ret |= (entry->pr  <<  5) |
+                   ((entry->sz & 1) <<  6) |
+                   ((entry->sz & 2) <<  4);
+        }
+        return ret;
+    } else if (s->features & SH_FEATURE_SH4A) {
+        /* SH-4A UTLB Data Array 2 (7.7.6): EPR and ESZ */
+        if (!tlb_extended_mode(s)) {
+            qemu_log_mask(LOG_GUEST_ERROR, "sh4: UTLB data array 2 read in "
+                          "TLB compatible mode\n");
+            return 0;
+        }
+        return entry->epr << 8 | entry->esz << 4;
     } else {
-        /* ITLB Data Array 2 */
+        /* UTLB Data Array 2 */
         return (entry->tc << 1) |
                (entry->sa);
     }
@@ -753,13 +885,27 @@ void cpu_sh4_write_mmaped_utlb_data(CPUSH4State *s, hwaddr addr,
         }
         entry->ppn = (mem_value & 0x1ffffc00) >> 10;
         entry->v   = (mem_value & 0x00000100) >> 8;
-        entry->sz  = (mem_value & 0x00000080) >> 6 |
-                     (mem_value & 0x00000010) >> 4;
-        entry->pr  = (mem_value & 0x00000060) >> 5;
+        if (!tlb_extended_mode(s)) {
+            tlb_entry_set_sz(entry, (mem_value & 0x00000080) >> 6 |
+                                    (mem_value & 0x00000010) >> 4);
+            entry->pr  = (mem_value & 0x00000060) >> 5;
+        }
         entry->c   = (mem_value & 0x00000008) >> 3;
         entry->d   = (mem_value & 0x00000004) >> 2;
         entry->sh  = (mem_value & 0x00000002) >> 1;
         entry->wt  = (mem_value & 0x00000001);
+    } else if (s->features & SH_FEATURE_SH4A) {
+        /* SH-4A UTLB Data Array 2 (7.7.6): EPR and ESZ */
+        if (!tlb_extended_mode(s)) {
+            qemu_log_mask(LOG_GUEST_ERROR, "sh4: UTLB data array 2 write in "
+                          "TLB compatible mode\n");
+            return;
+        }
+        if (entry->v) {
+            flush_tlb_entry(s, entry);
+        }
+        entry->epr = (mem_value >> 8) & 0x3f;
+        tlb_entry_set_esz(s, entry, (mem_value >> 4) & 0xf);
     } else {
         /* UTLB Data Array 2 */
         entry->tc = (mem_value & 0x00000008) >> 3;
