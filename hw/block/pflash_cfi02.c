@@ -340,12 +340,14 @@ static uint64_t pflash_read(void *opaque, hwaddr offset, unsigned int width)
         pflash_mode_read_array(pfl);
     }
     offset &= pfl->chip_len - 1;
-    boff = offset & 0xFF;
+    boff = offset;
     if (pfl->width == 2) {
         boff = boff >> 1;
     } else if (pfl->width == 4) {
         boff = boff >> 2;
     }
+    /* ID and CFI query addresses are in units of the bus width */
+    boff &= 0xFF;
     switch (pfl->cmd) {
     default:
         /* This should never happen : reset state & treat it as a read*/
