@@ -5,8 +5,9 @@
  * Functions Software Manual R01US0060EJ0200. Section numbers in comments
  * refer to the hardware manual unless noted.
  *
- * Modelled: CCN/MMU registers including TLB extended mode, memory-mapped
- * TLB arrays, INTC/INTC2, SCIF0-5, TMU0-5, on-chip IL/OL/U memory.
+ * Modelled: CCN/MMU registers including TLB extended mode, 32-bit address
+ * extended mode with the PMB, memory-mapped TLB and PMB arrays,
+ * INTC/INTC2, SCIF0-5, TMU0-5, on-chip IL/OL/U memory.
  * Every other register listed in section 31 is a plain register with its
  * power-on reset value, and every access to it is traced, so a guest that
  * relies on real behaviour there shows up in the log.
@@ -50,7 +51,7 @@ struct SH7785State {
     MemoryRegion regfile, regfile_a7;
     MemoryRegion il_ram, ol_ram, u_ram;
     SH7785IntcState *intc;
-    uint32_t ccr, qacr[2], pascr, ramcr, irmcr;
+    uint32_t ccr, qacr[2], ramcr, irmcr;
     MemoryRegion mmselr_mr;
     uint32_t mmselr;
     void (*mmselr_hook)(void *opaque, int areasel);
@@ -126,7 +127,7 @@ static uint64_t sh7785_ccn_read(void *opaque, hwaddr addr, unsigned size)
     case CCN_PRR:
         return scc->prr;
     case CCN_PASCR:
-        return s->pascr;
+        return env->pascr;
     case CCN_RAMCR:
         return s->ramcr;
     case CCN_IRMCR:
@@ -153,7 +154,8 @@ static void sh7785_ccn_write(void *opaque, hwaddr addr, uint64_t val,
         env->pteh = val;
         return;
     case CCN_PTEL:
-        env->ptel = val & 0x1ffffdff;
+        /* PPN[31:29] and UB (bit 9) exist only in 32-bit mode (7.8.6) */
+        env->ptel = val & (env->pascr & PASCR_SE ? 0xffffffff : 0x1ffffdff);
         return;
     case CCN_TTB:
         env->ttb = val;
@@ -191,11 +193,7 @@ static void sh7785_ccn_write(void *opaque, hwaddr addr, uint64_t val,
         s->qacr[(addr - CCN_QACR0) / 4] = val & 0x1c;
         return;
     case CCN_PASCR:
-        if (val & (1u << 31)) {
-            qemu_log_mask(LOG_UNIMP, "sh7785: 32-bit address extended mode "
-                          "(PASCR.SE) is not modelled yet\n");
-        }
-        s->pascr = val;
+        cpu_sh4_write_pascr(env, val);
         return;
     case CCN_RAMCR:
         s->ramcr = val;
@@ -243,15 +241,21 @@ static uint64_t sh7785_mmct_read(void *opaque, hwaddr addr, unsigned size)
         if ((addr & 0x00f00000) == 0) {
             return cpu_sh4_read_mmaped_utlb_addr(env, addr);
         }
+        if ((addr & 0x00f00000) == 0x00100000) {
+            return cpu_sh4_read_mmaped_pmb_addr(env, addr);
+        }
         break;
     case 0x7:
         if ((addr & 0x00700000) == 0) {
             return cpu_sh4_read_mmaped_utlb_data(env, addr);
         }
+        if ((addr & 0x00f00000) == 0x00100000) {
+            return cpu_sh4_read_mmaped_pmb_data(env, addr);
+        }
         break;
     }
-    qemu_log_mask(LOG_UNIMP, "sh7785: read of array 0x%08" HWADDR_PRIx
-                  " (PMB or reserved)\n", addr + 0xf0000000);
+    qemu_log_mask(LOG_GUEST_ERROR, "sh7785: read of reserved array address"
+                  " 0x%08" HWADDR_PRIx "\n", addr + 0xf0000000);
     return 0;
 }
 
@@ -278,16 +282,24 @@ static void sh7785_mmct_write(void *opaque, hwaddr addr, uint64_t val,
             cpu_sh4_write_mmaped_utlb_addr(env, addr, val);
             return;
         }
+        if ((addr & 0x00f00000) == 0x00100000) {
+            cpu_sh4_write_mmaped_pmb_addr(env, addr, val);
+            return;
+        }
         break;
     case 0x7:
         if ((addr & 0x00700000) == 0) {
             cpu_sh4_write_mmaped_utlb_data(env, addr, val);
             return;
         }
+        if ((addr & 0x00f00000) == 0x00100000) {
+            cpu_sh4_write_mmaped_pmb_data(env, addr, val);
+            return;
+        }
         break;
     }
-    qemu_log_mask(LOG_UNIMP, "sh7785: write of array 0x%08" HWADDR_PRIx
-                  " (PMB or reserved)\n", addr + 0xf0000000);
+    qemu_log_mask(LOG_GUEST_ERROR, "sh7785: write of reserved array "
+                  "address 0x%08" HWADDR_PRIx "\n", addr + 0xf0000000);
 }
 
 static const MemoryRegionOps sh7785_mmct_ops = {
@@ -365,6 +377,23 @@ static const MemoryRegionOps sh7785_regfile_ops = {
     .valid.min_access_size = 1,
     .valid.max_access_size = 4,
 };
+
+/*
+ * State after a power-on or manual reset with the mode pins selecting
+ * 32-bit boot (7.9.1 of the SH-4A software manual, PPN from 7.9.1 of the
+ * SH7785 manual): SE set, P1 and P2 mapped to physical 0 in 512 MiB pages.
+ */
+void sh7785_reset_32bit_boot(SH7785State *s)
+{
+    CPUSH4State *env = &s->cpu->env;
+
+    env->pascr = PASCR_SE;
+    env->pmb[0] = (pmb_t) { .vpn = 0x80, .ppn = 0x00, .v = 1, .sz = 3,
+                            .c = 1, .ub = 0, .wt = 1 };
+    env->pmb[1] = (pmb_t) { .vpn = 0xa0, .ppn = 0x00, .v = 1, .sz = 3,
+                            .c = 0, .ub = 0, .wt = 0 };
+    tlb_flush(CPU(s->cpu));
+}
 
 void sh7785_set_reg(SH7785State *s, uint32_t addr, uint32_t val)
 {
