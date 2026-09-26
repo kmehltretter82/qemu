@@ -1060,6 +1060,17 @@ static void ehci_port_write(void *ptr, hwaddr addr,
 
     *portsc &= ~PORTSC_RO_MASK;
     *portsc |= val;
+
+    /*
+     * Bits 27:26 are reserved in EHCI. Controllers with an integrated TT
+     * (ChipIdea/TDI) report the port speed there, and Linux reads it for
+     * them. Report high speed so such drivers do not assume full speed.
+     */
+    *portsc &= ~(3 << 26);
+    if ((*portsc & PORTSC_PED) && dev && dev->attached &&
+        dev->speed == USB_SPEED_HIGH) {
+        *portsc |= 2 << 26;
+    }
     trace_usb_ehci_portsc_change(addr + s->portscbase, addr >> 2, *portsc, old);
 }
 

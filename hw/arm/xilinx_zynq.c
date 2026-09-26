@@ -28,6 +28,7 @@
 #include "hw/adc/zynq-xadc.h"
 #include "hw/ssi/ssi.h"
 #include "hw/usb/chipidea.h"
+#include "hw/usb/ci-udc.h"
 #include "qemu/error-report.h"
 #include "hw/sd/sdhci.h"
 #include "hw/char/cadence_uart.h"
@@ -117,7 +118,8 @@ static void gem_init(uint32_t base, qemu_irq irq)
 }
 
 static inline int zynq_init_spi_flashes(uint32_t base_addr, qemu_irq irq,
-                                        bool is_qspi, int unit0)
+                                        bool is_qspi, int unit0,
+                                        bool ad9467_cs0)
 {
     int unit = unit0;
     DeviceState *dev;
@@ -149,6 +151,16 @@ static inline int zynq_init_spi_flashes(uint32_t base_addr, qemu_irq irq,
 
         for (j = 0; j < num_ss; ++j) {
             DriveInfo *dinfo = drive_get(IF_MTD, 0, unit++);
+
+            if (ad9467_cs0 && i == 0 && j == 0) {
+                /* AD9467 control interface instead of a flash on CS0 */
+                flash_dev = qdev_new("ad9467");
+                qdev_prop_set_uint8(flash_dev, "cs", j);
+                qdev_realize_and_unref(flash_dev, BUS(spi), &error_fatal);
+                cs_line = qdev_get_gpio_in_named(flash_dev, SSI_GPIO_CS, 0);
+                sysbus_connect_irq(busdev, i * num_ss + j + 1, cs_line);
+                continue;
+            }
             flash_dev = qdev_new("n25q128");
             if (dinfo) {
                 qdev_prop_set_drive_err(flash_dev, "drive",
@@ -185,6 +197,26 @@ static void zynq_set_boot_mode(Object *obj, const char *str,
         return;
     }
     m->boot_mode = mode;
+}
+
+static bool zynq_get_usb0_gadget(Object *obj, Error **errp)
+{
+    return ZYNQ_MACHINE(obj)->usb0_gadget;
+}
+
+static void zynq_set_usb0_gadget(Object *obj, bool value, Error **errp)
+{
+    ZYNQ_MACHINE(obj)->usb0_gadget = value;
+}
+
+static bool zynq_get_adi_adc(Object *obj, Error **errp)
+{
+    return ZYNQ_MACHINE(obj)->adi_adc;
+}
+
+static void zynq_set_adi_adc(Object *obj, bool value, Error **errp)
+{
+    ZYNQ_MACHINE(obj)->adi_adc = value;
 }
 
 static void ddr_ctrl_init(uint32_t base)
@@ -280,12 +312,35 @@ static void zynq_init(MachineState *machine)
         pic[n] = qdev_get_gpio_in(dev, n);
     }
 
-    n = zynq_init_spi_flashes(0xE0006000, pic[58 - GIC_INTERNAL], false, 0);
-    n = zynq_init_spi_flashes(0xE0007000, pic[81 - GIC_INTERNAL], false, n);
-    n = zynq_init_spi_flashes(0xE000D000, pic[51 - GIC_INTERNAL], true, n);
+    n = zynq_init_spi_flashes(0xE0006000, pic[58 - GIC_INTERNAL], false, 0,
+                              false);
+    n = zynq_init_spi_flashes(0xE0007000, pic[81 - GIC_INTERNAL], false, n,
+                              zynq_machine->adi_adc);
+    n = zynq_init_spi_flashes(0xE000D000, pic[51 - GIC_INTERNAL], true, n,
+                              false);
 
-    sysbus_create_simple(TYPE_CHIPIDEA, 0xE0002000, pic[53 - GIC_INTERNAL]);
-    sysbus_create_simple(TYPE_CHIPIDEA, 0xE0003000, pic[76 - GIC_INTERNAL]);
+    if (zynq_machine->adi_adc) {
+        /* ADI AD9467 reference design in the PL: AXI-ADC + AXI-DMAC */
+        sysbus_create_simple("adi-axi-adc", 0x44A00000, NULL);
+        sysbus_create_simple("adi-axi-dmac", 0x7C420000,
+                             pic[61 - GIC_INTERNAL]);
+    }
+
+    if (zynq_machine->usb0_gadget) {
+        /* USB0 as device controller, its link plugged into USB1 (host) */
+        DeviceState *udc, *usb1;
+
+        udc = sysbus_create_simple(TYPE_CI_UDC, 0xE0002000,
+                                   pic[53 - GIC_INTERNAL]);
+        usb1 = sysbus_create_simple(TYPE_CHIPIDEA, 0xE0003000,
+                                    pic[76 - GIC_INTERNAL]);
+        ci_udc_connect_link(CI_UDC(udc), &SYS_BUS_EHCI(usb1)->ehci.bus);
+    } else {
+        sysbus_create_simple(TYPE_CHIPIDEA, 0xE0002000,
+                             pic[53 - GIC_INTERNAL]);
+        sysbus_create_simple(TYPE_CHIPIDEA, 0xE0003000,
+                             pic[76 - GIC_INTERNAL]);
+    }
 
     dev = qdev_new(TYPE_CADENCE_UART);
     busdev = SYS_BUS_DEVICE(dev);
@@ -471,6 +526,16 @@ static void zynq_machine_class_init(ObjectClass *oc, const void *data)
                                           "Supported boot modes:"
                                           " jtag qspi sd nor");
     object_property_set_default_str(prop, "qspi");
+    object_class_property_add_bool(oc, "adi-adc", zynq_get_adi_adc,
+                                   zynq_set_adi_adc);
+    object_class_property_set_description(oc, "adi-adc",
+                                          "Add AD9467 on SPI1 CS0 plus ADI "
+                                          "AXI-ADC and AXI-DMAC test models");
+    object_class_property_add_bool(oc, "usb0-gadget", zynq_get_usb0_gadget,
+                                   zynq_set_usb0_gadget);
+    object_class_property_set_description(oc, "usb0-gadget",
+                                          "USB0 as ChipIdea device controller "
+                                          "test model, connected to USB1");
 }
 
 static const TypeInfo zynq_machine_type = {

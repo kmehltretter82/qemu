@@ -150,3 +150,12 @@ config USB_CHIPIDEA
 config ASPEED_UDC
     bool
     select USB
+
+config USB_SUR40
+    bool
+    default y
+    depends on USB
+
+config USB_CI_UDC
+    bool
+    select USB

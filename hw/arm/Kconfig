@@ -263,6 +263,8 @@ config ZYNQ
     default y
     depends on TCG && ARM
     select A9MPCORE
+    select ADI_AXI_TEST
+    select USB_CI_UDC
     select CADENCE # UART
     select PFLASH_CFI02
     select PL310 # cache controller

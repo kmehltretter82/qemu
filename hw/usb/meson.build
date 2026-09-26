@@ -44,6 +44,7 @@ system_ss.add(when: 'CONFIG_USB_STORAGE_CLASSIC', if_true: files('dev-storage-cl
 system_ss.add(when: 'CONFIG_USB_STORAGE_UAS', if_true: files('dev-uas.c'))
 system_ss.add(when: 'CONFIG_USB_AUDIO', if_true: files('dev-audio.c'))
 system_ss.add(when: 'CONFIG_USB_SERIAL', if_true: files('dev-serial.c'))
+system_ss.add(when: 'CONFIG_USB_SUR40', if_true: files('dev-sur40.c'))
 system_ss.add(when: 'CONFIG_USB_NETWORK', if_true: files('dev-network.c'))
 system_ss.add(when: 'CONFIG_PC87560', if_true: files('pc87560-ohci.c'))
 if host_os != 'windows'
@@ -93,3 +94,4 @@ endif
 system_ss.add(when: ['CONFIG_USB', 'CONFIG_XEN_BUS', libusb], if_true: files('xen-usb.c'))
 
 modules += { 'hw-usb': hw_usb_modules }
+system_ss.add(when: 'CONFIG_USB_CI_UDC', if_true: files('ci-udc.c'))

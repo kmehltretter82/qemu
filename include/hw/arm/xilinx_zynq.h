@@ -26,6 +26,8 @@ struct ZynqMachineState {
     Clock *ps_clk;
     ARMCPU *cpu[ZYNQ_MAX_CPUS];
     uint8_t boot_mode;
+    bool adi_adc;
+    bool usb0_gadget;
     struct arm_boot_info bootinfo;
 };
 
