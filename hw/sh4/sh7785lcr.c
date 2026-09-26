@@ -3,7 +3,7 @@
  *
  * Memory map in 29-bit mode (arch/sh/include/mach-common/mach/sh7785lcr.h
  * in Linux, and the SH7785 hardware manual 1.5 for the areas):
- *   0x00000000 NOR flash (CS0, 64 MiB)       - not modelled yet
+ *   0x00000000 NOR flash (CS0, 64 MiB, 32-bit bus), -drive if=pflash
  *   0x04000000 PLD registers (CS1)
  *   0x06000000 PCA9564 I2C (CS1)             - not modelled yet
  *   0x08000000 DDR2 SDRAM, 128 MiB (areas 2 and 3)
@@ -28,6 +28,8 @@
 #include "hw/core/boards.h"
 #include "hw/core/loader.h"
 #include "exec/tswap.h"
+#include "hw/block/flash.h"
+#include "system/blockdev.h"
 #include "hw/sh4/sh.h"
 #include "hw/sh4/sh7785.h"
 #include "system/address-spaces.h"
@@ -41,6 +43,8 @@
 #define INITRD_LOAD_OFFSET  0x01800000
 #define ZERO_PAGE_OFFSET    0x00001000
 
+#define FLASH_BASE          0x00000000
+#define FLASH_SIZE          (64 * MiB)
 #define PLD_BASE            0x04000000
 #define PLD_POFCR           0x06    /* write 1: power off */
 #define PLD_VERSR           0x0c
@@ -114,6 +118,7 @@ static void sh7785lcr_init(MachineState *machine)
     SuperHCPU *cpu;
     SH7785State *soc;
     ResetData *reset_info;
+    DriveInfo *dinfo;
 
     if (machine->ram_size != SDRAM_SIZE) {
         error_report("sh7785lcr has %d MiB of RAM", (int)(SDRAM_SIZE / MiB));
@@ -130,6 +135,17 @@ static void sh7785lcr_init(MachineState *machine)
 
     soc = sh7785_init(cpu, sysmem, PCLK_HZ);
     sh7785_set_reg(soc, FRQMR1, FRQMR1_MODE16);
+
+    /*
+     * NOR flash: Linux registers it as physmap-flash with bankwidth 4.
+     * TODO(manual): the exact part is not verified; AMD command set with
+     * Spansion S29GL512 IDs is assumed.
+     */
+    dinfo = drive_get(IF_PFLASH, 0, 0);
+    pflash_cfi02_register(FLASH_BASE, "sh7785lcr.flash", FLASH_SIZE,
+                          dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
+                          128 * KiB, 1, 4, 0x0001, 0x227e, 0x2223, 0x2201,
+                          0x555, 0x2aa, 0);
 
     memory_region_init_io(pld, NULL, &pld_ops, g_new0(uint16_t, 8),
                           "sh7785lcr-pld", 0x10);

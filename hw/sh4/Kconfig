@@ -31,3 +31,4 @@ config SH7785LCR
     default y
     depends on SH4
     select SH7785
+    select PFLASH_CFI02
