@@ -638,6 +638,7 @@ uint32_t cpu_sh4_read_mmaped_utlb_addr(CPUSH4State *s,
     increment_urc(s); /* per utlb access */
 
     return (entry->vpn  << 10) |
+           (entry->d    <<  9) |
            (entry->v    <<  8) |
            (entry->asid);
 }
