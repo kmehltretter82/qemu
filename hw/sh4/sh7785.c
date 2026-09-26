@@ -51,6 +51,10 @@ struct SH7785State {
     MemoryRegion il_ram, ol_ram, u_ram;
     SH7785IntcState *intc;
     uint32_t ccr, qacr[2], pascr, ramcr, irmcr;
+    MemoryRegion mmselr_mr;
+    uint32_t mmselr;
+    void (*mmselr_hook)(void *opaque, int areasel);
+    void *mmselr_opaque;
     uint32_t regvals[ARRAY_SIZE(sh7785_regs)];
 };
 
@@ -370,6 +374,59 @@ void sh7785_set_reg(SH7785State *s, uint32_t addr, uint32_t val)
     s->regvals[i] = val;
 }
 
+/* MMSELR, H'FC40 0020 (11.4.1): writes need H'A5A5 in bits 31:16 */
+static uint64_t sh7785_mmselr_read(void *opaque, hwaddr addr, unsigned size)
+{
+    SH7785State *s = opaque;
+
+    return s->mmselr;
+}
+
+static void sh7785_mmselr_write(void *opaque, hwaddr addr, uint64_t val,
+                                unsigned size)
+{
+    SH7785State *s = opaque;
+
+    if ((val >> 16) != 0xa5a5) {
+        qemu_log_mask(LOG_GUEST_ERROR, "sh7785: MMSELR write without the "
+                      "H'A5A5 code ignored (0x%" PRIx64 ")\n", val);
+        return;
+    }
+    s->mmselr = val & 7;
+    if (s->mmselr > 6) {
+        qemu_log_mask(LOG_GUEST_ERROR, "sh7785: MMSELR.AREASEL 7 is "
+                      "reserved\n");
+    }
+    if (s->mmselr_hook) {
+        s->mmselr_hook(s->mmselr_opaque, s->mmselr);
+    }
+}
+
+static const MemoryRegionOps sh7785_mmselr_ops = {
+    .read = sh7785_mmselr_read,
+    .write = sh7785_mmselr_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
+};
+
+void sh7785_set_mmselr_hook(SH7785State *s,
+                            void (*hook)(void *opaque, int areasel),
+                            void *opaque)
+{
+    s->mmselr_hook = hook;
+    s->mmselr_opaque = opaque;
+    hook(opaque, s->mmselr);
+}
+
+void sh7785_preset_mmselr(SH7785State *s, int areasel)
+{
+    s->mmselr = areasel;
+    if (s->mmselr_hook) {
+        s->mmselr_hook(s->mmselr_opaque, areasel);
+    }
+}
+
 static void sh7785_alias(MemoryRegion *sysmem, MemoryRegion *alias,
                          const char *name, MemoryRegion *mr, hwaddr p4,
                          int prio)
@@ -457,6 +514,10 @@ SH7785State *sh7785_init(SuperHCPU *cpu, MemoryRegion *sysmem,
     memory_region_init_io(&s->ccn, NULL, &sh7785_ccn_ops, s, "sh7785-ccn",
                           0x100);
     sh7785_alias(sysmem, &s->ccn_a7, "sh7785-ccn-a7", &s->ccn, 0xff000000, 0);
+
+    memory_region_init_io(&s->mmselr_mr, NULL, &sh7785_mmselr_ops, s,
+                          "sh7785-mmselr", 4);
+    memory_region_add_subregion(sysmem, 0xfc400020, &s->mmselr_mr);
 
     memory_region_init_io(&s->mmct, NULL, &sh7785_mmct_ops, s,
                           "sh7785-cache-tlb", 128 * MiB);

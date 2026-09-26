@@ -6,7 +6,10 @@
  *   0x00000000 NOR flash (CS0, 64 MiB, 32-bit bus), -drive if=pflash
  *   0x04000000 PLD registers (CS1)
  *   0x06000000 PCA9564 I2C (CS1)             - not modelled yet
- *   0x08000000 DDR2 SDRAM, 128 MiB (areas 2 and 3)
+ *   0x08000000 DDR2 SDRAM, 128 MiB (areas 2 and 3). Area 3 is DDR2 for
+ *              every MMSELR.AREASEL value used here; area 2 only for
+ *              AREASEL 010, 011 and 100 (hardware manual figure 1.4).
+ *              Firmware sets AREASEL = 010; with -kernel the board does.
  *   0x10000000 SM107 graphics (CS4)          - not modelled yet
  *
  * The board runs in clock mode 16 with a 33.33 MHz EXTAL (the factory DIP
@@ -57,6 +60,17 @@ typedef struct {
     SuperHCPU *cpu;
     uint32_t vector;
 } ResetData;
+
+typedef struct {
+    MemoryRegion area2, area3;
+} LCRMemory;
+
+static void sh7785lcr_areasel(void *opaque, int areasel)
+{
+    LCRMemory *m = opaque;
+
+    memory_region_set_enabled(&m->area2, areasel >= 2 && areasel <= 4);
+}
 
 static void main_cpu_reset(void *opaque)
 {
@@ -119,6 +133,7 @@ static void sh7785lcr_init(MachineState *machine)
     SH7785State *soc;
     ResetData *reset_info;
     DriveInfo *dinfo;
+    LCRMemory *mem;
 
     if (machine->ram_size != SDRAM_SIZE) {
         error_report("sh7785lcr has %d MiB of RAM", (int)(SDRAM_SIZE / MiB));
@@ -128,13 +143,22 @@ static void sh7785lcr_init(MachineState *machine)
     cpu = SUPERH_CPU(cpu_create(machine->cpu_type));
     reset_info = g_new0(ResetData, 1);
     reset_info->cpu = cpu;
-    reset_info->vector = cpu->env.pc;
+    /* Power-on reset starts at H'A000 0000 (P2 view of the boot flash) */
+    reset_info->vector = 0xa0000000;
     qemu_register_reset(main_cpu_reset, reset_info);
 
-    memory_region_add_subregion(sysmem, SDRAM_BASE, machine->ram);
+    mem = g_new0(LCRMemory, 1);
+    memory_region_init_alias(&mem->area2, NULL, "sh7785lcr.sdram-area2",
+                             machine->ram, 0, SDRAM_SIZE / 2);
+    memory_region_init_alias(&mem->area3, NULL, "sh7785lcr.sdram-area3",
+                             machine->ram, SDRAM_SIZE / 2, SDRAM_SIZE / 2);
+    memory_region_add_subregion(sysmem, SDRAM_BASE, &mem->area2);
+    memory_region_add_subregion(sysmem, SDRAM_BASE + SDRAM_SIZE / 2,
+                                &mem->area3);
 
     soc = sh7785_init(cpu, sysmem, PCLK_HZ);
     sh7785_set_reg(soc, FRQMR1, FRQMR1_MODE16);
+    sh7785_set_mmselr_hook(soc, sh7785lcr_areasel, mem);
 
     /*
      * NOR flash: Linux registers it as physmap-flash with bankwidth 4.
@@ -162,6 +186,8 @@ static void sh7785lcr_init(MachineState *machine)
             exit(1);
         }
         reset_info->vector = (SDRAM_BASE + LINUX_LOAD_OFFSET) | 0xa0000000;
+        /* what the boot firmware leaves behind */
+        sh7785_preset_mmselr(soc, 2);
     }
     if (machine->initrd_filename) {
         int size = load_image_targphys(machine->initrd_filename,
