@@ -47,6 +47,12 @@ typedef struct DisasContext {
     uint16_t opcode;
 
     bool has_movcal;
+    /*
+     * The TB starts in a delay slot. Interrupts are not taken there, so a
+     * pending one was refused when this TB was entered; the branch at the
+     * end of the delay slot must return to the main loop to see it.
+     */
+    bool exit_after_branch;
 #ifdef CONFIG_USER_ONLY
     bool in_gusa_exclusive;
 #endif
@@ -228,7 +234,10 @@ static bool use_goto_tb(DisasContext *ctx, vaddr dest)
 
 static void gen_goto_tb(DisasContext *ctx, unsigned tb_slot_idx, vaddr dest)
 {
-    if (use_goto_tb(ctx, dest)) {
+    if (ctx->exit_after_branch) {
+        tcg_gen_movi_i32(cpu_pc, dest);
+        tcg_gen_exit_tb(NULL, 0);
+    } else if (use_goto_tb(ctx, dest)) {
         tcg_gen_goto_tb(tb_slot_idx);
         tcg_gen_movi_i32(cpu_pc, dest);
         tcg_gen_exit_tb(ctx->base.tb, tb_slot_idx);
@@ -246,7 +255,11 @@ static void gen_jump(DisasContext * ctx)
            delayed jump as immediate jump are conditinal jumps */
         tcg_gen_mov_i32(cpu_pc, cpu_delayed_pc);
         tcg_gen_discard_i32(cpu_delayed_pc);
-        tcg_gen_lookup_and_goto_ptr();
+        if (ctx->exit_after_branch) {
+            tcg_gen_exit_tb(NULL, 0);
+        } else {
+            tcg_gen_lookup_and_goto_ptr();
+        }
         ctx->base.is_jmp = DISAS_NORETURN;
     } else {
         gen_goto_tb(ctx, 0, ctx->delayed_pc);
@@ -2188,6 +2201,7 @@ static void sh4_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
     ctx->delayed_pc = -1; /* use delayed pc from env pointer */
     ctx->features = cpu_env(cs)->features;
     ctx->has_movcal = (tbflags & TB_FLAG_PENDING_MOVCA);
+    ctx->exit_after_branch = tbflags & TB_FLAG_DELAY_SLOT_MASK;
     ctx->gbank = ((tbflags & (1 << SR_MD)) &&
                   (tbflags & (1 << SR_RB))) * 0x10;
     ctx->fbank = tbflags & FPSCR_FR ? 0x10 : 0;
