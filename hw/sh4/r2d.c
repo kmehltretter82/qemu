@@ -239,7 +239,6 @@ static void r2d_init(MachineState *machine)
     const char *initrd_filename = machine->initrd_filename;
     MachineClass *mc = MACHINE_GET_CLASS(machine);
     SuperHCPU *cpu;
-    CPUSH4State *env;
     ResetData *reset_info;
     struct SH7750State *s;
     MemoryRegion *sdram = g_new(MemoryRegion, 1);
@@ -252,11 +251,11 @@ static void r2d_init(MachineState *machine)
     r2d_fpga_t *fpga;
 
     cpu = SUPERH_CPU(cpu_create(machine->cpu_type));
-    env = &cpu->env;
 
     reset_info = g_new0(ResetData, 1);
     reset_info->cpu = cpu;
-    reset_info->vector = env->pc;
+    /* Power-on reset starts at H'A000 0000 (P2 view of the boot flash) */
+    reset_info->vector = 0xa0000000;
     qemu_register_reset(main_cpu_reset, reset_info);
 
     /* Allocate memory space */
