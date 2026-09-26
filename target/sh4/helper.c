@@ -78,6 +78,9 @@ void superh_cpu_do_interrupt(CPUState *cs)
                initrd, they need to be reloaded and the program counter
                should be loaded with the kernel entry point.
                qemu_system_reset_request takes care of that.  */
+            qemu_log_mask(LOG_GUEST_ERROR, "sh4: exception 0x%03x at pc "
+                          "0x%08x with SR.BL set, resetting (tea 0x%08x)\n",
+                          cs->exception_index, env->pc, env->tea);
             qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             return;
         }
