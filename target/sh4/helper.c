@@ -791,9 +791,16 @@ void cpu_sh4_write_mmaped_utlb_addr(CPUSH4State *s, hwaddr addr,
                 if (utlb_match_entry) {
                     CPUState *cs = env_cpu(s);
 
-                    /* Multiple TLB Exception */
-                    cs->exception_index = 0x140;
-                    s->tea = addr;
+                    /*
+                     * SH-4 raises a data TLB multiple hit exception;
+                     * SH-4A does not (SH-4A software manual, list of
+                     * changes for 7.7.4). Which entries SH-4A then
+                     * writes is not documented; the first match is.
+                     */
+                    if (!(s->features & SH_FEATURE_SH4A)) {
+                        cs->exception_index = 0x140;
+                        s->tea = addr;
+                    }
                     break;
                 }
                 flush_tlb_entry(s, entry);
