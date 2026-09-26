@@ -1,24 +1,32 @@
 /*
  * Renesas SH7785LCR (R0P7785LC0011RL) evaluation board
  *
- * Memory map in 29-bit mode (arch/sh/include/mach-common/mach/sh7785lcr.h
- * in Linux, and the SH7785 hardware manual 1.5 for the areas):
+ * Memory map (arch/sh/include/mach-common/mach/sh7785lcr.h in Linux, and
+ * the SH7785 hardware manual 1.5 for the areas):
  *   0x00000000 NOR flash (CS0, 64 MiB, 32-bit bus), -drive if=pflash
  *   0x04000000 PLD registers (CS1)
  *   0x06000000 PCA9564 I2C (CS1)             - not modelled yet
- *   0x08000000 DDR2 SDRAM, 128 MiB (areas 2 and 3). Area 3 is DDR2 for
- *              every MMSELR.AREASEL value used here; area 2 only for
- *              AREASEL 010, 011 and 100 (hardware manual figure 1.4).
- *              Firmware sets AREASEL = 010; with -kernel the board does.
  *   0x10000000 SM107 graphics (CS4)          - not modelled yet
+ *   0x40000000 DDR2 SDRAM, 512 MiB, in the 32-bit physical space
+ *              (DBSC0 to DBSC7). In 29-bit mode area 2 (0x08000000) and
+ *              area 3 (0x0c000000) show DBSC2 and DBSC3, i.e. DDR2 offsets
+ *              0x08000000 and 0x0c000000. Area 3 is DDR2 for every
+ *              MMSELR.AREASEL value used here; area 2 only for AREASEL
+ *              010, 011 and 100 (hardware manual figure 1.4).
  *
  * The board runs in clock mode 16 with a 33.33 MHz EXTAL (the factory DIP
  * switch settings Linux assumes in sh7785lcr_mode_pins()): FRQMR1 reads
  * H'1225 2448 (hardware manual table 15.3) and Pck is 50 MHz.
  *
- * With -kernel, a zImage is loaded at 0x08800000 and entered through P2,
- * with the boot parameters (command line, initrd) in the zero page at
- * 0x08001000, like the r2d machine does.
+ * -M sh7785lcr,boot32=on selects 32-bit boot with the mode pins: the CPU
+ * starts with PASCR.SE set and P1/P2 mapped to the flash by the PMB.
+ *
+ * With -kernel the board sets up what the boot firmware would: in 29-bit
+ * mode MMSELR.AREASEL = 010, in 32-bit mode PMB entries mapping P1
+ * (cached) and P2 (uncached) to the 512 MiB of DDR2 at 0x40000000. A
+ * zImage is loaded at MEMORY_START + 8 MiB and entered through P2, an ELF
+ * vmlinux where it is linked. Boot parameters go to the zero page at
+ * MEMORY_START + 0x1000 (MEMORY_START is 0x08000000 or 0x40000000).
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -41,8 +49,12 @@
 #include "system/runstate.h"
 #include "system/system.h"
 
-#define SDRAM_BASE          0x08000000
-#define SDRAM_SIZE          (128 * MiB)
+#define DDR_BASE            0x40000000
+#define DDR_SIZE            (512 * MiB)
+#define AREA2_BASE          0x08000000
+#define AREA3_BASE          0x0c000000
+#define AREA_SIZE           (64 * MiB)
+
 #define LINUX_LOAD_OFFSET   0x00800000
 #define INITRD_LOAD_OFFSET  0x01800000
 #define ZERO_PAGE_OFFSET    0x00001000
@@ -57,34 +69,52 @@
 #define FRQMR1_MODE16       0x12252448
 #define PCLK_HZ             50000000
 
-typedef struct {
+#define TYPE_SH7785LCR_MACHINE MACHINE_TYPE_NAME("sh7785lcr")
+OBJECT_DECLARE_SIMPLE_TYPE(SH7785LCRMachineState, SH7785LCR_MACHINE)
+
+struct SH7785LCRMachineState {
+    MachineState parent_obj;
+
+    bool boot32;            /* mode pins: 32-bit boot */
     SuperHCPU *cpu;
+    SH7785State *soc;
     uint32_t vector;
-} ResetData;
-
-typedef struct {
+    bool kernel;            /* -kernel: leave the firmware's state */
     MemoryRegion area2, area3;
-} LCRMemory;
-
-/* vmlinux is linked at P1 addresses; P1 maps to the 29-bit address */
-static uint64_t sh7785lcr_elf_to_phys(void *opaque, uint64_t addr)
-{
-    return addr & 0x1fffffff;
-}
+};
 
 static void sh7785lcr_areasel(void *opaque, int areasel)
 {
-    LCRMemory *m = opaque;
+    SH7785LCRMachineState *s = opaque;
 
-    memory_region_set_enabled(&m->area2, areasel >= 2 && areasel <= 4);
+    memory_region_set_enabled(&s->area2, areasel >= 2 && areasel <= 4);
 }
 
 static void main_cpu_reset(void *opaque)
 {
-    ResetData *s = opaque;
+    SH7785LCRMachineState *s = opaque;
+    CPUSH4State *env = &s->cpu->env;
 
     cpu_reset(CPU(s->cpu));
-    s->cpu->env.pc = s->vector;
+    if (s->boot32) {
+        sh7785_reset_32bit_boot(s->soc);
+    }
+    if (s->kernel && s->boot32) {
+        /* What 32-bit boot firmware leaves for the kernel */
+        env->pmb[0] = (pmb_t) { .vpn = 0x80, .ppn = DDR_BASE >> 24, .v = 1,
+                                .sz = 3, .c = 1, .ub = 0, .wt = 0 };
+        env->pmb[1] = (pmb_t) { .vpn = 0xa0, .ppn = DDR_BASE >> 24, .v = 1,
+                                .sz = 3, .c = 0, .ub = 0, .wt = 0 };
+    }
+    env->pc = s->vector;
+}
+
+/* vmlinux is linked at P1 addresses */
+static uint64_t sh7785lcr_elf_to_phys(void *opaque, uint64_t addr)
+{
+    SH7785LCRMachineState *s = opaque;
+
+    return s->boot32 ? DDR_BASE + (addr & 0x1fffffff) : addr & 0x1fffffff;
 }
 
 /* PLD: only the registers the kernel and the test rig use */
@@ -132,90 +162,45 @@ static struct QEMU_PACKED {
     char kernel_cmdline[256] QEMU_NONSTRING;
 } boot_params;
 
-static void sh7785lcr_init(MachineState *machine)
+static void sh7785lcr_load_kernel(SH7785LCRMachineState *s,
+                                  MachineState *machine)
 {
-    MemoryRegion *sysmem = get_system_memory();
-    MemoryRegion *pld = g_new(MemoryRegion, 1);
-    SuperHCPU *cpu;
-    SH7785State *soc;
-    ResetData *reset_info;
-    DriveInfo *dinfo;
-    LCRMemory *mem;
-    bool elf_kernel = false;
+    hwaddr mem_start = s->boot32 ? DDR_BASE : AREA2_BASE;
+    bool elf_kernel;
+    uint64_t entry;
     void *params;
 
-    if (machine->ram_size != SDRAM_SIZE) {
-        error_report("sh7785lcr has %d MiB of RAM", (int)(SDRAM_SIZE / MiB));
-        exit(1);
-    }
-
-    cpu = SUPERH_CPU(cpu_create(machine->cpu_type));
-    reset_info = g_new0(ResetData, 1);
-    reset_info->cpu = cpu;
-    /* Power-on reset starts at H'A000 0000 (P2 view of the boot flash) */
-    reset_info->vector = 0xa0000000;
-    qemu_register_reset(main_cpu_reset, reset_info);
-
-    mem = g_new0(LCRMemory, 1);
-    memory_region_init_alias(&mem->area2, NULL, "sh7785lcr.sdram-area2",
-                             machine->ram, 0, SDRAM_SIZE / 2);
-    memory_region_init_alias(&mem->area3, NULL, "sh7785lcr.sdram-area3",
-                             machine->ram, SDRAM_SIZE / 2, SDRAM_SIZE / 2);
-    memory_region_add_subregion(sysmem, SDRAM_BASE, &mem->area2);
-    memory_region_add_subregion(sysmem, SDRAM_BASE + SDRAM_SIZE / 2,
-                                &mem->area3);
-
-    soc = sh7785_init(cpu, sysmem, PCLK_HZ);
-    sh7785_set_reg(soc, FRQMR1, FRQMR1_MODE16);
-    sh7785_set_mmselr_hook(soc, sh7785lcr_areasel, mem);
-
+    s->kernel = true;
     /*
-     * NOR flash: Linux registers it as physmap-flash with bankwidth 4.
-     * TODO(manual): the exact part is not verified; AMD command set with
-     * Spansion S29GL512 IDs is assumed.
+     * An ELF vmlinux is loaded where it is linked, which avoids the zImage
+     * decompressor's size limit. Anything else is a zImage, run from
+     * BOOT_LINK_OFFSET.
      */
-    dinfo = drive_get(IF_PFLASH, 0, 0);
-    pflash_cfi02_register(FLASH_BASE, "sh7785lcr.flash", FLASH_SIZE,
-                          dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
-                          128 * KiB, 1, 4, 0x0001, 0x227e, 0x2223, 0x2201,
-                          0x555, 0x2aa, 0);
-
-    memory_region_init_io(pld, NULL, &pld_ops, g_new0(uint16_t, 8),
-                          "sh7785lcr-pld", 0x10);
-    memory_region_add_subregion(sysmem, PLD_BASE, pld);
+    elf_kernel = load_elf(machine->kernel_filename, NULL,
+                          sh7785lcr_elf_to_phys, s, &entry, NULL, NULL, NULL,
+                          ELFDATA2LSB, EM_SH, 0, 0) > 0;
+    if (elf_kernel) {
+        s->vector = entry;
+    } else if (load_image_targphys(machine->kernel_filename,
+                                   mem_start + LINUX_LOAD_OFFSET,
+                                   INITRD_LOAD_OFFSET - LINUX_LOAD_OFFSET,
+                                   NULL) < 0) {
+        error_report("could not load kernel '%s'", machine->kernel_filename);
+        exit(1);
+    } else {
+        s->vector = 0xa0000000 | ((mem_start + LINUX_LOAD_OFFSET) &
+                                  0x1fffffff);
+    }
+    if (!s->boot32) {
+        /* what 29-bit boot firmware leaves behind */
+        sh7785_preset_mmselr(s->soc, 2);
+    }
 
     memset(&boot_params, 0, sizeof(boot_params));
-    if (machine->kernel_filename) {
-        uint64_t entry;
-
-        /*
-         * An ELF vmlinux is loaded where it is linked (P1 addresses mapped
-         * to 29-bit physical), which avoids the zImage decompressor's size
-         * limit. Anything else is a zImage, run from BOOT_LINK_OFFSET.
-         */
-        elf_kernel = load_elf(machine->kernel_filename, NULL,
-                              sh7785lcr_elf_to_phys, NULL, &entry, NULL,
-                              NULL, NULL, ELFDATA2LSB, EM_SH, 0, 0) > 0;
-        if (elf_kernel) {
-            reset_info->vector = entry;
-        } else if (load_image_targphys(machine->kernel_filename,
-                                       SDRAM_BASE + LINUX_LOAD_OFFSET,
-                                       INITRD_LOAD_OFFSET - LINUX_LOAD_OFFSET,
-                                       NULL) < 0) {
-            error_report("could not load kernel '%s'",
-                         machine->kernel_filename);
-            exit(1);
-        } else {
-            reset_info->vector = (SDRAM_BASE + LINUX_LOAD_OFFSET) | 0xa0000000;
-        }
-        /* what the boot firmware leaves behind */
-        sh7785_preset_mmselr(soc, 2);
-    }
     if (machine->initrd_filename) {
         int size = load_image_targphys(machine->initrd_filename,
-                                       SDRAM_BASE + INITRD_LOAD_OFFSET,
-                                       SDRAM_SIZE - INITRD_LOAD_OFFSET,
-                                       NULL);
+                                       mem_start + INITRD_LOAD_OFFSET,
+                                       128 * MiB - INITRD_LOAD_OFFSET, NULL);
         if (size < 0) {
             error_report("could not load initrd '%s'",
                          machine->initrd_filename);
@@ -234,23 +219,100 @@ static void sh7785lcr_init(MachineState *machine)
      * parameters into the loaded image instead of adding an overlapping
      * ROM blob.
      */
-    params = elf_kernel ? rom_ptr(SDRAM_BASE + ZERO_PAGE_OFFSET,
+    params = elf_kernel ? rom_ptr(mem_start + ZERO_PAGE_OFFSET,
                                   sizeof(boot_params)) : NULL;
     if (params) {
         memcpy(params, &boot_params, sizeof(boot_params));
     } else {
         rom_add_blob_fixed("boot_params", &boot_params, sizeof(boot_params),
-                           SDRAM_BASE + ZERO_PAGE_OFFSET);
+                           mem_start + ZERO_PAGE_OFFSET);
     }
 }
 
-static void sh7785lcr_machine_init(MachineClass *mc)
+static void sh7785lcr_init(MachineState *machine)
 {
+    SH7785LCRMachineState *s = SH7785LCR_MACHINE(machine);
+    MemoryRegion *sysmem = get_system_memory();
+    MemoryRegion *pld = g_new(MemoryRegion, 1);
+    DriveInfo *dinfo;
+
+    if (machine->ram_size != DDR_SIZE) {
+        error_report("sh7785lcr has %d MiB of RAM", (int)(DDR_SIZE / MiB));
+        exit(1);
+    }
+
+    s->cpu = SUPERH_CPU(cpu_create(machine->cpu_type));
+    /* Power-on reset starts at H'A000 0000 (P2 view of the boot flash) */
+    s->vector = 0xa0000000;
+    qemu_register_reset(main_cpu_reset, s);
+
+    memory_region_add_subregion(sysmem, DDR_BASE, machine->ram);
+    memory_region_init_alias(&s->area2, NULL, "sh7785lcr.sdram-area2",
+                             machine->ram, AREA2_BASE, AREA_SIZE);
+    memory_region_init_alias(&s->area3, NULL, "sh7785lcr.sdram-area3",
+                             machine->ram, AREA3_BASE, AREA_SIZE);
+    memory_region_add_subregion(sysmem, AREA2_BASE, &s->area2);
+    memory_region_add_subregion(sysmem, AREA3_BASE, &s->area3);
+
+    s->soc = sh7785_init(s->cpu, sysmem, PCLK_HZ);
+    sh7785_set_reg(s->soc, FRQMR1, FRQMR1_MODE16);
+    sh7785_set_mmselr_hook(s->soc, sh7785lcr_areasel, s);
+
+    /*
+     * NOR flash: Linux registers it as physmap-flash with bankwidth 4.
+     * TODO(manual): the exact part is not verified; AMD command set with
+     * Spansion S29GL512 IDs is assumed.
+     */
+    dinfo = drive_get(IF_PFLASH, 0, 0);
+    pflash_cfi02_register(FLASH_BASE, "sh7785lcr.flash", FLASH_SIZE,
+                          dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
+                          128 * KiB, 1, 4, 0x0001, 0x227e, 0x2223, 0x2201,
+                          0x555, 0x2aa, 0);
+
+    memory_region_init_io(pld, NULL, &pld_ops, g_new0(uint16_t, 8),
+                          "sh7785lcr-pld", 0x10);
+    memory_region_add_subregion(sysmem, PLD_BASE, pld);
+
+    if (machine->kernel_filename) {
+        sh7785lcr_load_kernel(s, machine);
+    }
+}
+
+static bool sh7785lcr_get_boot32(Object *obj, Error **errp)
+{
+    return SH7785LCR_MACHINE(obj)->boot32;
+}
+
+static void sh7785lcr_set_boot32(Object *obj, bool value, Error **errp)
+{
+    SH7785LCR_MACHINE(obj)->boot32 = value;
+}
+
+static void sh7785lcr_class_init(ObjectClass *oc, const void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+
     mc->desc = "Renesas SH7785LCR (SH-4A)";
     mc->init = sh7785lcr_init;
     mc->default_cpu_type = TYPE_SH7785_CPU;
-    mc->default_ram_size = SDRAM_SIZE;
+    mc->default_ram_size = DDR_SIZE;
     mc->default_ram_id = "sh7785lcr.sdram";
+    object_class_property_add_bool(oc, "boot32", sh7785lcr_get_boot32,
+                                   sh7785lcr_set_boot32);
+    object_class_property_set_description(oc, "boot32",
+        "Mode pins select 32-bit boot (PMB, 32-bit physical addresses)");
 }
 
-DEFINE_MACHINE("sh7785lcr", sh7785lcr_machine_init)
+static const TypeInfo sh7785lcr_info = {
+    .name = TYPE_SH7785LCR_MACHINE,
+    .parent = TYPE_MACHINE,
+    .instance_size = sizeof(SH7785LCRMachineState),
+    .class_init = sh7785lcr_class_init,
+};
+
+static void sh7785lcr_register_types(void)
+{
+    type_register_static(&sh7785lcr_info);
+}
+
+type_init(sh7785lcr_register_types)
