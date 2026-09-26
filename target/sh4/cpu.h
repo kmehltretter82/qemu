@@ -126,6 +126,24 @@ typedef struct tlb_t {
 #define UTLB_SIZE 64
 #define ITLB_SIZE 4
 
+/*
+ * SH-4A privileged space mapping buffer (32-bit address extended mode):
+ * maps P1/P2 in 16/64/128/512 MiB pages (software manual 7.8.3).
+ */
+typedef struct pmb_t {
+    uint8_t vpn;        /* VPN[31:24] */
+    uint8_t ppn;        /* PPN[31:24] */
+    uint8_t v:1;
+    uint8_t sz:2;       /* 00 16M, 01 64M, 10 128M, 11 512M */
+    uint8_t c:1;
+    uint8_t ub:1;
+    uint8_t wt:1;
+} pmb_t;
+
+#define PMB_SIZE 16
+
+#define PASCR_SE (1u << 31) /* SH-4A: 32-bit address extended mode */
+
 enum sh_features {
     SH_FEATURE_SH4A = 1,
     SH_FEATURE_BCR3_AND_BCR4 = 2,
@@ -186,6 +204,8 @@ typedef struct CPUArchState {
 
     tlb_t itlb[ITLB_SIZE];      /* instruction translation table */
     tlb_t utlb[UTLB_SIZE];      /* unified translation table */
+    pmb_t pmb[PMB_SIZE];        /* SH-4A privileged space mapping buffer */
+    uint32_t pascr;             /* SH-4A physical address space control */
 
     /* LDST = LOCK_ADDR != -1.  */
     uint32_t lock_addr;
@@ -281,6 +301,13 @@ void cpu_sh4_write_mmaped_utlb_data(CPUSH4State *s, hwaddr addr,
 int cpu_sh4_is_cached(CPUSH4State *env, uint32_t addr);
 
 void cpu_load_tlb(CPUSH4State * env);
+uint32_t cpu_sh4_read_mmaped_pmb_addr(CPUSH4State *s, hwaddr addr);
+void cpu_sh4_write_mmaped_pmb_addr(CPUSH4State *s, hwaddr addr,
+                                   uint32_t mem_value);
+uint32_t cpu_sh4_read_mmaped_pmb_data(CPUSH4State *s, hwaddr addr);
+void cpu_sh4_write_mmaped_pmb_data(CPUSH4State *s, hwaddr addr,
+                                   uint32_t mem_value);
+void cpu_sh4_write_pascr(CPUSH4State *s, uint32_t value);
 
 #define CPU_RESOLVING_TYPE TYPE_SUPERH_CPU
 

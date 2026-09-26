@@ -47,6 +47,7 @@
 #define MMU_IADDR_ERROR          (-11)
 #define MMU_DADDR_ERROR_READ     (-12)
 #define MMU_DADDR_ERROR_WRITE    (-13)
+#define MMU_PMB_MISS             (-14)
 
 #if defined(CONFIG_USER_ONLY)
 
@@ -289,6 +290,67 @@ static bool tlb_entry_covers(const tlb_t *entry, vaddr address, int use_asid,
 static bool tlb_extended_mode(CPUSH4State *env)
 {
     return (env->features & SH_FEATURE_SH4A) && (env->mmucr & MMUCR_ME);
+}
+
+/* SH-4A 32-bit address extended mode (PASCR.SE, software manual 7.8) */
+static bool addr32_mode(CPUSH4State *env)
+{
+    return (env->features & SH_FEATURE_SH4A) && (env->pascr & PASCR_SE);
+}
+
+/* PPN from PTEL or a data array: bits 28:10, or 31:10 in 32-bit mode */
+static uint32_t ptel_ppn(CPUSH4State *env, uint32_t value)
+{
+    return (value & (addr32_mode(env) ? 0xfffffc00 : 0x1ffffc00)) >> 10;
+}
+
+static uint32_t pmb_size(const pmb_t *e)
+{
+    static const uint32_t sizes[4] = { 16 * MiB, 64 * MiB, 128 * MiB,
+                                       512 * MiB };
+    return sizes[e->sz];
+}
+
+static void pmb_flush_entry(CPUSH4State *env, const pmb_t *e)
+{
+    uint32_t size = pmb_size(e);
+
+    tlb_flush_range_by_mmuidx(env_cpu(env),
+                              ((uint32_t)e->vpn << 24) & ~(size - 1),
+                              size, SH4_MMUIDX_ALL, TARGET_LONG_BITS);
+}
+
+/*
+ * Translate a P1/P2 address through the PMB (7.8.4). Multiple hits are
+ * "not guaranteed"; the first match is used and the case is logged.
+ */
+static int pmb_translate(CPUSH4State *env, vaddr address, hwaddr *physical,
+                         uint32_t *page_size)
+{
+    const pmb_t *match = NULL;
+    int i;
+
+    for (i = 0; i < PMB_SIZE; i++) {
+        const pmb_t *e = &env->pmb[i];
+        uint32_t size = pmb_size(e);
+
+        if (e->v &&
+            ((address ^ ((uint32_t)e->vpn << 24)) & ~(vaddr)(size - 1)) == 0) {
+            if (match) {
+                qemu_log_mask(LOG_GUEST_ERROR, "sh4: multiple PMB hits for "
+                              "0x%" VADDR_PRIx " (not guaranteed)\n", address);
+                break;
+            }
+            match = e;
+        }
+    }
+    if (!match) {
+        return MMU_PMB_MISS;
+    }
+    *page_size = pmb_size(match);
+    *physical = (((hwaddr)match->ppn << 24) & ~(hwaddr)(*page_size - 1)) |
+                (address & (*page_size - 1));
+    return MMU_OK;
 }
 
 /* ESZ page size codes (7.4.1); 0 for codes the manual does not define. */
@@ -561,6 +623,16 @@ static int get_physical_address(CPUSH4State *env, hwaddr* physical,
             }
         }
         if (address >= 0x80000000 && address < 0xc0000000) {
+            if (addr32_mode(env)) {
+                /* P1 and P2 go through the PMB in 32-bit mode */
+                int ret = pmb_translate(env, address, physical, page_size);
+
+                if (ret != MMU_OK) {
+                    return ret;
+                }
+                *prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+                return MMU_OK;
+            }
             /* Mask upper 3 bits for P1 and P2 areas */
             *physical = address & 0x1fffffff;
         } else {
@@ -572,7 +644,8 @@ static int get_physical_address(CPUSH4State *env, hwaddr* physical,
 
     /* If MMU is disabled, return the corresponding physical page */
     if (!(env->mmucr & MMUCR_AT)) {
-        *physical = address & 0x1FFFFFFF;
+        /* U0/P0/P3 are the 32-bit physical address in 32-bit mode */
+        *physical = addr32_mode(env) ? address : address & 0x1FFFFFFF;
         *prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
         return MMU_OK;
     }
@@ -610,7 +683,7 @@ void cpu_load_tlb(CPUSH4State * env)
     entry->asid = (uint8_t)cpu_pteh_asid(env->pteh);
     entry->vpn  = cpu_pteh_vpn(env->pteh);
     entry->v    = (uint8_t)cpu_ptel_v(env->ptel);
-    entry->ppn  = cpu_ptel_ppn(env->ptel);
+    entry->ppn  = ptel_ppn(env, env->ptel);
     if (tlb_extended_mode(env)) {
         /* 7.5.3: PTEA supplies EPR[13:8] and ESZ[7:4]; PTEL SZ/PR unused */
         entry->sz = 0;
@@ -726,7 +799,7 @@ void cpu_sh4_write_mmaped_itlb_data(CPUSH4State *s, hwaddr addr,
             /* Overwriting valid entry in itlb. */
             flush_tlb_entry(s, entry);
         }
-        entry->ppn = (mem_value & 0x1ffffc00) >> 10;
+        entry->ppn = ptel_ppn(s, mem_value);
         entry->v   = (mem_value & 0x00000100) >> 8;
         if (!tlb_extended_mode(s)) {
             tlb_entry_set_sz(entry, (mem_value & 0x00000080) >> 6 |
@@ -895,7 +968,7 @@ void cpu_sh4_write_mmaped_utlb_data(CPUSH4State *s, hwaddr addr,
             /* Overwriting valid entry in utlb. */
             flush_tlb_entry(s, entry);
         }
-        entry->ppn = (mem_value & 0x1ffffc00) >> 10;
+        entry->ppn = ptel_ppn(s, mem_value);
         entry->v   = (mem_value & 0x00000100) >> 8;
         if (!tlb_extended_mode(s)) {
             tlb_entry_set_sz(entry, (mem_value & 0x00000080) >> 6 |
@@ -1035,6 +1108,12 @@ bool superh_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     case MMU_ITLB_MULTIPLE:
         cs->exception_index = 0x140;
         break;
+    case MMU_PMB_MISS:
+        /* 7.8.4: a P1/P2 access without a PMB entry resets the CPU */
+        qemu_log_mask(LOG_GUEST_ERROR, "sh4: PMB miss at 0x%" VADDR_PRIx
+                      ", TLB reset\n", address);
+        cs->exception_index = 0x140;
+        break;
     case MMU_ITLB_VIOLATION:
         cs->exception_index = 0x0a0;
         break;
@@ -1062,4 +1141,64 @@ bool superh_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     }
     cpu_loop_exit_restore(cs, retaddr);
 }
+/*
+ * Memory-mapped PMB (7.8.5): address array H'F610 0000 (VPN[31:24], V),
+ * data array H'F710 0000 (PPN[31:24], UB, V, SZ in bits 7 and 4, C, WT).
+ * The entry is selected by address bits 11:8.
+ */
+uint32_t cpu_sh4_read_mmaped_pmb_addr(CPUSH4State *s, hwaddr addr)
+{
+    pmb_t *e = &s->pmb[(addr >> 8) & 0xf];
+
+    return (uint32_t)e->vpn << 24 | e->v << 8;
+}
+
+void cpu_sh4_write_mmaped_pmb_addr(CPUSH4State *s, hwaddr addr,
+                                   uint32_t mem_value)
+{
+    pmb_t *e = &s->pmb[(addr >> 8) & 0xf];
+
+    if (e->v) {
+        pmb_flush_entry(s, e);
+    }
+    e->vpn = mem_value >> 24;
+    e->v = (mem_value >> 8) & 1;
+}
+
+uint32_t cpu_sh4_read_mmaped_pmb_data(CPUSH4State *s, hwaddr addr)
+{
+    pmb_t *e = &s->pmb[(addr >> 8) & 0xf];
+
+    return (uint32_t)e->ppn << 24 | e->ub << 9 | e->v << 8 | (e->sz & 2) << 6 |
+           (e->sz & 1) << 4 | e->c << 3 | e->wt;
+}
+
+void cpu_sh4_write_mmaped_pmb_data(CPUSH4State *s, hwaddr addr,
+                                   uint32_t mem_value)
+{
+    pmb_t *e = &s->pmb[(addr >> 8) & 0xf];
+
+    if (e->v) {
+        pmb_flush_entry(s, e);
+    }
+    e->ppn = mem_value >> 24;
+    e->ub = (mem_value >> 9) & 1;
+    e->v = (mem_value >> 8) & 1;
+    e->sz = ((mem_value >> 6) & 2) | ((mem_value >> 4) & 1);
+    e->c = (mem_value >> 3) & 1;
+    e->wt = mem_value & 1;
+}
+
+/* PASCR (7.8.6): SE bit 31, UB bits 7:0. Changing SE remaps everything. */
+void cpu_sh4_write_pascr(CPUSH4State *s, uint32_t value)
+{
+    value &= PASCR_SE | 0xff;
+    if ((s->pascr ^ value) & PASCR_SE) {
+        tlb_flush(env_cpu(s));
+    }
+    s->pascr = value;
+}
+
 #endif /* !CONFIG_USER_ONLY */
+
+
