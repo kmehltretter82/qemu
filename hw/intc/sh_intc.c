@@ -229,9 +229,11 @@ static void sh_intc_write(void *opaque, hwaddr offset,
     case INTC_MODE_ENABLE_REG | INTC_MODE_IS_PRIO:
         break;
     case INTC_MODE_DUAL_SET:
+        /* e.g. INTMSK00: writing 1 masks the source */
         value |= *valuep;
         break;
     case INTC_MODE_DUAL_CLR:
+        /* e.g. INTMSKCLR00: writing 1 unmasks the source */
         value = *valuep & ~value;
         break;
     default:
@@ -239,11 +241,25 @@ static void sh_intc_write(void *opaque, hwaddr offset,
     }
 
     for (k = 0; k <= first; k++) {
+        bool was_on, on;
+
         mask = (1 << width) - 1;
         mask <<= (first - k) * width;
 
-        if ((*valuep & mask) != (value & mask)) {
-            sh_intc_toggle_mask(desc, enum_ids[k], value & mask, 0);
+        /*
+         * A priority field enables its source while it is non-zero; a
+         * dual mask register holds mask bits, so a set bit disables.
+         * Only a change between enabled and disabled toggles the source.
+         */
+        if (mode == INTC_MODE_DUAL_SET || mode == INTC_MODE_DUAL_CLR) {
+            was_on = !(*valuep & mask);
+            on = !(value & mask);
+        } else {
+            was_on = *valuep & mask;
+            on = value & mask;
+        }
+        if (was_on != on) {
+            sh_intc_toggle_mask(desc, enum_ids[k], on, 0);
         }
     }
 
@@ -412,6 +428,16 @@ int sh_intc_init(MemoryRegion *sysmem,
 
             j += sh_intc_register(sysmem, desc, mr->set_reg, "mask", "set", j);
             j += sh_intc_register(sysmem, desc, mr->clr_reg, "mask", "clr", j);
+            if (mr->set_reg && mr->clr_reg) {
+                unsigned int k;
+
+                /* Sources start disabled, i.e. masked (INTMSK00 reset) */
+                for (k = 0; k < mr->reg_width; k++) {
+                    if (mr->enum_ids[k]) {
+                        mr->value |= 1ul << (mr->reg_width - 1 - k);
+                    }
+                }
+            }
         }
     }
 
