@@ -94,6 +94,18 @@ static void sh_serial_write(void *opaque, hwaddr offs,
     unsigned char ch;
 
     trace_sh_serial_write(d->id, size, offs, val);
+    if (s->feat & SH_SERIAL_FEAT_FIFODATA) {
+        switch (offs) {
+        case 0x1c: /* SCTFDR, read only */
+        case 0x20: /* SCRFDR, read only */
+        case 0x2c: /* SCRER, read only */
+            return;
+        case 0x24: /* SCSPTR */
+        case 0x28: /* SCLSR */
+            offs -= 4;
+            break;
+        }
+    }
     switch (offs) {
     case 0x00: /* SMR */
         s->smr = val & ((s->feat & SH_SERIAL_FEAT_SCIF) ? 0x7b : 0xff);
@@ -211,6 +223,20 @@ static uint64_t sh_serial_read(void *opaque, hwaddr offs,
     SHSerialState *s = opaque;
     DeviceState *d = DEVICE(s);
     uint32_t ret = UINT32_MAX;
+
+    if (s->feat & SH_SERIAL_FEAT_FIFODATA) {
+        switch (offs) {
+        case 0x1c: /* SCTFDR: transmission completes at once */
+        case 0x2c: /* SCRER: no parity or framing errors */
+            trace_sh_serial_read(d->id, size, offs, 0);
+            return 0;
+        case 0x20: /* SCRFDR */
+        case 0x24: /* SCSPTR */
+        case 0x28: /* SCLSR */
+            offs -= 4;
+            break;
+        }
+    }
 
 #if 0
     switch (offs) {
@@ -411,7 +437,8 @@ static void sh_serial_realize(DeviceState *d, Error **errp)
     MemoryRegion *iomem = g_malloc(sizeof(*iomem));
 
     assert(d->id);
-    memory_region_init_io(iomem, OBJECT(d), &sh_serial_ops, s, d->id, 0x28);
+    memory_region_init_io(iomem, OBJECT(d), &sh_serial_ops, s, d->id,
+                          s->feat & SH_SERIAL_FEAT_FIFODATA ? 0x30 : 0x28);
     sysbus_init_mmio(SYS_BUS_DEVICE(d), iomem);
     qdev_init_gpio_out_named(d, &s->eri, "eri", 1);
     qdev_init_gpio_out_named(d, &s->rxi, "rxi", 1);

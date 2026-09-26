@@ -40,6 +40,8 @@ struct SH7750State *sh7750_init(SuperHCPU *cpu, MemoryRegion *sysmem);
 
 #define TYPE_SH_SERIAL "sh-serial"
 #define SH_SERIAL_FEAT_SCIF (1 << 0)
+/* SH-4A SCIF: separate SCTFDR/SCRFDR at 0x1c/0x20, SCSPTR/SCLSR at 0x24/0x28 */
+#define SH_SERIAL_FEAT_FIFODATA (1 << 1)
 
 /* sh7750.c */
 qemu_irq sh7750_irl(struct SH7750State *s);
