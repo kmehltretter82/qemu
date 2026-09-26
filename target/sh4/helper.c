@@ -647,14 +647,13 @@ void cpu_sh4_write_mmaped_utlb_addr(CPUSH4State *s, hwaddr addr,
         int i;
         tlb_t * utlb_match_entry = NULL;
 
-        /* search UTLB */
+        /* search UTLB, with the usual address comparison rules */
         for (i = 0; i < UTLB_SIZE; i++) {
             tlb_t * entry = &s->utlb[i];
             if (!entry->v)
                 continue;
 
-            if (entry->vpn == vpn
-                && (!use_asid || entry->asid == asid || entry->sh)) {
+            if (tlb_entry_covers(entry, vpn << 10, use_asid, asid)) {
                 if (utlb_match_entry) {
                     CPUState *cs = env_cpu(s);
 
@@ -674,11 +673,8 @@ void cpu_sh4_write_mmaped_utlb_addr(CPUSH4State *s, hwaddr addr,
         /* search ITLB */
         for (i = 0; i < ITLB_SIZE; i++) {
             tlb_t * entry = &s->itlb[i];
-            if (entry->vpn == vpn
-                && (!use_asid || entry->asid == asid || entry->sh)) {
-                if (entry->v) {
-                    flush_tlb_entry(s, entry);
-                }
+            if (tlb_entry_covers(entry, vpn << 10, use_asid, asid)) {
+                flush_tlb_entry(s, entry);
                 if (utlb_match_entry)
                     *entry = *utlb_match_entry;
                 else
