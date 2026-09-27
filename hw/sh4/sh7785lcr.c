@@ -351,7 +351,7 @@ static void sh7785lcr_class_init(ObjectClass *oc, const void *data)
     mc->default_cpu_type = TYPE_SH7785_CPU;
     mc->default_ram_size = DDR_SIZE;
     mc->default_ram_id = "sh7785lcr.sdram";
-    mc->default_nic = "e1000";
+    mc->default_nic = "rtl8139";   /* e1000 needs a kernel fix (port I/O) */
     object_class_property_add_bool(oc, "boot32", sh7785lcr_get_boot32,
                                    sh7785lcr_set_boot32);
     object_class_property_set_description(oc, "boot32",
