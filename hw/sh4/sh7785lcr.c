@@ -25,8 +25,12 @@
  * mode MMSELR.AREASEL = 010, in 32-bit mode PMB entries mapping P1
  * (cached) and P2 (uncached) to the 512 MiB of DDR2 at 0x40000000. A
  * zImage is loaded at MEMORY_START + 8 MiB and entered through P2, an ELF
- * vmlinux where it is linked. Boot parameters go to the zero page at
- * MEMORY_START + 0x1000 (MEMORY_START is 0x08000000 or 0x40000000).
+ * vmlinux where it is linked. Boot parameters go to the zero page: for an
+ * ELF vmlinux where its boot_params_page symbol says, for a zImage at
+ * MEMORY_START + zero-page-offset (MEMORY_START is 0x08000000 or
+ * 0x40000000). The offset is the kernel's CONFIG_ZERO_PAGE_OFFSET, which
+ * follows the page size: 0x1000 (the default), 0x2000 for 8 KiB pages,
+ * 0x10000 for 64 KiB pages.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -35,6 +39,7 @@
 #include "qemu/units.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
+#include "qapi/visitor.h"
 #include "cpu.h"
 #include "hw/core/boards.h"
 #include "hw/core/loader.h"
@@ -57,7 +62,6 @@
 
 #define LINUX_LOAD_OFFSET   0x00800000
 #define INITRD_LOAD_OFFSET  0x01800000
-#define ZERO_PAGE_OFFSET    0x00001000
 
 #define FLASH_BASE          0x00000000
 #define FLASH_SIZE          (64 * MiB)
@@ -76,6 +80,7 @@ struct SH7785LCRMachineState {
     MachineState parent_obj;
 
     bool boot32;            /* mode pins: 32-bit boot */
+    uint32_t zero_page;     /* zImage: CONFIG_ZERO_PAGE_OFFSET */
     SuperHCPU *cpu;
     SH7785State *soc;
     uint32_t vector;
@@ -162,12 +167,24 @@ static struct QEMU_PACKED {
     char kernel_cmdline[256] QEMU_NONSTRING;
 } boot_params;
 
+/* head_32.S: the boot parameters the kernel reads, at _text */
+static uint64_t boot_params_sym;
+
+static void sh7785lcr_elf_sym(const char *name, int info, uint64_t value,
+                              uint64_t size)
+{
+    if (!strcmp(name, "boot_params_page")) {
+        boot_params_sym = value;
+    }
+}
+
 static void sh7785lcr_load_kernel(SH7785LCRMachineState *s,
                                   MachineState *machine)
 {
     hwaddr mem_start = s->boot32 ? DDR_BASE : AREA2_BASE;
     bool elf_kernel;
     uint64_t entry;
+    hwaddr zero_page;
     void *params;
 
     s->kernel = true;
@@ -176,9 +193,11 @@ static void sh7785lcr_load_kernel(SH7785LCRMachineState *s,
      * decompressor's size limit. Anything else is a zImage, run from
      * BOOT_LINK_OFFSET.
      */
-    elf_kernel = load_elf(machine->kernel_filename, NULL,
-                          sh7785lcr_elf_to_phys, s, &entry, NULL, NULL, NULL,
-                          ELFDATA2LSB, EM_SH, 0, 0) > 0;
+    boot_params_sym = 0;
+    elf_kernel = load_elf_ram_sym(machine->kernel_filename, NULL,
+                                  sh7785lcr_elf_to_phys, s, &entry, NULL,
+                                  NULL, NULL, ELFDATA2LSB, EM_SH, 0, 0,
+                                  NULL, true, sh7785lcr_elf_sym) > 0;
     if (elf_kernel) {
         s->vector = entry;
     } else if (load_image_targphys(machine->kernel_filename,
@@ -219,13 +238,15 @@ static void sh7785lcr_load_kernel(SH7785LCRMachineState *s,
      * parameters into the loaded image instead of adding an overlapping
      * ROM blob.
      */
-    params = elf_kernel ? rom_ptr(mem_start + ZERO_PAGE_OFFSET,
-                                  sizeof(boot_params)) : NULL;
+    zero_page = elf_kernel && boot_params_sym ?
+                sh7785lcr_elf_to_phys(s, boot_params_sym) :
+                mem_start + s->zero_page;
+    params = elf_kernel ? rom_ptr(zero_page, sizeof(boot_params)) : NULL;
     if (params) {
         memcpy(params, &boot_params, sizeof(boot_params));
     } else {
         rom_add_blob_fixed("boot_params", &boot_params, sizeof(boot_params),
-                           mem_start + ZERO_PAGE_OFFSET);
+                           zero_page);
     }
 }
 
@@ -278,6 +299,20 @@ static void sh7785lcr_init(MachineState *machine)
     }
 }
 
+static void sh7785lcr_get_zero_page(Object *obj, Visitor *v,
+                                    const char *name, void *opaque,
+                                    Error **errp)
+{
+    visit_type_uint32(v, name, &SH7785LCR_MACHINE(obj)->zero_page, errp);
+}
+
+static void sh7785lcr_set_zero_page(Object *obj, Visitor *v,
+                                    const char *name, void *opaque,
+                                    Error **errp)
+{
+    visit_type_uint32(v, name, &SH7785LCR_MACHINE(obj)->zero_page, errp);
+}
+
 static bool sh7785lcr_get_boot32(Object *obj, Error **errp)
 {
     return SH7785LCR_MACHINE(obj)->boot32;
@@ -301,12 +336,24 @@ static void sh7785lcr_class_init(ObjectClass *oc, const void *data)
                                    sh7785lcr_set_boot32);
     object_class_property_set_description(oc, "boot32",
         "Mode pins select 32-bit boot (PMB, 32-bit physical addresses)");
+    object_class_property_add(oc, "zero-page-offset", "uint32",
+                              sh7785lcr_get_zero_page,
+                              sh7785lcr_set_zero_page, NULL, NULL);
+    object_class_property_set_description(oc, "zero-page-offset",
+        "Boot parameter page of a zImage kernel: its CONFIG_ZERO_PAGE_OFFSET"
+        " (an ELF vmlinux is looked up by symbol)");
+}
+
+static void sh7785lcr_instance_init(Object *obj)
+{
+    SH7785LCR_MACHINE(obj)->zero_page = 0x1000;
 }
 
 static const TypeInfo sh7785lcr_info = {
     .name = TYPE_SH7785LCR_MACHINE,
     .parent = TYPE_MACHINE,
     .instance_size = sizeof(SH7785LCRMachineState),
+    .instance_init = sh7785lcr_instance_init,
     .class_init = sh7785lcr_class_init,
 };
 

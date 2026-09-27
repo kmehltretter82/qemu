@@ -211,6 +211,20 @@ static uint64_t r2d_elf_to_phys(void *opaque, uint64_t addr)
     return addr & 0x1fffffff;
 }
 
+/*
+ * head_32.S: the boot parameters the kernel reads, at _text. Its offset is
+ * CONFIG_ZERO_PAGE_OFFSET, 0x10000 for this board, but a vmlinux says.
+ */
+static uint64_t boot_params_sym;
+
+static void r2d_elf_sym(const char *name, int info, uint64_t value,
+                        uint64_t size)
+{
+    if (!strcmp(name, "boot_params_page")) {
+        boot_params_sym = value;
+    }
+}
+
 typedef struct ResetData {
     SuperHCPU *cpu;
     uint32_t vector;
@@ -342,9 +356,10 @@ static void r2d_init(MachineState *machine)
          * to 29-bit physical), which avoids the zImage decompressor's size
          * limit. Anything else is a zImage, run from BOOT_LINK_OFFSET.
          */
-        elf_kernel = load_elf(kernel_filename, NULL, r2d_elf_to_phys, NULL,
-                              &entry, NULL, NULL, NULL, ELFDATA2LSB, EM_SH,
-                              0, 0) > 0;
+        elf_kernel = load_elf_ram_sym(kernel_filename, NULL,
+                                      r2d_elf_to_phys, NULL, &entry, NULL,
+                                      NULL, NULL, ELFDATA2LSB, EM_SH, 0, 0,
+                                      NULL, true, r2d_elf_sym) > 0;
         kernel_size = elf_kernel ? 0 :
             load_image_targphys(kernel_filename,
                                 SDRAM_BASE + LINUX_LOAD_OFFSET,
@@ -397,7 +412,9 @@ static void r2d_init(MachineState *machine)
      * The zero page is part of an ELF kernel image: write the boot
      * parameters into the loaded image instead of an overlapping blob.
      */
-    params = elf_kernel ? rom_ptr(SDRAM_BASE + BOOT_PARAMS_OFFSET,
+    params = elf_kernel ? rom_ptr(boot_params_sym ?
+                                  r2d_elf_to_phys(NULL, boot_params_sym) :
+                                  SDRAM_BASE + BOOT_PARAMS_OFFSET,
                                   sizeof(boot_params)) : NULL;
     if (params) {
         memcpy(params, &boot_params, sizeof(boot_params));
