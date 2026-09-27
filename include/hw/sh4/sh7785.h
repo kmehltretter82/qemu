@@ -32,6 +32,10 @@ void sh7785_set_mmselr_hook(SH7785State *s,
                             void *opaque);
 void sh7785_preset_mmselr(SH7785State *s, int areasel);
 
+/* The PCI controller; its bus is "pci" */
+typedef struct SH7785PCICState SH7785PCICState;
+SH7785PCICState *sh7785_pcic(SH7785State *s);
+
 /* External interrupt pins IRQ0..7 (level, active while 1). */
 qemu_irq sh7785_irq_pin(SH7785State *s, int n);
 

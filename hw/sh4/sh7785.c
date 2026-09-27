@@ -27,6 +27,7 @@
 #include "hw/sh4/sh.h"
 #include "hw/sh4/sh7785.h"
 #include "hw/intc/sh7785_intc.h"
+#include "hw/pci-host/sh7785_pcic.h"
 #include "hw/timer/tmu012.h"
 #include "system/system.h"
 #include "system/address-spaces.h"
@@ -51,6 +52,7 @@ struct SH7785State {
     MemoryRegion regfile, regfile_a7;
     MemoryRegion il_ram, ol_ram, u_ram;
     SH7785IntcState *intc;
+    SH7785PCICState *pcic;
     uint32_t ccr, qacr[2], ramcr, irmcr;
     MemoryRegion mmselr_mr;
     uint32_t mmselr;
@@ -483,6 +485,36 @@ static void sh7785_map_sysbus(MemoryRegion *sysmem, SysBusDevice *sb, int n,
     memory_region_add_subregion(sysmem, A7ADDR(p4), alias);
 }
 
+/*
+ * PCIC (section 13): registers at H'FE04 0000, PCI memory space 0 at
+ * H'FD00 0000, I/O at H'FE20 0000, memory space 2 at physical H'C000 0000.
+ * Memory space 1 (area 4) is mapped by the board as MMSELR selects.
+ */
+static void sh7785_pcic_init(SH7785State *s, MemoryRegion *sysmem)
+{
+    DeviceState *dev = qdev_new(TYPE_SH7785_PCIC);
+    SysBusDevice *sb = SYS_BUS_DEVICE(dev);
+    DeviceState *intc = DEVICE(s->intc);
+
+    sysbus_realize_and_unref(sb, &error_fatal);
+    s->pcic = SH7785_PCIC(dev);
+    sh7785_alias(sysmem, g_new(MemoryRegion, 1), "sh7785-pcic-a7",
+                 sysbus_mmio_get_region(sb, SH7785_PCIC_MMIO_REGS),
+                 0xfe040000, 1);
+    sh7785_alias(sysmem, g_new(MemoryRegion, 1), "sh7785-pcic.mem0-a7",
+                 sysbus_mmio_get_region(sb, SH7785_PCIC_MMIO_MEM0),
+                 0xfd000000, 1);
+    sh7785_alias(sysmem, g_new(MemoryRegion, 1), "sh7785-pcic.io-a7",
+                 sysbus_mmio_get_region(sb, SH7785_PCIC_MMIO_IO),
+                 0xfe200000, 1);
+    memory_region_add_subregion(sysmem, 0xc0000000,
+                        sysbus_mmio_get_region(sb, SH7785_PCIC_MMIO_MEM2));
+    for (int i = 0; i < 4; i++) {
+        sysbus_connect_irq(sb, i, qdev_get_gpio_in_named(intc, "onchip",
+                                                 SH7785_IRQ_PCIINTA + i));
+    }
+}
+
 /* SCIF0-5 at H'FFEA 0000 + n * H'1 0000 (section 21) */
 static void sh7785_scif_init(SH7785State *s, MemoryRegion *sysmem, int n)
 {
@@ -595,7 +627,13 @@ SH7785State *sh7785_init(SuperHCPU *cpu, MemoryRegion *sysmem,
     for (i = 0; i < 6; i++) {
         sh7785_scif_init(s, sysmem, i);
     }
+    sh7785_pcic_init(s, sysmem);
     return s;
+}
+
+SH7785PCICState *sh7785_pcic(SH7785State *s)
+{
+    return s->pcic;
 }
 
 qemu_irq sh7785_irq_pin(SH7785State *s, int n)

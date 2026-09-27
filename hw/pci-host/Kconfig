@@ -83,6 +83,10 @@ config PCI_POWERNV
 config REMOTE_PCIHOST
     bool
 
+config SH7785_PCIC
+    bool
+    select PCI
+
 config SH_PCI
     bool
     select PCI

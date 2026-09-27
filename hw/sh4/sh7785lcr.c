@@ -49,6 +49,9 @@
 #include "system/blockdev.h"
 #include "hw/sh4/sh.h"
 #include "hw/sh4/sh7785.h"
+#include "hw/pci-host/sh7785_pcic.h"
+#include "hw/pci/pci.h"
+#include "hw/core/sysbus.h"
 #include "system/address-spaces.h"
 #include "system/reset.h"
 #include "system/runstate.h"
@@ -86,6 +89,7 @@ struct SH7785LCRMachineState {
     uint32_t vector;
     bool kernel;            /* -kernel: leave the firmware's state */
     MemoryRegion area2, area3;
+    MemoryRegion *pci_mem1;
 };
 
 static void sh7785lcr_areasel(void *opaque, int areasel)
@@ -93,6 +97,9 @@ static void sh7785lcr_areasel(void *opaque, int areasel)
     SH7785LCRMachineState *s = opaque;
 
     memory_region_set_enabled(&s->area2, areasel >= 2 && areasel <= 4);
+    /* Figure 1.4: area 4 is PCI memory space 1 for AREASEL 001, 011, 111 */
+    memory_region_set_enabled(s->pci_mem1,
+                              areasel == 1 || areasel == 3 || areasel == 7);
 }
 
 static void main_cpu_reset(void *opaque)
@@ -214,6 +221,11 @@ static void sh7785lcr_load_kernel(SH7785LCRMachineState *s,
         /* what 29-bit boot firmware leaves behind */
         sh7785_preset_mmselr(s->soc, 2);
     }
+    /*
+     * U-Boot sets PCIMBAR0 so PCI bus addresses equal local ones, and
+     * Linux (pci-sh7780.c) rewrites PCILAR0/PCILSR0 but relies on it.
+     */
+    sh7785_pcic_preset_target(sh7785_pcic(s->soc), mem_start);
 
     memset(&boot_params, 0, sizeof(boot_params));
     if (machine->initrd_filename) {
@@ -252,6 +264,7 @@ static void sh7785lcr_load_kernel(SH7785LCRMachineState *s,
 
 static void sh7785lcr_init(MachineState *machine)
 {
+    MachineClass *mc = MACHINE_GET_CLASS(machine);
     SH7785LCRMachineState *s = SH7785LCR_MACHINE(machine);
     MemoryRegion *sysmem = get_system_memory();
     MemoryRegion *pld = g_new(MemoryRegion, 1);
@@ -277,7 +290,13 @@ static void sh7785lcr_init(MachineState *machine)
 
     s->soc = sh7785_init(s->cpu, sysmem, PCLK_HZ);
     sh7785_set_reg(s->soc, FRQMR1, FRQMR1_MODE16);
+    s->pci_mem1 = sysbus_mmio_get_region(SYS_BUS_DEVICE(sh7785_pcic(s->soc)),
+                                         SH7785_PCIC_MMIO_MEM1);
+    memory_region_add_subregion_overlap(sysmem, 0x10000000, s->pci_mem1, 1);
+    memory_region_set_enabled(s->pci_mem1, false);
     sh7785_set_mmselr_hook(s->soc, sh7785lcr_areasel, s);
+    pci_init_nic_devices(PCI_HOST_BRIDGE(sh7785_pcic(s->soc))->bus,
+                         mc->default_nic);
 
     /*
      * NOR flash: Linux registers it as physmap-flash with bankwidth 4.
@@ -332,6 +351,7 @@ static void sh7785lcr_class_init(ObjectClass *oc, const void *data)
     mc->default_cpu_type = TYPE_SH7785_CPU;
     mc->default_ram_size = DDR_SIZE;
     mc->default_ram_id = "sh7785lcr.sdram";
+    mc->default_nic = "e1000";
     object_class_property_add_bool(oc, "boot32", sh7785lcr_get_boot32,
                                    sh7785lcr_set_boot32);
     object_class_property_set_description(oc, "boot32",
