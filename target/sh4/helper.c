@@ -710,6 +710,61 @@ hwaddr superh_cpu_get_phys_addr_debug(CPUState *cs, vaddr addr)
     return -1;
 }
 
+/*
+ * exact-tlb (-d exact): LDTLB operands that are legal but almost certainly
+ * not what the software meant. In TLB extended mode PTEL.SZ1/SZ0/PR1/PR0
+ * are ignored (7.2.2 note), so a page size written there instead of in
+ * PTEA.ESZ silently gives a different page. Each pattern is reported once.
+ */
+static void exact_ldtlb_check(CPUSH4State *env, const tlb_t *e)
+{
+    static GHashTable *seen;
+    static const uint32_t compat[4] = { 1 * KiB, 4 * KiB, 64 * KiB, 1 * MiB };
+    uint32_t sz = cpu_ptel_sz(env->ptel);
+    uint32_t vaddr = e->vpn << 10, paddr = e->ppn << 10;
+    const char *what = NULL;
+    uint64_t key;
+
+    if (!e->v) {
+        return;
+    }
+    if (tlb_extended_mode(env) && (env->ptel & 0xf0) &&
+        compat[sz] != e->size) {
+        what = "PTEL.SZ/PR set in TLB extended mode, where they are ignored;"
+               " the page size comes from PTEA.ESZ";
+    } else if (tlb_extended_mode(env) && !esz_to_size((env->ptea >> 4) & 0xf)) {
+        what = "undefined PTEA.ESZ code";
+    } else if ((vaddr | paddr) & (e->size - 1) & ~0xfffu) {
+        /*
+         * Bits below the page size are ignored ("with a 4-Kbyte page, PPN
+         * bits [28:12] are valid"), so a larger page maps an aligned
+         * block other than the one meant. Linux keeps software flags in
+         * PPN bits 10 and 11, hence the 4 KiB floor.
+         */
+        what = "VPN or PPN not aligned to the page size";
+    } else if (e->size == 1 * KiB) {
+        what = "1 KiB page";
+    }
+    if (!what) {
+        return;
+    }
+    if (!seen) {
+        seen = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free,
+                                     NULL);
+    }
+    key = ((uint64_t)(uintptr_t)what << 16) ^ ((env->ptel & 0x1ff) << 8) ^
+          ((env->ptea >> 4) & 0xff) ^ ((uint64_t)e->size << 32);
+    if (g_hash_table_contains(seen, &key)) {
+        return;
+    }
+    g_hash_table_add(seen, g_memdup2(&key, sizeof(key)));
+    qemu_log_mask(LOG_EXACT, "exact-tlb: %s\n"
+                  "  ldtlb at pc 0x%08x (pr 0x%08x): PTEH 0x%08x PTEL 0x%08x"
+                  " PTEA 0x%08x -> %u KiB page va 0x%08x pa 0x%08x\n",
+                  what, env->pc, env->pr, env->pteh, env->ptel, env->ptea,
+                  (unsigned)(e->size / KiB), vaddr, paddr);
+}
+
 void cpu_load_tlb(CPUSH4State * env)
 {
     int n = cpu_mmucr_urc(env->mmucr);
@@ -742,6 +797,9 @@ void cpu_load_tlb(CPUSH4State * env)
     if (!(env->features & SH_FEATURE_SH4A)) {
         entry->sa   = (uint8_t)cpu_ptea_sa(env->ptea);
         entry->tc   = (uint8_t)cpu_ptea_tc(env->ptea);
+    }
+    if (qemu_loglevel_mask(LOG_EXACT)) {
+        exact_ldtlb_check(env, entry);
     }
 }
 
