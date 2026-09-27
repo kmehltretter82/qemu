@@ -32,6 +32,7 @@
 #define SH_CPU_SH7751  (1 << 3)
 #define SH_CPU_SH7751R (1 << 4)
 #define SH_CPU_SH7785  (1 << 5)
+#define SH_CPU_SH7786  (1 << 6)
 #define SH_CPU_SH7750_ALL (SH_CPU_SH7750 | SH_CPU_SH7750S | SH_CPU_SH7750R)
 #define SH_CPU_SH7751_ALL (SH_CPU_SH7751 | SH_CPU_SH7751R)
 
@@ -109,7 +110,7 @@ typedef struct tlb_t {
     uint32_t vpn;        /* virtual page number */
     uint32_t ppn;        /* physical page number */
     uint32_t size;       /* mapped page size in bytes */
-    uint8_t asid;        /* address space identifier */
+    uint16_t asid;       /* address space identifier (16 bits with AEX) */
     uint8_t v:1;         /* validity */
     uint8_t sz:2;        /* page size */
     uint8_t sh:1;        /* share status */
@@ -147,6 +148,7 @@ typedef struct pmb_t {
 enum sh_features {
     SH_FEATURE_SH4A = 1,
     SH_FEATURE_BCR3_AND_BCR4 = 2,
+    SH_FEATURE_PTEAEX = 4,      /* SH-X3: 16-bit ASIDs (MMUCR.AEX, PTEAEX) */
 };
 
 typedef struct memory_content {
@@ -196,6 +198,7 @@ typedef struct CPUArchState {
     uint32_t pteh;              /* page table entry high register */
     uint32_t ptel;              /* page table entry low register */
     uint32_t ptea;              /* page table entry assistance register */
+    uint32_t pteaex;            /* SH-X3: 16-bit ASID (MMUCR.AEX) */
     uint32_t ttb;               /* translation table base register */
     uint32_t tea;               /* TLB exception address register */
     uint32_t tra;               /* TRAPA exception register */
@@ -295,6 +298,10 @@ uint32_t cpu_sh4_read_mmaped_utlb_addr(CPUSH4State *s,
                                        hwaddr addr);
 void cpu_sh4_write_mmaped_utlb_addr(CPUSH4State *s, hwaddr addr,
                                     uint32_t mem_value);
+uint32_t cpu_sh4_read_mmaped_tlb_addr2(CPUSH4State *s, hwaddr addr,
+                                       bool utlb);
+void cpu_sh4_write_mmaped_tlb_addr2(CPUSH4State *s, hwaddr addr,
+                                    uint32_t mem_value, bool utlb);
 uint32_t cpu_sh4_read_mmaped_utlb_data(CPUSH4State *s,
                                        hwaddr addr);
 void cpu_sh4_write_mmaped_utlb_data(CPUSH4State *s, hwaddr addr,
@@ -340,6 +347,7 @@ void cpu_sh4_write_pascr(CPUSH4State *s, uint32_t value);
 #define MMUCR_TI (1<<2)
 #define MMUCR_SV (1<<8)
 #define MMUCR_ME (1<<7)   /* SH-4A: TLB extended mode */
+#define MMUCR_AEX (1<<6)  /* SH-X3: 16-bit ASID extended mode */
 #define MMUCR_URC_BITS (6)
 #define MMUCR_URC_OFFSET (10)
 #define MMUCR_URC_SIZE (1 << MMUCR_URC_BITS)

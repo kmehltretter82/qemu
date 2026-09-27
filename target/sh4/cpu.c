@@ -259,6 +259,29 @@ static void sh7785_class_init(ObjectClass *oc, const void *data)
     scc->cvr = 0x71440211;
 }
 
+static void sh7786_cpu_initfn(Object *obj)
+{
+    CPUSH4State *env = cpu_env(CPU(obj));
+
+    env->id = SH_CPU_SH7786;
+    env->features = SH_FEATURE_SH4A | SH_FEATURE_PTEAEX;
+}
+
+/*
+ * SH-X3 core of the SH7786: PVR.VER = H'40 (hardware manual appendix A).
+ * TODO(manual): the full PVR, PRR and CVR values are not given there;
+ * PVR[15:8] = 5 is what Linux (sh4/probe.c) takes for the SH7786, and
+ * the caches match the SH7785's (32 KiB, 4-way, instruction and operand).
+ */
+static void sh7786_class_init(ObjectClass *oc, const void *data)
+{
+    SuperHCPUClass *scc = SUPERH_CPU_CLASS(oc);
+
+    scc->pvr = 0x10400500;
+    scc->prr = 0x00000200;
+    scc->cvr = 0x71440211;
+}
+
 static void superh_cpu_realizefn(DeviceState *dev, Error **errp)
 {
     CPUState *cs = CPU(dev);
@@ -391,6 +414,8 @@ static const TypeInfo superh_cpu_type_infos[] = {
                            sh7750r_cpu_initfn),
     DEFINE_SUPERH_CPU_TYPE(TYPE_SH7751R_CPU, sh7751r_class_init,
                            sh7751r_cpu_initfn),
+    DEFINE_SUPERH_CPU_TYPE(TYPE_SH7786_CPU, sh7786_class_init,
+                           sh7786_cpu_initfn),
     DEFINE_SUPERH_CPU_TYPE(TYPE_SH7785_CPU, sh7785_class_init,
                            sh7785_cpu_initfn),
 

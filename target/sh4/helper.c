@@ -267,8 +267,22 @@ static void flush_tlb_entry(CPUSH4State *env, const tlb_t *entry)
 }
 
 /* Does a valid entry cover the given virtual address (usual compare rules)? */
+/* The ASID translations are tagged with: PTEAEX in 16-bit mode (A.2.3) */
+static uint16_t cur_asid(CPUSH4State *env)
+{
+    if ((env->features & SH_FEATURE_PTEAEX) && (env->mmucr & MMUCR_AEX)) {
+        return env->pteaex & 0xffff;
+    }
+    return env->pteh & 0xff;
+}
+
+static bool aex_mode(CPUSH4State *env)
+{
+    return (env->features & SH_FEATURE_PTEAEX) && (env->mmucr & MMUCR_AEX);
+}
+
 static bool tlb_entry_covers(const tlb_t *entry, vaddr address, int use_asid,
-                             uint8_t asid)
+                             uint16_t asid)
 {
     vaddr start;
 
@@ -444,10 +458,10 @@ static int find_tlb_entry(CPUSH4State *env, vaddr address,
                           tlb_t * entries, uint8_t nbtlb, int use_asid)
 {
     int match = MMU_DTLB_MISS;
-    uint8_t asid;
+    uint16_t asid;
     int i;
 
-    asid = env->pteh & 0xff;
+    asid = cur_asid(env);
 
     for (i = 0; i < nbtlb; i++) {
         if (tlb_entry_covers(&entries[i], address, use_asid, asid)) {
@@ -776,7 +790,7 @@ void cpu_load_tlb(CPUSH4State * env)
     }
 
     /* Take values into cpu status from registers. */
-    entry->asid = (uint8_t)cpu_pteh_asid(env->pteh);
+    entry->asid = cur_asid(env);
     entry->vpn  = cpu_pteh_vpn(env->pteh);
     entry->v    = (uint8_t)cpu_ptel_v(env->ptel);
     entry->ppn  = ptel_ppn(env, env->ptel);
@@ -827,9 +841,10 @@ uint32_t cpu_sh4_read_mmaped_itlb_addr(CPUSH4State *s,
     int index = (addr & 0x00000300) >> 8;
     tlb_t * entry = &s->itlb[index];
 
+    /* In 16-bit ASID mode the ASID is in address array 2 (A.2.4) */
     return (entry->vpn  << 10) |
            (entry->v    <<  8) |
-           (entry->asid);
+           (aex_mode(s) ? 0 : entry->asid);
 }
 
 void cpu_sh4_write_mmaped_itlb_addr(CPUSH4State *s, hwaddr addr,
@@ -845,7 +860,9 @@ void cpu_sh4_write_mmaped_itlb_addr(CPUSH4State *s, hwaddr addr,
         /* Overwriting valid entry in itlb. */
         flush_tlb_entry(s, entry);
     }
-    entry->asid = asid;
+    if (!aex_mode(s)) {
+        entry->asid = asid;
+    }
     entry->vpn = vpn;
     entry->v = v;
 }
@@ -937,7 +954,7 @@ uint32_t cpu_sh4_read_mmaped_utlb_addr(CPUSH4State *s,
     return (entry->vpn  << 10) |
            (entry->d    <<  9) |
            (entry->v    <<  8) |
-           (entry->asid);
+           (aex_mode(s) ? 0 : entry->asid);
 }
 
 void cpu_sh4_write_mmaped_utlb_addr(CPUSH4State *s, hwaddr addr,
@@ -951,8 +968,11 @@ void cpu_sh4_write_mmaped_utlb_addr(CPUSH4State *s, hwaddr addr,
     int use_asid = !(s->mmucr & MMUCR_SV) || !(s->sr & (1u << SR_MD));
 
     if (associate) {
-        /* The compare uses PTEH.ASID, not the ASID in the data field. */
-        uint8_t pteh_asid = s->pteh & PTEH_ASID_MASK;
+        /*
+         * The compare uses PTEH.ASID, not the ASID in the data field; in
+         * 16-bit ASID mode, where the data field has no ASID, PTEAEX.
+         */
+        uint16_t pteh_asid = cur_asid(s);
         int i;
         tlb_t * utlb_match_entry = NULL;
 
@@ -1005,12 +1025,60 @@ void cpu_sh4_write_mmaped_utlb_addr(CPUSH4State *s, hwaddr addr,
             /* Overwriting valid entry in utlb. */
             flush_tlb_entry(s, entry);
         }
-        entry->asid = asid;
+        if (!aex_mode(s)) {
+            entry->asid = asid;
+        }
         entry->vpn = vpn;
         entry->d = d;
         entry->v = v;
         increment_urc(s);
     }
+}
+
+/*
+ * ITLB/UTLB address array 2 (A.2.4): the 16-bit ASID of the entry that
+ * bits 9:8 (ITLB) or 13:8 (UTLB) select. Only indexed access is
+ * documented; Linux (tlb-pteaex.c) also writes it with bit 7 set, as an
+ * associative write would be, after an associative write to address
+ * array 1 that already compared against PTEAEX. That form is logged and
+ * ignored.
+ */
+static tlb_t *addr2_entry(CPUSH4State *s, hwaddr addr, bool utlb)
+{
+    return utlb ? &s->utlb[(addr >> 8) & 0x3f] : &s->itlb[(addr >> 8) & 3];
+}
+
+uint32_t cpu_sh4_read_mmaped_tlb_addr2(CPUSH4State *s, hwaddr addr,
+                                       bool utlb)
+{
+    if (!aex_mode(s)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "sh4: TLB address array 2 read"
+                      " without MMUCR.AEX (operation not guaranteed)\n");
+        return 0;
+    }
+    return addr2_entry(s, addr, utlb)->asid;
+}
+
+void cpu_sh4_write_mmaped_tlb_addr2(CPUSH4State *s, hwaddr addr,
+                                    uint32_t mem_value, bool utlb)
+{
+    tlb_t *entry;
+
+    if (!aex_mode(s)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "sh4: TLB address array 2 write"
+                      " without MMUCR.AEX (operation not guaranteed)\n");
+        return;
+    }
+    if (addr & 0x80) {
+        qemu_log_mask(LOG_GUEST_ERROR, "sh4: TLB address array 2 write"
+                      " with bit 7 set (undocumented), ignored\n");
+        return;
+    }
+    entry = addr2_entry(s, addr, utlb);
+    if (entry->v) {
+        flush_tlb_entry(s, entry);
+    }
+    entry->asid = mem_value & 0xffff;
 }
 
 uint32_t cpu_sh4_read_mmaped_utlb_data(CPUSH4State *s,

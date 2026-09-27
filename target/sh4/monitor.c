@@ -30,7 +30,7 @@
 static void print_tlb(MonitorHMP *hmp, int idx, tlb_t *tlb)
 {
     monitor_hmp_printf(hmp, " tlb%i:\t"
-                       "asid=%hhu vpn=%x\tppn=%x\tsz=%hhu size=%u\t"
+                       "asid=%hu vpn=%x\tppn=%x\tsz=%hhu size=%u\t"
                        "v=%hhu shared=%hhu cached=%hhu prot=%hhu "
                        "dirty=%hhu writethrough=%hhu\n",
                        idx,
