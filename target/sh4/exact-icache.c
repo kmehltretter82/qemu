@@ -25,8 +25,15 @@
  * TLB. The model keeps every RAM page protected (tcg_exact_store_watch),
  * so every store takes the slow path.
  *
- * The data side is not modelled: a store is assumed to reach memory at
- * once, as if the operand cache were write-through.
+ * With -global superh-cpu.x-exact-dcache=on the operand cache is modelled
+ * too, as far as instruction fetches depend on it: the instruction cache
+ * fills from memory, so code stored through a copy-back mapping must be
+ * written back (OCBWB, OCBP, or an OC address array write) before it runs.
+ * Bytes stored through a copy-back mapping stay dirty until then, and a
+ * fetch of dirty bytes is reported. OCBI and CCR.OCI discard the line on
+ * silicon; the model just forgets it. Without x-exact-dcache a store is
+ * assumed to reach memory at once, as if the operand cache were
+ * write-through.
  */
 
 #include "qemu/osdep.h"
@@ -39,6 +46,7 @@
 #include "accel/tcg/cpu-ops.h"
 #include "accel/tcg/cpu-loop.h"
 #include "accel/tcg/probe.h"
+#include "exec/tlb-flags.h"
 #include "accel/tcg/cpu-mmu-index.h"
 #include "tcg/insn-start-words.h"
 #include "system/memory.h"
@@ -54,6 +62,7 @@
 #define IC_INDEXES  128         /* address bits [11:5] */
 
 bool sh4_exact_icache;
+bool sh4_exact_dcache;
 
 typedef struct IcLine {
     uint64_t line;              /* RAM address / IC_LINE */
@@ -68,10 +77,19 @@ static GHashTable *ic_lines;            /* line -> IcLine */
 static GHashTable *ic_present[IC_INDEXES]; /* line -> IcLine, present ones */
 static GHashTable *ic_sites;            /* reported (fetch pc, writer pc) */
 static bool ic_enabled;                 /* CCR.ICE */
+static uint32_t ic_ccr;                 /* CCR as last written */
+
+/* exact-dcache: per line of RAM, bytes dirty in the operand cache */
+static uint32_t *dc_dirty;
+static uint32_t *dc_writer;             /* PC of the store that dirtied it */
+static uint64_t dc_lines;
+static GHashTable *dc_set[IC_INDEXES];  /* dirty lines, by index */
 
 static struct {
     uint64_t fetches, cached_fetches, stores, changes;
     uint64_t icbi, ici, index_inval, assoc_inval, stale, stale_sites;
+    uint64_t dc_stores, dc_dirtied, dc_ops, dc_index, dc_assoc, dc_oci;
+    uint64_t dc_fetch, dc_sites;
 } ic_stat;
 
 #define IC_MAX_REPORTS 200
@@ -159,6 +177,49 @@ static void ic_report(CPUState *cs, IcLine *l, vaddr pc, ram_addr_t ra,
                   mask, first, oldw, neww);
 }
 
+static void dc_clean(uint64_t line)
+{
+    if (line < dc_lines && dc_dirty[line]) {
+        dc_dirty[line] = 0;
+        g_hash_table_remove(dc_set[ic_index(line)], &line);
+    }
+}
+
+static void dc_clean_index(unsigned idx)
+{
+    GHashTableIter it;
+    gpointer k;
+
+    g_hash_table_iter_init(&it, dc_set[idx]);
+    while (g_hash_table_iter_next(&it, &k, NULL)) {
+        dc_dirty[*(uint64_t *)k] = 0;
+        g_hash_table_iter_remove(&it);
+    }
+}
+
+static void dc_report(CPUState *cs, uint64_t line, vaddr pc, uint32_t mask)
+{
+    CPUSH4State *env = cpu_env(cs);
+    uint64_t key = ((uint64_t)dc_writer[line] << 32) | (uint32_t)pc | 1;
+
+    ic_stat.dc_fetch++;
+    if (g_hash_table_contains(ic_sites, &key)) {
+        return;
+    }
+    g_hash_table_add(ic_sites, g_memdup2(&key, sizeof(key)));
+    if (++ic_stat.dc_sites > IC_MAX_REPORTS) {
+        return;
+    }
+    qemu_log_mask(LOG_EXACT,
+                  "exact-dcache: code at ram 0x%" PRIx64 " executed at pc"
+                  " 0x%08" VADDR_PRIx " (pr 0x%08x) is still dirty in the"
+                  " operand cache\n"
+                  "  bytes 0x%08x of the line, first dirtied by a store at"
+                  " pc 0x%08x, never written back\n",
+                  (uint64_t)(line * IC_LINE), pc, env->pr, mask,
+                  dc_writer[line]);
+}
+
 static bool ic_cacheable(vaddr pc)
 {
     /* P2 is uncached in both address modes as Linux sets up the PMB */
@@ -182,6 +243,14 @@ void sh4_exact_icache_fetch(CPUState *cs, vaddr pc, uint64_t ra,
         uint64_t next = MIN((line + 1) * IC_LINE, end);
         IcLine *l = ic_line(line, cached);
 
+        if (sh4_exact_dcache && line < dc_lines && dc_dirty[line]) {
+            uint32_t lo = a % IC_LINE, n = next - a;
+            uint32_t mask = (n == 32 ? ~0u : ((1u << n) - 1)) << lo;
+
+            if (dc_dirty[line] & mask) {
+                dc_report(cs, line, pc + (a - ra), dc_dirty[line] & mask);
+            }
+        }
         if (l && l->present && cached) {
             uint32_t lo = a % IC_LINE, n = next - a;
             uint32_t mask = (n == 32 ? ~0u : ((1u << n) - 1)) << lo;
@@ -208,16 +277,38 @@ void sh4_exact_store(CPUState *cs, vaddr addr, uint64_t ra, unsigned size,
 {
     uint64_t end = ra + size;
 
+    int mode = 0;
+
     if (!sh4_exact_icache) {
         return;
     }
     ic_stat.stores++;
+    if (sh4_exact_dcache) {
+        mode = sh4_data_cache_mode(cpu_env(cs), addr, ic_ccr);
+        ic_stat.dc_stores += mode == 2;
+    }
 
     for (uint64_t a = ra; a < end; ) {
         uint64_t line = a / IC_LINE;
         uint64_t next = MIN((line + 1) * IC_LINE, end);
         IcLine *l = g_hash_table_lookup(ic_present[ic_index(line)], &line);
 
+        if (mode == 2 && line < dc_lines) {
+            uint32_t lo = a % IC_LINE, n = next - a;
+
+            if (!dc_dirty[line]) {
+                uint64_t data[INSN_START_WORDS];
+
+                ic_stat.dc_dirtied++;
+                dc_writer[line] = cpu_env(cs)->pc;
+                if (retaddr && cpu_unwind_state_data(cs, retaddr, data)) {
+                    dc_writer[line] = data[0];
+                }
+                g_hash_table_add(dc_set[ic_index(line)],
+                                 g_memdup2(&line, sizeof(line)));
+            }
+            dc_dirty[line] |= ((1u << n) - 1) << lo;
+        }
         if (l) {
             uint32_t lo = a % IC_LINE, n = next - a;
             uint32_t mask = ((1u << n) - 1) << lo;
@@ -275,6 +366,13 @@ void sh4_exact_ccr_write(uint32_t ccr)
         return;
     }
     ic_enabled = ccr & (1 << 8);
+    ic_ccr = ccr & ~((1 << 11) | (1 << 3));
+    if (sh4_exact_dcache && (ccr & (1 << 3))) {
+        ic_stat.dc_oci++;
+        for (int i = 0; i < IC_INDEXES; i++) {
+            dc_clean_index(i);
+        }
+    }
     if (ccr & (1 << 11)) {
         ic_stat.ici++;
         for (int i = 0; i < IC_INDEXES; i++) {
@@ -341,6 +439,57 @@ void sh4_exact_ic_array_write(uint32_t off, uint32_t val)
     }
 }
 
+/* OCBWB, OCBP (@writeback) and OCBI @Rn */
+void sh4_exact_oc_op(CPUSH4State *env, uint32_t vaddr, bool writeback,
+                     uintptr_t retaddr)
+{
+    CPUState *cs = env_cpu(env);
+    void *host = NULL;
+    ram_addr_t ra;
+
+    if (!sh4_exact_dcache) {
+        return;
+    }
+    ic_stat.dc_ops++;
+    if (probe_access_flags(env, vaddr, 1, MMU_DATA_LOAD,
+                           cpu_mmu_index(cs, false), true, &host,
+                           retaddr) & TLB_INVALID_MASK || !host) {
+        return;
+    }
+    ra = qemu_ram_addr_from_host(host);
+    if (ra != RAM_ADDR_INVALID) {
+        dc_clean(ra / IC_LINE);
+    }
+}
+
+/*
+ * A write to the OC address array, H'F400 0000 - H'F4FF FFFF. A
+ * non-associative write replaces the entry the index and way select,
+ * writing it back first if it is dirty, so every dirty line at that index
+ * is taken as clean. An associative write (bit 3) that hits writes the
+ * line back when it clears U or V.
+ */
+void sh4_exact_oc_array_write(uint32_t off, uint32_t val)
+{
+    if (!sh4_exact_dcache) {
+        return;
+    }
+    if (off & 8) {
+        ram_addr_t ra;
+
+        ic_stat.dc_assoc++;
+        if ((val & 3) != 3 &&
+            ic_ram_addr((val & 0x1ffffc00) | (off & 0x3e0), &ra)) {
+            dc_clean(ra / IC_LINE);
+        }
+    } else {
+        ic_stat.dc_index++;
+        dc_clean_index((off >> 5) % IC_INDEXES);
+    }
+}
+
+static unsigned dc_count(void);
+
 static void ic_exit_notify(Notifier *n, void *data)
 {
     qemu_log_mask(LOG_EXACT,
@@ -355,12 +504,38 @@ static void ic_exit_notify(Notifier *n, void *data)
                   ic_stat.index_inval, ic_stat.assoc_inval,
                   g_hash_table_size(ic_lines), ic_stat.stale,
                   ic_stat.stale_sites);
+    if (sh4_exact_dcache) {
+        qemu_log_mask(LOG_EXACT,
+                      "exact-dcache: %" PRIu64 " copy-back stores, %" PRIu64
+                      " lines dirtied; write-backs: %" PRIu64 " ocb ops, %"
+                      PRIu64 " index, %" PRIu64 " associative, %" PRIu64
+                      " oci; %u lines dirty at exit, %" PRIu64
+                      " dirty fetches at %" PRIu64 " sites\n",
+                      ic_stat.dc_stores, ic_stat.dc_dirtied, ic_stat.dc_ops,
+                      ic_stat.dc_index, ic_stat.dc_assoc, ic_stat.dc_oci,
+                      dc_count(), ic_stat.dc_fetch, ic_stat.dc_sites);
+    }
+}
+
+static unsigned dc_count(void)
+{
+    unsigned n = 0;
+
+    for (int i = 0; i < IC_INDEXES; i++) {
+        n += g_hash_table_size(dc_set[i]);
+    }
+    return n;
 }
 
 static Notifier ic_exit_notifier = { .notify = ic_exit_notify };
 
 static int ic_ram_block_cb(RAMBlock *rb, void *opaque)
 {
+    ram_addr_t end = qemu_ram_get_offset(rb) + qemu_ram_get_used_length(rb);
+
+    if (end / IC_LINE > dc_lines) {
+        dc_lines = end / IC_LINE;
+    }
     /*
      * Clear the code client's dirty bits: every TLB entry for these pages
      * gets TLB_NOTDIRTY, and tlb_unprotect_code() leaves them that way.
@@ -374,10 +549,30 @@ static int ic_ram_block_cb(RAMBlock *rb, void *opaque)
 static void ic_machine_done(Notifier *n, void *opaque)
 {
     qemu_ram_foreach_block(ic_ram_block_cb, NULL);
+    if (sh4_exact_dcache) {
+        /* calloc'd: only lines that are stored to cost memory */
+        dc_dirty = g_malloc0_n(dc_lines, sizeof(*dc_dirty));
+        dc_writer = g_malloc0_n(dc_lines, sizeof(*dc_writer));
+    } else {
+        dc_lines = 0;
+    }
     qemu_log_mask(LOG_EXACT, "exact-icache: on, every store to RAM watched\n");
 }
 
 static Notifier ic_machine_done_notifier = { .notify = ic_machine_done };
+
+void sh4_exact_dcache_init(void)
+{
+    sh4_exact_icache_init();
+    if (sh4_exact_dcache) {
+        return;
+    }
+    sh4_exact_dcache = true;
+    for (int i = 0; i < IC_INDEXES; i++) {
+        dc_set[i] = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                          g_free, NULL);
+    }
+}
 
 void sh4_exact_icache_init(void)
 {

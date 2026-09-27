@@ -275,6 +275,9 @@ static void superh_cpu_realizefn(DeviceState *dev, Error **errp)
     if (SUPERH_CPU(dev)->prop_exact_icache) {
         sh4_exact_icache_init();
     }
+    if (SUPERH_CPU(dev)->prop_exact_dcache) {
+        sh4_exact_dcache_init();
+    }
 #endif
 
     qemu_init_vcpu(cs);
@@ -332,6 +335,7 @@ static const TCGCPUOps superh_tcg_ops = {
 #ifndef CONFIG_USER_ONLY
 static const Property superh_cpu_properties[] = {
     DEFINE_PROP_BOOL("x-exact-icache", SuperHCPU, prop_exact_icache, false),
+    DEFINE_PROP_BOOL("x-exact-dcache", SuperHCPU, prop_exact_dcache, false),
 };
 #endif
 

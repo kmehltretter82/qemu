@@ -11,6 +11,7 @@ DEF_HELPER_3(movcal, void, env, i32, i32)
 DEF_HELPER_1(discard_movcal_backup, void, env)
 DEF_HELPER_2(ocbi, void, env, i32)
 DEF_HELPER_2(icbi, void, env, i32)
+DEF_HELPER_2(ocbwb, void, env, i32)
 
 DEF_HELPER_3(macl, void, env, s32, s32)
 DEF_HELPER_3(macw, void, env, s32, s32)

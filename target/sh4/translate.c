@@ -1571,6 +1571,11 @@ static void _decode_opc(DisasContext * ctx)
         /* These instructions are supposed to do nothing in case of
            a cache miss. Given that we only partially emulate caches
            it is safe to simply ignore them. */
+#ifndef CONFIG_USER_ONLY
+        if (sh4_exact_dcache) {
+            gen_helper_ocbwb(tcg_env, REG(B11_8));
+        }
+#endif
         return;
     case 0x0083: /* pref @Rn */
         return;

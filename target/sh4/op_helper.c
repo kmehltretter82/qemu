@@ -142,8 +142,18 @@ void helper_icbi(CPUSH4State *env, uint32_t address)
 #endif
 }
 
+void helper_ocbwb(CPUSH4State *env, uint32_t address)
+{
+#ifndef CONFIG_USER_ONLY
+    sh4_exact_oc_op(env, address, true, GETPC());
+#endif
+}
+
 void helper_ocbi(CPUSH4State *env, uint32_t address)
 {
+#ifndef CONFIG_USER_ONLY
+    sh4_exact_oc_op(env, address, false, GETPC());
+#endif
     unsigned mmu_idx = cpu_mmu_index(env_cpu(env), false);
     MemOpIdx oi = make_memop_idx(MO_TE | MO_UL | MO_UNALN, mmu_idx);
     memory_content **current = &(env->movcal_backup);

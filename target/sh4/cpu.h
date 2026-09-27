@@ -240,6 +240,7 @@ struct ArchCPU {
     CPUSH4State env;
 
     bool prop_exact_icache;
+    bool prop_exact_dcache;
 };
 
 /**
@@ -312,6 +313,12 @@ void sh4_exact_store(CPUState *cs, vaddr addr, uint64_t ra, unsigned size,
 void sh4_exact_icbi(CPUSH4State *env, uint32_t vaddr, uintptr_t retaddr);
 void sh4_exact_ccr_write(uint32_t ccr);
 void sh4_exact_ic_array_write(uint32_t off, uint32_t val);
+extern bool sh4_exact_dcache;
+void sh4_exact_dcache_init(void);
+void sh4_exact_oc_op(CPUSH4State *env, uint32_t vaddr, bool writeback,
+                     uintptr_t retaddr);
+void sh4_exact_oc_array_write(uint32_t off, uint32_t val);
+int sh4_data_cache_mode(CPUSH4State *env, vaddr address, uint32_t ccr);
 
 void cpu_load_tlb(CPUSH4State * env);
 uint32_t cpu_sh4_read_mmaped_pmb_addr(CPUSH4State *s, hwaddr addr);

@@ -270,8 +270,10 @@ static void sh7785_mmct_write(void *opaque, hwaddr addr, uint64_t val,
     case 0x0:
         sh4_exact_ic_array_write(addr, val);
         return;
-    case 0x1:
     case 0x4:
+        sh4_exact_oc_array_write(addr, val);
+        return;
+    case 0x1:
     case 0x5:
         return;
     case 0x2:

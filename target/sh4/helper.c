@@ -655,6 +655,47 @@ static int get_physical_address(CPUSH4State *env, hwaddr* physical,
                            access_type);
 }
 
+/*
+ * exact-dcache: how the operand cache treats a data access to @address,
+ * from the TLB and PMB as they are now and without touching URC. 0 is
+ * uncached, 1 write-through, 2 copy-back. A TLB miss counts as uncached.
+ */
+int sh4_data_cache_mode(CPUSH4State *env, vaddr address, uint32_t ccr)
+{
+    const int oce = 1 << 0, wt = 1 << 1, cb = 1 << 2;
+    int i, use_asid;
+
+    if (!(ccr & oce) || address >= 0xe0000000) {
+        return 0;
+    }
+    if (address >= 0x80000000 && address < 0xc0000000) {
+        if (addr32_mode(env)) {
+            for (i = 0; i < PMB_SIZE; i++) {
+                const pmb_t *e = &env->pmb[i];
+
+                if (e->v && ((address ^ ((uint32_t)e->vpn << 24)) &
+                             ~(vaddr)(pmb_size(e) - 1)) == 0) {
+                    return !e->c ? 0 : e->wt ? 1 : 2;
+                }
+            }
+            return 0;
+        }
+        if (address >= 0xa0000000) {
+            return 0;                   /* P2 */
+        }
+        return ccr & cb ? 2 : 1;        /* P1 */
+    }
+    if (!(env->mmucr & MMUCR_AT)) {
+        return ccr & wt ? 1 : 2;
+    }
+    use_asid = !(env->mmucr & MMUCR_SV) || !(env->sr & (1u << SR_MD));
+    i = find_tlb_entry(env, address, env->utlb, UTLB_SIZE, use_asid);
+    if (i < 0) {
+        return 0;
+    }
+    return !env->utlb[i].c ? 0 : env->utlb[i].wt ? 1 : 2;
+}
+
 hwaddr superh_cpu_get_phys_addr_debug(CPUState *cs, vaddr addr)
 {
     hwaddr physical;

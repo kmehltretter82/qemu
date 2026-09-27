@@ -698,6 +698,8 @@ static void sh7750_mmct_write(void *opaque, hwaddr addr,
         cpu_sh4_write_mmaped_itlb_data(&s->cpu->env, addr, mem_value);
         break;
     case MM_OCACHE_ADDR:
+        sh4_exact_oc_array_write(addr & 0xffffff, mem_value);
+        break;
     case MM_OCACHE_DATA:
         /* do nothing */
         break;
