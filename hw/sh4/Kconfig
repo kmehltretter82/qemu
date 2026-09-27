@@ -37,3 +37,10 @@ config SH7785LCR
     imply E1000_PCI
     imply RTL8139_PCI
     imply IDE_SII3112
+
+config URQUELL
+    bool
+    default y
+    depends on SH4
+    select SH7785
+    select PFLASH_CFI02

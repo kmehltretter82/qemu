@@ -1513,7 +1513,13 @@ static void _decode_opc(DisasContext * ctx)
             TCGLabel *fail = gen_new_label();
             TCGLabel *done = gen_new_label();
 
-            if ((tb_cflags(ctx->base.tb) & CF_PARALLEL)) {
+            /*
+             * With other CPUs in the machine, even when they run in turn,
+             * a store by one of them between MOVLI and MOVCO must make
+             * MOVCO fail, so compare the value like the parallel case.
+             */
+            if ((tb_cflags(ctx->base.tb) & CF_PARALLEL) ||
+                (ctx->features & SH_FEATURE_SMP)) {
                 TCGv tmp;
 
                 tcg_gen_brcond_i32(TCG_COND_NE, REG(B11_8),
@@ -1548,7 +1554,8 @@ static void _decode_opc(DisasContext * ctx)
          * In a parallel context, we must also save the loaded value
          * for use with the cmpxchg that we'll use with movco.l.  */
         CHECK_SH4A
-        if ((tb_cflags(ctx->base.tb) & CF_PARALLEL)) {
+        if ((tb_cflags(ctx->base.tb) & CF_PARALLEL) ||
+            (ctx->features & SH_FEATURE_SMP)) {
             TCGv tmp = tcg_temp_new();
             tcg_gen_mov_i32(tmp, REG(B11_8));
             tcg_gen_qemu_ld_i32(REG(0), REG(B11_8), ctx->memidx,

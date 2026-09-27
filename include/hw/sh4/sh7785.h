@@ -15,6 +15,15 @@ typedef struct SH7785State SH7785State;
 SH7785State *sh7785_init(SuperHCPU *cpu, MemoryRegion *sysmem,
                          uint32_t pclk_hz);
 
+/*
+ * SH7786: the same family with two SH-X3 cores. firmware says whether
+ * something at H'A000 0000 parks a core started at its reset vector.
+ */
+SH7785State *sh7786_init(SuperHCPU **cpus, int ncpus, MemoryRegion *sysmem,
+                         uint32_t pclk_hz, bool firmware);
+/* Power-on state of the SH7786 cores; call after cpu_reset() */
+void sh7786_reset_cores(SH7785State *s);
+
 /* After cpu_reset(): apply the mode-pin selected 32-bit boot state. */
 void sh7785_reset_32bit_boot(SH7785State *s);
 

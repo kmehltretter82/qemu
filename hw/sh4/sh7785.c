@@ -12,6 +12,13 @@
  * power-on reset value, and every access to it is traced, so a guest that
  * relies on real behaviour there shows up in the log.
  *
+ * The SH7786 (SH-X3, two cores; hardware manual REJ09B0501-0100) shares the
+ * CCN, MMU and array code and is set up by sh7786_init(): each core sees its
+ * own CCN registers (CPIDR tells them apart), and C0/C1STBCR with
+ * C0/C1RESETVEC (section 19/20) start and stop the cores. It has no
+ * consolidated register list, so its catch-all registers just hold what
+ * was written, starting at 0.
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
@@ -27,6 +34,7 @@
 #include "hw/sh4/sh.h"
 #include "hw/sh4/sh7785.h"
 #include "hw/intc/sh7785_intc.h"
+#include "hw/intc/sh7786_intc.h"
 #include "hw/pci-host/sh7785_pcic.h"
 #include "hw/timer/tmu012.h"
 #include "system/system.h"
@@ -34,6 +42,8 @@
 #include "target/sh4/cpu.h"
 #include "exec/cputlb.h"
 #include "trace.h"
+#include "hw/core/cpu.h"
+#include "system/cpus.h"
 
 typedef struct {
     uint32_t addr;
@@ -45,15 +55,26 @@ typedef struct {
 
 #include "sh7785_regs.h"
 
+#define SH_MAX_CPUS 2
+
 struct SH7785State {
-    SuperHCPU *cpu;
+    SuperHCPU *cpu;             /* CPU0 */
+    SuperHCPU *cpus[SH_MAX_CPUS];
+    int ncpus;
+    bool sh7786;
     MemoryRegion ccn, ccn_a7;
     MemoryRegion mmct;
     MemoryRegion regfile, regfile_a7;
     MemoryRegion il_ram, ol_ram, u_ram;
+    MemoryRegion cpuctl, cpuctl_a7;
     SH7785IntcState *intc;
+    SH7786IntcState *intc86;
     SH7785PCICState *pcic;
-    uint32_t ccr, qacr[2], ramcr, irmcr;
+    uint32_t ccr[SH_MAX_CPUS], qacr[SH_MAX_CPUS][2];
+    uint32_t ramcr[SH_MAX_CPUS], irmcr[SH_MAX_CPUS];
+    uint32_t stbcr[SH_MAX_CPUS], resetvec[SH_MAX_CPUS];
+    bool firmware;              /* something at H'A000 0000 parks cores */
+    GHashTable *regs86;         /* SH7786 catch-all: address -> value */
     MemoryRegion mmselr_mr;
     uint32_t mmselr;
     void (*mmselr_hook)(void *opaque, int areasel);
@@ -80,9 +101,11 @@ struct SH7785State {
 #define CCN_QACR1   0x3c
 #define CCN_CVR     0x40
 #define CCN_PRR     0x44
+#define CCN_CPIDR   0x48    /* SH7786: number of the core that reads it */
 #define CCN_PASCR   0x70
 #define CCN_RAMCR   0x74
 #define CCN_IRMCR   0x78
+#define CCN_PTEAEX  0x7c    /* SH-X3 16-bit ASID (appendix A of the SH7786) */
 
 /* MMUCR bits that can be written: LRUI, URB, URC, SQMD, SV, ME, TI, AT */
 #define MMUCR_WMASK 0xfcfcff85
@@ -92,11 +115,23 @@ struct SH7785State {
 #define CCR_ICI     (1 << 11)
 #define CCR_OCI     (1 << 3)
 
+/* The core that makes the access: CCN and the arrays are per core */
+static int sh7785_cur(SH7785State *s)
+{
+    for (int i = 0; i < s->ncpus; i++) {
+        if (current_cpu == CPU(s->cpus[i])) {
+            return i;
+        }
+    }
+    return 0;
+}
+
 static uint64_t sh7785_ccn_read(void *opaque, hwaddr addr, unsigned size)
 {
     SH7785State *s = opaque;
-    CPUSH4State *env = &s->cpu->env;
-    SuperHCPUClass *scc = SUPERH_CPU_GET_CLASS(s->cpu);
+    int n = sh7785_cur(s);
+    CPUSH4State *env = &s->cpus[n]->env;
+    SuperHCPUClass *scc = SUPERH_CPU_GET_CLASS(s->cpus[n]);
 
     switch (addr) {
     case CCN_PTEH:
@@ -110,7 +145,7 @@ static uint64_t sh7785_ccn_read(void *opaque, hwaddr addr, unsigned size)
     case CCN_MMUCR:
         return env->mmucr;
     case CCN_CCR:
-        return s->ccr;
+        return s->ccr[n];
     case CCN_TRA:
         return env->tra;
     case CCN_EXPEVT:
@@ -123,7 +158,7 @@ static uint64_t sh7785_ccn_read(void *opaque, hwaddr addr, unsigned size)
         return env->ptea;
     case CCN_QACR0:
     case CCN_QACR1:
-        return s->qacr[(addr - CCN_QACR0) / 4];
+        return s->qacr[n][(addr - CCN_QACR0) / 4];
     case CCN_CVR:
         return scc->cvr;
     case CCN_PRR:
@@ -131,9 +166,19 @@ static uint64_t sh7785_ccn_read(void *opaque, hwaddr addr, unsigned size)
     case CCN_PASCR:
         return env->pascr;
     case CCN_RAMCR:
-        return s->ramcr;
+        return s->ramcr[n];
     case CCN_IRMCR:
-        return s->irmcr;
+        return s->irmcr[n];
+    case CCN_CPIDR:
+        if (s->sh7786) {
+            return n;
+        }
+        break;
+    case CCN_PTEAEX:
+        if (env->features & SH_FEATURE_PTEAEX) {
+            return env->pteaex;
+        }
+        break;
     }
     qemu_log_mask(LOG_UNIMP, "sh7785: read of unknown CCN register "
                   "0x%" HWADDR_PRIx "\n", addr);
@@ -144,14 +189,18 @@ static void sh7785_ccn_write(void *opaque, hwaddr addr, uint64_t val,
                              unsigned size)
 {
     SH7785State *s = opaque;
-    CPUSH4State *env = &s->cpu->env;
+    int n = sh7785_cur(s);
+    CPUSH4State *env = &s->cpus[n]->env;
+    CPUState *cs = CPU(s->cpus[n]);
+    bool aex = (env->features & SH_FEATURE_PTEAEX) &&
+               (env->mmucr & MMUCR_AEX);
     uint32_t old;
 
     switch (addr) {
     case CCN_PTEH:
         /* The softmmu TLB is not tagged with the ASID */
-        if ((env->pteh & 0xff) != (val & 0xff)) {
-            tlb_flush(CPU(s->cpu));
+        if (!aex && (env->pteh & 0xff) != (val & 0xff)) {
+            tlb_flush(cs);
         }
         env->pteh = val;
         return;
@@ -167,16 +216,18 @@ static void sh7785_ccn_write(void *opaque, hwaddr addr, uint64_t val,
         return;
     case CCN_MMUCR:
         old = env->mmucr;
-        env->mmucr = val & MMUCR_WMASK & ~MMUCR_TI;
+        env->mmucr = val & (MMUCR_WMASK |
+            (env->features & SH_FEATURE_PTEAEX ? MMUCR_AEX : 0)) & ~MMUCR_TI;
         if (val & MMUCR_TI) {
             cpu_sh4_invalidate_tlb(env);
-        } else if ((old ^ env->mmucr) & (MMUCR_AT | MMUCR_SV | MMUCR_ME)) {
-            /* Softmmu entries depend on AT, SV and ME */
-            tlb_flush(CPU(s->cpu));
+        } else if ((old ^ env->mmucr) &
+                   (MMUCR_AT | MMUCR_SV | MMUCR_ME | MMUCR_AEX)) {
+            /* Softmmu entries depend on AT, SV, ME and the ASID mode */
+            tlb_flush(cs);
         }
         return;
     case CCN_CCR:
-        s->ccr = val & ~(CCR_ICI | CCR_OCI);
+        s->ccr[n] = val & ~(CCR_ICI | CCR_OCI);
         sh4_exact_ccr_write(val);
         return;
     case CCN_TRA:
@@ -193,17 +244,31 @@ static void sh7785_ccn_write(void *opaque, hwaddr addr, uint64_t val,
         return;
     case CCN_QACR0:
     case CCN_QACR1:
-        s->qacr[(addr - CCN_QACR0) / 4] = val & 0x1c;
+        s->qacr[n][(addr - CCN_QACR0) / 4] = val & 0x1c;
         return;
     case CCN_PASCR:
         cpu_sh4_write_pascr(env, val);
         return;
     case CCN_RAMCR:
-        s->ramcr = val;
+        s->ramcr[n] = val;
         return;
     case CCN_IRMCR:
-        s->irmcr = val & 0x1f;
+        s->irmcr[n] = val & 0x1f;
         return;
+    case CCN_PTEAEX:
+        if (!(env->features & SH_FEATURE_PTEAEX)) {
+            break;
+        }
+        if (aex && (env->pteaex & 0xffff) != (val & 0xffff)) {
+            tlb_flush(cs);
+        }
+        env->pteaex = val & 0xffff;
+        return;
+    case CCN_CPIDR:
+        if (s->sh7786) {
+            return;
+        }
+        break;
     case CCN_PVR:
     case CCN_CVR:
     case CCN_PRR:
@@ -228,7 +293,7 @@ static const MemoryRegionOps sh7785_ccn_ops = {
 static uint64_t sh7785_mmct_read(void *opaque, hwaddr addr, unsigned size)
 {
     SH7785State *s = opaque;
-    CPUSH4State *env = &s->cpu->env;
+    CPUSH4State *env = &s->cpus[sh7785_cur(s)]->env;
 
     switch (addr >> 24) {
     case 0x0: /* IC address array */
@@ -237,6 +302,9 @@ static uint64_t sh7785_mmct_read(void *opaque, hwaddr addr, unsigned size)
     case 0x5: /* OC data array */
         return 0;       /* caches are not modelled */
     case 0x2:
+        if ((addr & 0x00800000) && (env->features & SH_FEATURE_PTEAEX)) {
+            return cpu_sh4_read_mmaped_tlb_addr2(env, addr, false);
+        }
         return cpu_sh4_read_mmaped_itlb_addr(env, addr);
     case 0x3:
         return cpu_sh4_read_mmaped_itlb_data(env, addr);
@@ -246,6 +314,9 @@ static uint64_t sh7785_mmct_read(void *opaque, hwaddr addr, unsigned size)
         }
         if ((addr & 0x00f00000) == 0x00100000) {
             return cpu_sh4_read_mmaped_pmb_addr(env, addr);
+        }
+        if ((addr & 0x00800000) && (env->features & SH_FEATURE_PTEAEX)) {
+            return cpu_sh4_read_mmaped_tlb_addr2(env, addr, true);
         }
         break;
     case 0x7:
@@ -266,7 +337,7 @@ static void sh7785_mmct_write(void *opaque, hwaddr addr, uint64_t val,
                               unsigned size)
 {
     SH7785State *s = opaque;
-    CPUSH4State *env = &s->cpu->env;
+    CPUSH4State *env = &s->cpus[sh7785_cur(s)]->env;
 
     switch (addr >> 24) {
     case 0x0:
@@ -279,6 +350,10 @@ static void sh7785_mmct_write(void *opaque, hwaddr addr, uint64_t val,
     case 0x5:
         return;
     case 0x2:
+        if ((addr & 0x00800000) && (env->features & SH_FEATURE_PTEAEX)) {
+            cpu_sh4_write_mmaped_tlb_addr2(env, addr, val, false);
+            return;
+        }
         cpu_sh4_write_mmaped_itlb_addr(env, addr, val);
         return;
     case 0x3:
@@ -291,6 +366,10 @@ static void sh7785_mmct_write(void *opaque, hwaddr addr, uint64_t val,
         }
         if ((addr & 0x00f00000) == 0x00100000) {
             cpu_sh4_write_mmaped_pmb_addr(env, addr, val);
+            return;
+        }
+        if ((addr & 0x00800000) && (env->features & SH_FEATURE_PTEAEX)) {
+            cpu_sh4_write_mmaped_tlb_addr2(env, addr, val, true);
             return;
         }
         break;
@@ -340,12 +419,42 @@ static int sh7785_reg_find(uint32_t addr)
     return -1;
 }
 
+/* SH7786: no register list to go by, so any register holds its value */
+static uint64_t sh7786_regfile_read(SH7785State *s, uint32_t a, unsigned size)
+{
+    gpointer v = g_hash_table_lookup(s->regs86, GUINT_TO_POINTER(a & ~3));
+    uint32_t val = GPOINTER_TO_UINT(v);
+
+    if (!g_hash_table_contains(s->regs86, GUINT_TO_POINTER(a & ~3))) {
+        qemu_log_mask(LOG_UNIMP, "sh7786: read of unmodelled register "
+                      "0x%08x\n", a);
+    }
+    return extract32(val, (a & 3) * 8, size * 8);
+}
+
+static void sh7786_regfile_write(SH7785State *s, uint32_t a, uint64_t val,
+                                 unsigned size)
+{
+    gpointer key = GUINT_TO_POINTER(a & ~3);
+    uint32_t old = GPOINTER_TO_UINT(g_hash_table_lookup(s->regs86, key));
+
+    qemu_log_mask(LOG_UNIMP, "sh7786: write 0x%" PRIx64 " to unmodelled "
+                  "register 0x%08x\n", val, a);
+    g_hash_table_insert(s->regs86, key, GUINT_TO_POINTER(
+        deposit32(old, (a & 3) * 8, size * 8, val)));
+}
+
 static uint64_t sh7785_regfile_read(void *opaque, hwaddr addr, unsigned size)
 {
     SH7785State *s = opaque;
     uint32_t a = 0xfc000000 + addr;
-    int i = sh7785_reg_find(a);
+    int i;
     uint64_t val;
+
+    if (s->sh7786) {
+        return sh7786_regfile_read(s, a, size);
+    }
+    i = sh7785_reg_find(a);
 
     if (i < 0) {
         qemu_log_mask(LOG_UNIMP, "sh7785: read of unknown register "
@@ -362,9 +471,15 @@ static void sh7785_regfile_write(void *opaque, hwaddr addr, uint64_t val,
 {
     SH7785State *s = opaque;
     uint32_t a = 0xfc000000 + addr;
-    int i = sh7785_reg_find(a);
+    int i;
     unsigned shift;
     uint64_t mask;
+
+    if (s->sh7786) {
+        sh7786_regfile_write(s, a, val, size);
+        return;
+    }
+    i = sh7785_reg_find(a);
 
     if (i < 0) {
         qemu_log_mask(LOG_UNIMP, "sh7785: write of unknown register "
@@ -404,7 +519,14 @@ void sh7785_reset_32bit_boot(SH7785State *s)
 
 void sh7785_set_reg(SH7785State *s, uint32_t addr, uint32_t val)
 {
-    int i = sh7785_reg_find(addr);
+    int i;
+
+    if (s->sh7786) {
+        g_hash_table_insert(s->regs86, GUINT_TO_POINTER(addr & ~3),
+                            GUINT_TO_POINTER(val));
+        return;
+    }
+    i = sh7785_reg_find(addr);
 
     assert(i >= 0);
     s->regvals[i] = val;
@@ -567,6 +689,8 @@ SH7785State *sh7785_init(SuperHCPU *cpu, MemoryRegion *sysmem,
     int i;
 
     s->cpu = cpu;
+    s->cpus[0] = cpu;
+    s->ncpus = 1;
     for (i = 0; i < ARRAY_SIZE(sh7785_regs); i++) {
         s->regvals[i] = sh7785_regs[i].reset;
     }
@@ -628,6 +752,254 @@ SH7785State *sh7785_init(SuperHCPU *cpu, MemoryRegion *sysmem,
         sh7785_scif_init(s, sysmem, i);
     }
     sh7785_pcic_init(s, sysmem);
+    return s;
+}
+
+/*
+ * SH7786 core control, H'FE40 0000 + n * H'1000 (19.3.11, 20.3.6/7):
+ * CnSTBCR at +4 (LTSLP, SLEEP, RESET, MSTP) and CnRESETVEC at +8. A core
+ * in module stop does not run. Clearing MSTP with RESET set power-on
+ * resets the core, which then starts at CnRESETVEC.
+ */
+#define CNSTBCR     0x004
+#define CNRESETVEC  0x008
+#define STBCR_MSTP  (1u << 0)
+#define STBCR_RESET (1u << 1)
+#define STBCR_WMASK 0x80000007
+
+static void sh7786_core_start(CPUState *cs, run_on_cpu_data data)
+{
+    CPUSH4State *env = cpu_env(cs);
+
+    cpu_reset(cs);
+    env->pc = data.host_int;
+    env->mstp = false;
+    cs->halted = 0;
+}
+
+static void sh7786_core_stop(CPUState *cs, run_on_cpu_data data)
+{
+    cpu_env(cs)->mstp = true;
+    cs->halted = 1;
+    cpu_exit(cs);
+}
+
+static uint64_t sh7786_cpuctl_read(void *opaque, hwaddr addr, unsigned size)
+{
+    SH7785State *s = opaque;
+    int n = addr >> 12;
+
+    if (n >= s->ncpus) {
+        return 0;
+    }
+    switch (addr & 0xfff) {
+    case CNSTBCR:
+        return s->stbcr[n];
+    case CNRESETVEC:
+        return s->resetvec[n];
+    }
+    qemu_log_mask(LOG_UNIMP, "sh7786: read of unmodelled CPU control "
+                  "register 0x%08" HWADDR_PRIx "\n", 0xfe400000 + addr);
+    return 0;
+}
+
+static void sh7786_cpuctl_write(void *opaque, hwaddr addr, uint64_t val,
+                                unsigned size)
+{
+    SH7785State *s = opaque;
+    int n = addr >> 12;
+    CPUState *cs;
+    uint32_t old;
+
+    if (n >= s->ncpus) {
+        return;
+    }
+    cs = CPU(s->cpus[n]);
+    switch (addr & 0xfff) {
+    case CNSTBCR:
+        old = s->stbcr[n];
+        s->stbcr[n] = val & STBCR_WMASK;
+        if (!(old & STBCR_MSTP) && (val & STBCR_MSTP)) {
+            async_run_on_cpu(cs, sh7786_core_stop, RUN_ON_CPU_NULL);
+        } else if ((old & STBCR_MSTP) && !(val & STBCR_MSTP)) {
+            if (!(val & STBCR_RESET)) {
+                qemu_log_mask(LOG_UNIMP, "sh7786: core %d leaves module stop"
+                              " without reset, not modelled\n", n);
+            } else if (s->resetvec[n] == 0xa0000000 && !s->firmware) {
+                /*
+                 * Nothing at the boot address to catch the core: firmware
+                 * would park it, so it stays stopped until reset again
+                 * with a vector software has set.
+                 */
+                s->stbcr[n] |= STBCR_MSTP;
+            } else {
+                async_run_on_cpu(cs, sh7786_core_start,
+                                 RUN_ON_CPU_HOST_INT(s->resetvec[n]));
+            }
+        }
+        return;
+    case CNRESETVEC:
+        s->resetvec[n] = val;
+        return;
+    }
+    qemu_log_mask(LOG_UNIMP, "sh7786: write 0x%" PRIx64 " to unmodelled CPU "
+                  "control register 0x%08" HWADDR_PRIx "\n", val,
+                  0xfe400000 + addr);
+}
+
+static const MemoryRegionOps sh7786_cpuctl_ops = {
+    .read = sh7786_cpuctl_read,
+    .write = sh7786_cpuctl_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
+};
+
+/* Power-on state of the cores: CPU0 runs, the others are in module stop */
+void sh7786_reset_cores(SH7785State *s)
+{
+    for (int n = 0; n < s->ncpus; n++) {
+        CPUState *cs = CPU(s->cpus[n]);
+
+        s->resetvec[n] = 0xa0000000;
+        s->stbcr[n] = n ? STBCR_RESET | STBCR_MSTP : 0;
+        cpu_env(cs)->mstp = n != 0;
+        if (n) {
+            cs->halted = 1;
+        }
+    }
+}
+
+static qemu_irq sh7786_irq(SH7785State *s, int n)
+{
+    return qdev_get_gpio_in_named(DEVICE(s->intc86), "onchip", n);
+}
+
+/* Several sources on one INTC input */
+static DeviceState *sh7786_or(qemu_irq out, int lines)
+{
+    DeviceState *or = qdev_new(TYPE_OR_IRQ);
+
+    qdev_prop_set_uint16(or, "num-lines", lines);
+    qdev_realize_and_unref(or, NULL, &error_fatal);
+    qdev_connect_gpio_out(or, 0, out);
+    return or;
+}
+
+/* SCIF0-5 at H'FFEA 0000 + n * H'1 0000; only SCIF0 has four event codes */
+static void sh7786_scif_init(SH7785State *s, MemoryRegion *sysmem, int n)
+{
+    static const int single[6] = {
+        -1, SH7786_IRQ_SCIF1, SH7786_IRQ_SCIF2, SH7786_IRQ_SCIF3,
+        SH7786_IRQ_SCIF4, SH7786_IRQ_SCIF5,
+    };
+    DeviceState *dev = qdev_new(TYPE_SH_SERIAL);
+    SysBusDevice *sb = SYS_BUS_DEVICE(dev);
+    static const char *const names[4] = { "eri", "rxi", "bri", "txi" };
+
+    dev->id = g_strdup_printf("scif%d", n);
+    qdev_prop_set_chr(dev, "chardev", serial_hd(n));
+    qdev_prop_set_uint8(dev, "features",
+                        SH_SERIAL_FEAT_SCIF | SH_SERIAL_FEAT_FIFODATA);
+    sysbus_realize_and_unref(sb, &error_fatal);
+    sh7785_map_sysbus(sysmem, sb, 0, 0xffea0000 + n * 0x10000);
+
+    if (n == 0) {
+        /* ERI H'700, RXI H'720, BRI H'740, TXI H'760 */
+        for (int i = 0; i < 4; i++) {
+            qdev_connect_gpio_out_named(dev, names[i], 0,
+                                        sh7786_irq(s, SH7786_IRQ_SCIF0_0 + i));
+        }
+    } else {
+        DeviceState *or = sh7786_or(sh7786_irq(s, single[n]), 4);
+
+        for (int i = 0; i < 4; i++) {
+            qdev_connect_gpio_out_named(dev, names[i], 0,
+                                        qdev_get_gpio_in(or, i));
+        }
+    }
+}
+
+SH7785State *sh7786_init(SuperHCPU **cpus, int ncpus, MemoryRegion *sysmem,
+                         uint32_t pclk_hz, bool firmware)
+{
+    SH7785State *s = g_new0(SH7785State, 1);
+    DeviceState *intc;
+    SysBusDevice *sb;
+    DeviceState *or;
+
+    assert(ncpus >= 1 && ncpus <= SH_MAX_CPUS);
+    s->sh7786 = true;
+    s->cpu = cpus[0];
+    s->ncpus = ncpus;
+    s->firmware = firmware;
+    for (int i = 0; i < ncpus; i++) {
+        s->cpus[i] = cpus[i];
+        if (ncpus > 1) {
+            cpus[i]->env.features |= SH_FEATURE_SMP;
+        }
+    }
+    s->regs86 = g_hash_table_new(NULL, NULL);
+
+    memory_region_init_io(&s->regfile, NULL, &sh7785_regfile_ops, s,
+                          "sh7786-regs", 64 * MiB);
+    sh7785_alias(sysmem, &s->regfile_a7, "sh7786-regs-a7", &s->regfile,
+                 0xfc000000, -1);
+    memory_region_init_io(&s->ccn, NULL, &sh7785_ccn_ops, s, "sh7786-ccn",
+                          0x100);
+    sh7785_alias(sysmem, &s->ccn_a7, "sh7786-ccn-a7", &s->ccn, 0xff000000, 0);
+    memory_region_init_io(&s->mmct, NULL, &sh7785_mmct_ops, s,
+                          "sh7786-cache-tlb", 128 * MiB);
+    memory_region_add_subregion(sysmem, 0xf0000000, &s->mmct);
+    memory_region_init_io(&s->cpuctl, NULL, &sh7786_cpuctl_ops, s,
+                          "sh7786-cpuctl", 0x1000 * SH_MAX_CPUS);
+    sh7785_alias(sysmem, &s->cpuctl_a7, "sh7786-cpuctl-a7", &s->cpuctl,
+                 0xfe400000, 0);
+
+    /* INTC (section 10) at H'FE41 0000, USERIMASK at H'FE41 1000 */
+    intc = qdev_new(TYPE_SH7786_INTC);
+    for (int i = 0; i < ncpus; i++) {
+        char name[8];
+
+        snprintf(name, sizeof(name), "cpu%d", i);
+        object_property_set_link(OBJECT(intc), name, OBJECT(cpus[i]),
+                                 &error_abort);
+    }
+    sb = SYS_BUS_DEVICE(intc);
+    sysbus_realize_and_unref(sb, &error_fatal);
+    s->intc86 = SH7786_INTC(intc);
+    sh7785_map_sysbus(sysmem, sb, 0, 0xfe410000);
+    sh7785_map_sysbus(sysmem, sb, 1, 0xfe411000);
+    for (int i = 0; i < ncpus; i++) {
+        cpus[i]->env.intc_handle = &s->intc86->handle[i];
+        cpus[i]->env.intc_get_vector = sh7786_intc_get_vector;
+    }
+
+    /*
+     * TMU0-3, three channels each (section 17): TMU0 and TMU1 have an
+     * event code per channel, TMU2 and TMU3 one for all three.
+     */
+    tmu012_init(sysmem, 0xffd80000, TMU012_FEAT_3CHAN, pclk_hz,
+                sh7786_irq(s, SH7786_IRQ_TMU0_0),
+                sh7786_irq(s, SH7786_IRQ_TMU0_1),
+                sh7786_irq(s, SH7786_IRQ_TMU0_2),
+                sh7786_irq(s, SH7786_IRQ_TMU0_3));
+    tmu012_init(sysmem, 0xffda0000, TMU012_FEAT_3CHAN, pclk_hz,
+                sh7786_irq(s, SH7786_IRQ_TMU1_0),
+                sh7786_irq(s, SH7786_IRQ_TMU1_1),
+                sh7786_irq(s, SH7786_IRQ_TMU1_2), NULL);
+    or = sh7786_or(sh7786_irq(s, SH7786_IRQ_TMU2), 3);
+    tmu012_init(sysmem, 0xffdc0000, TMU012_FEAT_3CHAN, pclk_hz,
+                qdev_get_gpio_in(or, 0), qdev_get_gpio_in(or, 1),
+                qdev_get_gpio_in(or, 2), NULL);
+    or = sh7786_or(sh7786_irq(s, SH7786_IRQ_TMU3), 3);
+    tmu012_init(sysmem, 0xffde0000, TMU012_FEAT_3CHAN, pclk_hz,
+                qdev_get_gpio_in(or, 0), qdev_get_gpio_in(or, 1),
+                qdev_get_gpio_in(or, 2), NULL);
+
+    for (int i = 0; i < 6; i++) {
+        sh7786_scif_init(s, sysmem, i);
+    }
     return s;
 }
 

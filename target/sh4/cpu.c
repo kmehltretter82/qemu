@@ -110,7 +110,7 @@ static bool superh_io_recompile_replay_branch(CPUState *cs,
 
 static bool superh_cpu_has_work(CPUState *cs)
 {
-    return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD);
+    return !cpu_env(cs)->mstp && cpu_test_interrupt(cs, CPU_INTERRUPT_HARD);
 }
 #endif /* !CONFIG_USER_ONLY */
 

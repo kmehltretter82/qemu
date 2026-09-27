@@ -6,5 +6,6 @@ sh4_ss.add(when: 'CONFIG_SH7750', if_true: files(
 sh4_ss.add(when: 'CONFIG_R2D', if_true: files('r2d.c'))
 sh4_ss.add(when: 'CONFIG_SH7785', if_true: files('sh7785.c'))
 sh4_ss.add(when: 'CONFIG_SH7785LCR', if_true: files('sh7785lcr.c'))
+sh4_ss.add(when: 'CONFIG_URQUELL', if_true: files('urquell.c'))
 
 hw_arch += {'sh4': sh4_ss}

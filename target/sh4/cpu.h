@@ -149,6 +149,7 @@ enum sh_features {
     SH_FEATURE_SH4A = 1,
     SH_FEATURE_BCR3_AND_BCR4 = 2,
     SH_FEATURE_PTEAEX = 4,      /* SH-X3: 16-bit ASIDs (MMUCR.AEX, PTEAEX) */
+    SH_FEATURE_SMP = 8,         /* more than one CPU shares memory */
 };
 
 typedef struct memory_content {
@@ -224,6 +225,8 @@ typedef struct CPUArchState {
     uint32_t features;
 
     void *intc_handle;
+    /* SH7786: the core is in module stop (CnSTBCR.MSTP), kept over reset */
+    bool mstp;
     /* If set, used instead of sh_intc: INTEVT code to take, or -1 */
     int (*intc_get_vector)(void *opaque, int imask);
     int in_sleep;               /* SR_BL ignored during sleep */
