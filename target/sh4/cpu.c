@@ -239,7 +239,7 @@ static void sh7751r_class_init(ObjectClass *oc, const void *data)
 
     scc->pvr = 0x04050005;
     scc->prr = 0x00000113;
-    scc->cvr = 0x00110000; /* Neutered caches, should be 0x20480000 */
+    scc->cvr = 0x20480000; /* 16 KiB I-cache, 32 KiB O-cache */
 }
 
 static void sh7785_cpu_initfn(Object *obj)
