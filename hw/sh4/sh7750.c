@@ -409,6 +409,7 @@ static void sh7750_mem_writel(void *opaque, hwaddr addr,
         return;
     case SH7750_CCR_A7:
         s->ccr = mem_value;
+        sh4_exact_ccr_write(mem_value);
         return;
     default:
         error_access("long write", addr);
@@ -685,6 +686,8 @@ static void sh7750_mmct_write(void *opaque, hwaddr addr,
 
     switch (MM_REGION_TYPE(addr)) {
     case MM_ICACHE_ADDR:
+        sh4_exact_ic_array_write(addr & 0xffffff, mem_value);
+        break;
     case MM_ICACHE_DATA:
         /* do nothing */
         break;

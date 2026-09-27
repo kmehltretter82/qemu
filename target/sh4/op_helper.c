@@ -135,6 +135,13 @@ void helper_discard_movcal_backup(CPUSH4State *env)
     }
 }
 
+void helper_icbi(CPUSH4State *env, uint32_t address)
+{
+#ifndef CONFIG_USER_ONLY
+    sh4_exact_icbi(env, address, GETPC());
+#endif
+}
+
 void helper_ocbi(CPUSH4State *env, uint32_t address)
 {
     unsigned mmu_idx = cpu_mmu_index(env_cpu(env), false);

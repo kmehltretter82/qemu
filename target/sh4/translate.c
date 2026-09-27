@@ -1579,6 +1579,11 @@ static void _decode_opc(DisasContext * ctx)
         return;
     case 0x00e3: /* icbi @Rn */
         CHECK_SH4A
+#ifndef CONFIG_USER_ONLY
+        if (sh4_exact_icache) {
+            gen_helper_icbi(tcg_env, REG(B11_8));
+        }
+#endif
         return;
     case 0x00ab: /* synco */
         CHECK_SH4A

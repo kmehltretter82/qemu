@@ -175,6 +175,7 @@ static void sh7785_ccn_write(void *opaque, hwaddr addr, uint64_t val,
         return;
     case CCN_CCR:
         s->ccr = val & ~(CCR_ICI | CCR_OCI);
+        sh4_exact_ccr_write(val);
         return;
     case CCN_TRA:
         env->tra = val & 0x000003fc;
@@ -267,6 +268,8 @@ static void sh7785_mmct_write(void *opaque, hwaddr addr, uint64_t val,
 
     switch (addr >> 24) {
     case 0x0:
+        sh4_exact_ic_array_write(addr, val);
+        return;
     case 0x1:
     case 0x4:
     case 0x5:

@@ -238,6 +238,8 @@ struct ArchCPU {
     CPUState parent_obj;
 
     CPUSH4State env;
+
+    bool prop_exact_icache;
 };
 
 /**
@@ -299,6 +301,17 @@ void cpu_sh4_write_mmaped_utlb_data(CPUSH4State *s, hwaddr addr,
 #endif
 
 int cpu_sh4_is_cached(CPUSH4State *env, uint32_t addr);
+
+/* exact-icache.c: the incoherent instruction cache model */
+extern bool sh4_exact_icache;
+void sh4_exact_icache_init(void);
+void sh4_exact_icache_fetch(CPUState *cs, vaddr pc, uint64_t ra,
+                            unsigned size);
+void sh4_exact_store(CPUState *cs, vaddr addr, uint64_t ra, unsigned size,
+                     uintptr_t retaddr);
+void sh4_exact_icbi(CPUSH4State *env, uint32_t vaddr, uintptr_t retaddr);
+void sh4_exact_ccr_write(uint32_t ccr);
+void sh4_exact_ic_array_write(uint32_t off, uint32_t val);
 
 void cpu_load_tlb(CPUSH4State * env);
 uint32_t cpu_sh4_read_mmaped_pmb_addr(CPUSH4State *s, hwaddr addr);

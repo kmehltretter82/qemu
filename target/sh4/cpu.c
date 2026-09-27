@@ -24,6 +24,7 @@
 #include "qemu/qemu-print.h"
 #include "cpu.h"
 #include "migration/vmstate.h"
+#include "hw/core/qdev-properties.h"
 #include "exec/translation-block.h"
 #include "fpu/softfloat-helpers.h"
 #include "accel/tcg/cpu-ops.h"
@@ -270,6 +271,12 @@ static void superh_cpu_realizefn(DeviceState *dev, Error **errp)
         return;
     }
 
+#ifndef CONFIG_USER_ONLY
+    if (SUPERH_CPU(dev)->prop_exact_icache) {
+        sh4_exact_icache_init();
+    }
+#endif
+
     qemu_init_vcpu(cs);
 
     scc->parent_realize(dev, errp);
@@ -317,8 +324,16 @@ static const TCGCPUOps superh_tcg_ops = {
     .do_interrupt = superh_cpu_do_interrupt,
     .do_unaligned_access = superh_cpu_do_unaligned_access,
     .io_recompile_replay_branch = superh_io_recompile_replay_branch,
+    .icache_fetch = sh4_exact_icache_fetch,
+    .exact_store = sh4_exact_store,
 #endif /* !CONFIG_USER_ONLY */
 };
+
+#ifndef CONFIG_USER_ONLY
+static const Property superh_cpu_properties[] = {
+    DEFINE_PROP_BOOL("x-exact-icache", SuperHCPU, prop_exact_icache, false),
+};
+#endif
 
 static void superh_cpu_class_init(ObjectClass *oc, const void *data)
 {
@@ -342,6 +357,7 @@ static void superh_cpu_class_init(ObjectClass *oc, const void *data)
 #ifndef CONFIG_USER_ONLY
     cc->sysemu_ops = &sh4_sysemu_ops;
     dc->vmsd = &vmstate_sh_cpu;
+    device_class_set_props(dc, superh_cpu_properties);
 #endif
     cc->disas_set_info = superh_cpu_disas_set_info;
 
