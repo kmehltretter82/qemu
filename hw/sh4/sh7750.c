@@ -408,7 +408,8 @@ static void sh7750_mem_writel(void *opaque, hwaddr addr,
         s->cpu->env.intevt = mem_value & 0x000007ff;
         return;
     case SH7750_CCR_A7:
-        s->ccr = mem_value;
+        /* ICI (bit 11) and OCI (bit 3) always read as 0 */
+        s->ccr = mem_value & ~((1 << 11) | (1 << 3));
         sh4_exact_ccr_write(mem_value);
         return;
     default:
