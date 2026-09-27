@@ -23,6 +23,9 @@
 #include "accel/tcg/tb-cpu-state.h"
 #include "tcg/tcg-mo.h"
 
+/* Keep every RAM page write protected for the code client (exact models) */
+extern bool tcg_exact_store_watch;
+
 struct TCGCPUOps {
     /**
      * mttcg_supported: multi-threaded TCG is supported
@@ -233,6 +236,27 @@ struct TCGCPUOps {
      * For the current cpu state, adjust @result for possible overflow.
      */
     vaddr (*pointer_wrap)(CPUState *cpu, int mmu_idx, vaddr result, vaddr base);
+    /**
+     * @icache_fetch: notify the target that code is being translated
+     *
+     * Called when a translation block is created, with the guest virtual
+     * address the bytes were fetched from and their RAM address and size.
+     * A target that models an instruction cache which is not coherent
+     * with data stores uses it to learn which lines the instruction side
+     * holds.
+     */
+    void (*icache_fetch)(CPUState *cpu, vaddr pc, uint64_t ram_addr,
+                         unsigned size);
+    /**
+     * @exact_store: notify the target of a store to RAM
+     *
+     * Called from the store slow path, before the store happens, for pages
+     * that are write protected for the code client. With
+     * tcg_exact_store_watch set, every RAM page stays protected, so every
+     * store is seen.
+     */
+    void (*exact_store)(CPUState *cpu, vaddr addr, uint64_t ram_addr,
+                        unsigned size, uintptr_t retaddr);
     /**
      * @do_transaction_failed: Callback for handling failed memory transactions
      * (ie bus faults or external aborts; not MMU faults)

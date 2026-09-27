@@ -521,6 +521,20 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
         return tb;
     }
 
+#ifndef CONFIG_USER_ONLY
+    if (unlikely(cpu->cc->tcg_ops->icache_fetch)) {
+        const TCGCPUOps *ops = cpu->cc->tcg_ops;
+        tb_page_addr_t p0 = tb_page_addr0(tb), p1 = tb_page_addr1(tb);
+        unsigned s0 = p1 == -1 ? tb->size
+                     : TARGET_PAGE_SIZE - (p0 & ~TARGET_PAGE_MASK);
+
+        ops->icache_fetch(cpu, s.pc, p0, s0);
+        if (p1 != -1) {
+            ops->icache_fetch(cpu, s.pc + s0, p1, tb->size - s0);
+        }
+    }
+#endif
+
     /*
      * No explicit memory barrier is required -- tb_link_page() makes the
      * TB visible in a consistent state.

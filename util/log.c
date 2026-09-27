@@ -531,6 +531,8 @@ const QEMULogItem qemu_log_items[] = {
       "include VPU registers in the 'cpu' logging" },
     { LOG_INVALID_MEM, "invalid_mem",
       "log invalid memory accesses" },
+    { LOG_EXACT, "exact",
+      "reports from the exact-* guest cache models" },
     { 0, NULL, NULL },
 };
 
