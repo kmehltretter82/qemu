@@ -156,16 +156,28 @@ static void sh_serial_write(void *opaque, hwaddr offs,
             if (!(val & (1 << 4))) {
                 s->flags &= ~SH_SERIAL_FLAG_BRK;
             }
-            if (!(val & (1 << 1))) {
+            /*
+             * Writing 0 clears RDF only once fewer than the trigger count
+             * of bytes are left, and DR only once all data has been read
+             * (SH7785 hardware manual, SCFSR). Clearing them with data
+             * still waiting would leave it in the FIFO with no flag set.
+             */
+            if (!(val & (1 << 1)) && s->rx_cnt < s->rtrg) {
                 s->flags &= ~SH_SERIAL_FLAG_RDF;
             }
-            if (!(val & (1 << 0))) {
+            if (!(val & (1 << 0)) && s->rx_cnt == 0) {
                 s->flags &= ~SH_SERIAL_FLAG_DR;
             }
 
-            if (!(val & (1 << 1)) || !(val & (1 << 0))) {
+            if (!(s->flags & (SH_SERIAL_FLAG_RDF | SH_SERIAL_FLAG_DR))) {
                 if (s->rxi) {
                     qemu_set_irq(s->rxi, 0);
+                }
+                /* data below the trigger count: DR after 15 etu */
+                if (s->rx_cnt > 0) {
+                    timer_mod(&s->fifo_timeout_timer,
+                              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                              15 * s->etu);
                 }
             }
             return;
@@ -366,7 +378,11 @@ static void sh_serial_timeout_int(void *opaque)
 {
     SHSerialState *s = opaque;
 
-    s->flags |= SH_SERIAL_FLAG_RDF;
+    /* fewer than the trigger count left and 15 etu without new data */
+    if (s->rx_cnt == 0) {
+        return;
+    }
+    s->flags |= SH_SERIAL_FLAG_DR;
     if (s->scr & (1 << 6) && s->rxi) {
         qemu_set_irq(s->rxi, 1);
     }
