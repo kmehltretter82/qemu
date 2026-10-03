@@ -1566,10 +1566,13 @@ static void create_cpsw_test(const VirtMachineState *vms,
     };
     const char compat[] = "ti,am335x-cpsw\0ti,cpsw";
     const char irq_names[] = "rx_thresh\0rx\0tx\0misc";
-    const uint8_t mac[6] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
+    const uint8_t mac0[6] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
+    const uint8_t mac1[6] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x57 };
     const char *node = "/ethernet@b000000";
-    const char *slave = "/ethernet@b000000/slave@0";
-    const char *fixed_link = "/ethernet@b000000/slave@0/fixed-link";
+    const char *slave0 = "/ethernet@b000000/slave@0";
+    const char *fixed_link0 = "/ethernet@b000000/slave@0/fixed-link";
+    const char *slave1 = "/ethernet@b000000/slave@1";
+    const char *fixed_link1 = "/ethernet@b000000/slave@1/fixed-link";
     DeviceState *dev = qdev_new(TYPE_TI_CPSW_TEST);
     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     MachineState *ms = MACHINE(vms);
@@ -1613,21 +1616,41 @@ static void create_cpsw_test(const VirtMachineState *vms,
     qemu_fdt_setprop_cell(ms->fdt, node, "ale_entries", 1024);
     qemu_fdt_setprop_cell(ms->fdt, node, "bd_ram_size", 0x2000);
     qemu_fdt_setprop_cell(ms->fdt, node, "mac_control", 0x20);
-    qemu_fdt_setprop_cell(ms->fdt, node, "slaves", 1);
+    qemu_fdt_setprop_cell(ms->fdt, node, "slaves",
+                          vms->cpsw_test_dual ? 2 : 1);
     qemu_fdt_setprop_cell(ms->fdt, node, "active_slave", 0);
     qemu_fdt_setprop_cell(ms->fdt, node, "#address-cells", 1);
     qemu_fdt_setprop_cell(ms->fdt, node, "#size-cells", 0);
     qemu_fdt_setprop(ms->fdt, node, "dma-coherent", NULL, 0);
 
-    qemu_fdt_add_subnode(ms->fdt, slave);
-    qemu_fdt_setprop_cell(ms->fdt, slave, "reg", 0);
-    qemu_fdt_setprop_string(ms->fdt, slave, "phy-mode", "mii");
-    qemu_fdt_setprop(ms->fdt, slave, "local-mac-address",
-                     mac, sizeof(mac));
+    qemu_fdt_add_subnode(ms->fdt, slave0);
+    qemu_fdt_setprop_cell(ms->fdt, slave0, "reg", 0);
+    qemu_fdt_setprop_string(ms->fdt, slave0, "phy-mode", "mii");
+    qemu_fdt_setprop(ms->fdt, slave0, "local-mac-address",
+                     mac0, sizeof(mac0));
 
-    qemu_fdt_add_subnode(ms->fdt, fixed_link);
-    qemu_fdt_setprop_cell(ms->fdt, fixed_link, "speed", 100);
-    qemu_fdt_setprop(ms->fdt, fixed_link, "full-duplex", NULL, 0);
+    qemu_fdt_add_subnode(ms->fdt, fixed_link0);
+    qemu_fdt_setprop_cell(ms->fdt, fixed_link0, "speed", 100);
+    qemu_fdt_setprop(ms->fdt, fixed_link0, "full-duplex", NULL, 0);
+
+    if (vms->cpsw_test_dual) {
+        qemu_fdt_setprop_cell(ms->fdt, node, "dual_emac", 1);
+        qemu_fdt_setprop_cell(ms->fdt, slave0,
+                              "dual_emac_res_vlan", 1);
+
+        qemu_fdt_add_subnode(ms->fdt, slave1);
+        qemu_fdt_setprop_cell(ms->fdt, slave1, "reg", 1);
+        qemu_fdt_setprop_string(ms->fdt, slave1, "phy-mode", "mii");
+        qemu_fdt_setprop(ms->fdt, slave1, "local-mac-address",
+                         mac1, sizeof(mac1));
+        qemu_fdt_setprop_cell(ms->fdt, slave1,
+                              "dual_emac_res_vlan", 2);
+
+        qemu_fdt_add_subnode(ms->fdt, fixed_link1);
+        qemu_fdt_setprop_cell(ms->fdt, fixed_link1, "speed", 100);
+        qemu_fdt_setprop(ms->fdt, fixed_link1,
+                         "full-duplex", NULL, 0);
+    }
 }
 
 static void create_rtc(const VirtMachineState *vms)
@@ -3273,7 +3296,7 @@ static void machvirt_init(MachineState *machine)
         create_uart(vms, VIRT_UART1, secure_sysmem, serial_hd(1), true);
     }
 
-    if (vms->cpsw_test) {
+    if (vms->cpsw_test || vms->cpsw_test_dual) {
         create_cpsw_test(vms, sysmem);
     }
 
@@ -3365,6 +3388,20 @@ static void virt_set_cpsw_test(Object *obj, bool value, Error **errp)
     VirtMachineState *vms = VIRT_MACHINE(obj);
 
     vms->cpsw_test = value;
+}
+
+static bool virt_get_cpsw_test_dual(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return vms->cpsw_test_dual;
+}
+
+static void virt_set_cpsw_test_dual(Object *obj, bool value, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    vms->cpsw_test_dual = value;
 }
 
 static void virt_set_secure(Object *obj, bool value, Error **errp)
@@ -4322,6 +4359,11 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
                                    virt_set_cpsw_test);
     object_class_property_set_description(oc, "cpsw-test",
                                           "Enable the minimal CPSW probe-test device");
+    object_class_property_add_bool(oc, "cpsw-test-dual",
+                                   virt_get_cpsw_test_dual,
+                                   virt_set_cpsw_test_dual);
+    object_class_property_set_description(oc, "cpsw-test-dual",
+                                          "Enable the CPSW probe-test device in dual-EMAC mode");
 
     object_class_property_add_bool(oc, "virtualization", virt_get_virt,
                                    virt_set_virt);

@@ -177,6 +177,7 @@ struct VirtMachineState {
     bool ras;
     bool mte;
     bool cpsw_test;
+    bool cpsw_test_dual;
     bool dtb_randomness;
     bool second_ns_uart_present;
     OnOffAuto acpi;

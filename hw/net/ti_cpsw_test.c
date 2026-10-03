@@ -23,6 +23,8 @@
 #define CPSW_ALE_IDVER              0x0d00
 #define CPSW_SLIVER0_MACSTATUS      0x0d88
 #define CPSW_SLIVER0_SOFT_RESET     0x0d8c
+#define CPSW_SLIVER1_MACSTATUS      0x0dc8
+#define CPSW_SLIVER1_SOFT_RESET     0x0dcc
 
 #define CPSW_VERSION_2              0x0019010c
 #define CPSW_ALE_VERSION_1_3        0x00000103
@@ -36,7 +38,8 @@ static bool ti_cpsw_test_is_reset(hwaddr addr)
 {
     return addr == CPSW_SOFT_RESET ||
            addr == CPSW_CPDMA_SOFT_RESET ||
-           addr == CPSW_SLIVER0_SOFT_RESET;
+           addr == CPSW_SLIVER0_SOFT_RESET ||
+           addr == CPSW_SLIVER1_SOFT_RESET;
 }
 
 static uint64_t ti_cpsw_test_main_read(void *opaque, hwaddr addr,
@@ -50,7 +53,8 @@ static uint64_t ti_cpsw_test_main_read(void *opaque, hwaddr addr,
     if (addr == CPSW_ALE_IDVER) {
         return CPSW_ALE_VERSION_1_3;
     }
-    if (addr == CPSW_SLIVER0_MACSTATUS) {
+    if (addr == CPSW_SLIVER0_MACSTATUS ||
+        addr == CPSW_SLIVER1_MACSTATUS) {
         return CPSW_SLIVER_STATUS_IDLE;
     }
     if (ti_cpsw_test_is_reset(addr)) {
