@@ -90,6 +90,7 @@
 #include "hw/virtio/virtio-md-pci.h"
 #include "hw/virtio/virtio-iommu.h"
 #include "hw/char/pl011.h"
+#include "hw/net/ti_cpsw_test.h"
 #include "hw/core/cpu.h"
 #include "hw/cxl/cxl.h"
 #include "hw/cxl/cxl_host.h"
@@ -157,6 +158,10 @@ static void arm_virt_compat_default_set(MachineClass *mc)
 
 /* MMIO region size for SMMUv3 */
 #define SMMU_IO_LEN 0x20000
+
+#define CPSW_TEST_MAIN_BASE 0x0b000000
+#define CPSW_TEST_WR_BASE   0x0b010000
+#define CPSW_TEST_IRQ_BASE  180
 
 /* Addresses and sizes of our components.
  * 0..128MB is space for a flash device so we can run bootrom code such as UEFI.
@@ -1548,6 +1553,81 @@ static void create_uart(const VirtMachineState *vms, int uart,
     }
 
     g_free(nodename);
+}
+
+static void create_cpsw_test(const VirtMachineState *vms,
+                             MemoryRegion *sysmem)
+{
+    static const int irqs[TI_CPSW_TEST_NUM_IRQS] = {
+        CPSW_TEST_IRQ_BASE,
+        CPSW_TEST_IRQ_BASE + 1,
+        CPSW_TEST_IRQ_BASE + 2,
+        CPSW_TEST_IRQ_BASE + 3,
+    };
+    const char compat[] = "ti,am335x-cpsw\0ti,cpsw";
+    const char irq_names[] = "rx_thresh\0rx\0tx\0misc";
+    const uint8_t mac[6] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
+    const char *node = "/ethernet@b000000";
+    const char *slave = "/ethernet@b000000/slave@0";
+    const char *fixed_link = "/ethernet@b000000/slave@0/fixed-link";
+    DeviceState *dev = qdev_new(TYPE_TI_CPSW_TEST);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+    MachineState *ms = MACHINE(vms);
+    int i;
+
+    sysbus_realize_and_unref(sbd, &error_fatal);
+    memory_region_add_subregion(sysmem, CPSW_TEST_MAIN_BASE,
+                                sysbus_mmio_get_region(sbd, 0));
+    memory_region_add_subregion(sysmem, CPSW_TEST_WR_BASE,
+                                sysbus_mmio_get_region(sbd, 1));
+    for (i = 0; i < TI_CPSW_TEST_NUM_IRQS; i++) {
+        sysbus_connect_irq(sbd, i, qdev_get_gpio_in(vms->gic, irqs[i]));
+    }
+
+    qemu_fdt_add_subnode(ms->fdt, node);
+    qemu_fdt_setprop(ms->fdt, node, "compatible", compat, sizeof(compat));
+    qemu_fdt_setprop_sized_cells(ms->fdt, node, "reg",
+                                 2, CPSW_TEST_MAIN_BASE,
+                                 2, TI_CPSW_TEST_MAIN_SIZE,
+                                 2, CPSW_TEST_WR_BASE,
+                                 2, TI_CPSW_TEST_WR_SIZE);
+    /*
+     * RX and TX deliberately name the same non-shared interrupt. CPSW's RX
+     * request succeeds and its TX request then fails with EBUSY, reproducing
+     * the late probe-error path after register_netdev().
+     */
+    qemu_fdt_setprop_cells(ms->fdt, node, "interrupts",
+                           gic_fdt_irq_type_spi(vms), irqs[0],
+                           GIC_FDT_IRQ_FLAGS_LEVEL_HI,
+                           gic_fdt_irq_type_spi(vms), irqs[1],
+                           GIC_FDT_IRQ_FLAGS_LEVEL_HI,
+                           gic_fdt_irq_type_spi(vms), irqs[1],
+                           GIC_FDT_IRQ_FLAGS_LEVEL_HI,
+                           gic_fdt_irq_type_spi(vms), irqs[3],
+                           GIC_FDT_IRQ_FLAGS_LEVEL_HI);
+    qemu_fdt_setprop(ms->fdt, node, "interrupt-names",
+                     irq_names, sizeof(irq_names));
+    qemu_fdt_setprop_cell(ms->fdt, node, "clocks", vms->clock_phandle);
+    qemu_fdt_setprop_string(ms->fdt, node, "clock-names", "fck");
+    qemu_fdt_setprop_cell(ms->fdt, node, "cpdma_channels", 8);
+    qemu_fdt_setprop_cell(ms->fdt, node, "ale_entries", 1024);
+    qemu_fdt_setprop_cell(ms->fdt, node, "bd_ram_size", 0x2000);
+    qemu_fdt_setprop_cell(ms->fdt, node, "mac_control", 0x20);
+    qemu_fdt_setprop_cell(ms->fdt, node, "slaves", 1);
+    qemu_fdt_setprop_cell(ms->fdt, node, "active_slave", 0);
+    qemu_fdt_setprop_cell(ms->fdt, node, "#address-cells", 1);
+    qemu_fdt_setprop_cell(ms->fdt, node, "#size-cells", 0);
+    qemu_fdt_setprop(ms->fdt, node, "dma-coherent", NULL, 0);
+
+    qemu_fdt_add_subnode(ms->fdt, slave);
+    qemu_fdt_setprop_cell(ms->fdt, slave, "reg", 0);
+    qemu_fdt_setprop_string(ms->fdt, slave, "phy-mode", "mii");
+    qemu_fdt_setprop(ms->fdt, slave, "local-mac-address",
+                     mac, sizeof(mac));
+
+    qemu_fdt_add_subnode(ms->fdt, fixed_link);
+    qemu_fdt_setprop_cell(ms->fdt, fixed_link, "speed", 100);
+    qemu_fdt_setprop(ms->fdt, fixed_link, "full-duplex", NULL, 0);
 }
 
 static void create_rtc(const VirtMachineState *vms)
@@ -3193,6 +3273,10 @@ static void machvirt_init(MachineState *machine)
         create_uart(vms, VIRT_UART1, secure_sysmem, serial_hd(1), true);
     }
 
+    if (vms->cpsw_test) {
+        create_cpsw_test(vms, sysmem);
+    }
+
     if (vms->secure) {
         create_secure_ram(vms, secure_sysmem, secure_tag_sysmem);
     }
@@ -3267,6 +3351,20 @@ static bool virt_get_secure(Object *obj, Error **errp)
     VirtMachineState *vms = VIRT_MACHINE(obj);
 
     return vms->secure;
+}
+
+static bool virt_get_cpsw_test(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return vms->cpsw_test;
+}
+
+static void virt_set_cpsw_test(Object *obj, bool value, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    vms->cpsw_test = value;
 }
 
 static void virt_set_secure(Object *obj, bool value, Error **errp)
@@ -4219,6 +4317,11 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
     object_class_property_set_description(oc, "secure",
                                                 "Set on/off to enable/disable the ARM "
                                                 "Security Extensions (TrustZone)");
+
+    object_class_property_add_bool(oc, "cpsw-test", virt_get_cpsw_test,
+                                   virt_set_cpsw_test);
+    object_class_property_set_description(oc, "cpsw-test",
+                                          "Enable the minimal CPSW probe-test device");
 
     object_class_property_add_bool(oc, "virtualization", virt_get_virt,
                                    virt_set_virt);
