@@ -265,6 +265,7 @@ config ZYNQ
     select A9MPCORE
     select ADI_AXI_TEST
     select USB_CI_UDC
+    select VIVANTE_GC_STUB
     select CADENCE # UART
     select PFLASH_CFI02
     select PL310 # cache controller

@@ -178,3 +178,4 @@ system_ss.add(when: 'CONFIG_LASI', if_true: files('lasi.c'))
 
 system_ss.add(when: 'CONFIG_AXIADO_CLK', if_true: files('axiado_clk.c'))
 system_ss.add(when: 'CONFIG_ADI_AXI_TEST', if_true: files('adi-axi-adc.c', 'ad9467.c'))
+system_ss.add(when: 'CONFIG_VIVANTE_GC_STUB', if_true: files('vivante-gc-stub.c'))

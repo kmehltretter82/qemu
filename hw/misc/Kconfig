@@ -268,3 +268,6 @@ source macio/Kconfig
 config ADI_AXI_TEST
     bool
     select SSI
+
+config VIVANTE_GC_STUB
+    bool

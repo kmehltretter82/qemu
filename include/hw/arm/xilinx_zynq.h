@@ -28,6 +28,7 @@ struct ZynqMachineState {
     uint8_t boot_mode;
     bool adi_adc;
     bool usb0_gadget;
+    bool vivante_stub;
     struct arm_boot_info bootinfo;
 };
 
