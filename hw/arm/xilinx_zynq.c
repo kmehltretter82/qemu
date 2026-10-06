@@ -229,6 +229,16 @@ static void zynq_set_vivante_stub(Object *obj, bool value, Error **errp)
     ZYNQ_MACHINE(obj)->vivante_stub = value;
 }
 
+static bool zynq_get_vivante_stub2(Object *obj, Error **errp)
+{
+    return ZYNQ_MACHINE(obj)->vivante_stub2;
+}
+
+static void zynq_set_vivante_stub2(Object *obj, bool value, Error **errp)
+{
+    ZYNQ_MACHINE(obj)->vivante_stub2 = value;
+}
+
 static void ddr_ctrl_init(uint32_t base)
 {
     DeviceState *dev;
@@ -339,6 +349,11 @@ static void zynq_init(MachineState *machine)
     if (zynq_machine->vivante_stub) {
         /* Vivante GC register stub in the PL address range, no interrupt */
         sysbus_create_simple("vivante-gc-stub", 0x54000000, NULL);
+    }
+
+    if (zynq_machine->vivante_stub2) {
+        /* Optional second core for etnaviv component lifecycle tests */
+        sysbus_create_simple("vivante-gc-stub", 0x54010000, NULL);
     }
 
     if (zynq_machine->usb0_gadget) {
@@ -551,6 +566,12 @@ static void zynq_machine_class_init(ObjectClass *oc, const void *data)
     object_class_property_set_description(oc, "vivante-stub",
                                           "Add a Vivante GC register stub "
                                           "at 0x54000000 for etnaviv tests");
+    object_class_property_add_bool(oc, "vivante-stub2",
+                                   zynq_get_vivante_stub2,
+                                   zynq_set_vivante_stub2);
+    object_class_property_set_description(oc, "vivante-stub2",
+                                          "Add a second Vivante GC register "
+                                          "stub at 0x54010000");
     object_class_property_add_bool(oc, "usb0-gadget", zynq_get_usb0_gadget,
                                    zynq_set_usb0_gadget);
     object_class_property_set_description(oc, "usb0-gadget",
