@@ -71,6 +71,13 @@ static void vivante_gc_stub_write(void *opaque, hwaddr addr, uint64_t val,
     }
 }
 
+static void vivante_gc_stub_reset(DeviceState *dev)
+{
+    VivanteGCStubState *s = VIVANTE_GC_STUB(dev);
+
+    s->clock_control = 0;
+}
+
 static const MemoryRegionOps vivante_gc_stub_ops = {
     .read = vivante_gc_stub_read,
     .write = vivante_gc_stub_write,
@@ -98,6 +105,7 @@ static void vivante_gc_stub_class_init(ObjectClass *oc, const void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     device_class_set_props(dc, vivante_gc_stub_props);
+    device_class_set_legacy_reset(dc, vivante_gc_stub_reset);
     dc->desc = "Vivante GC GPU register stub (test only)";
 }
 
